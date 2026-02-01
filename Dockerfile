@@ -15,11 +15,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     ca-certificates \
     ninja-build \
+    autoconf \
+    automake \
+    libtool \
     bison \
     flex \
     # 运行时库开发包
     libpq-dev \
     libhiredis-dev \
+    libssl-dev \
     # 其他依赖
     linux-libc-dev \
     && rm -rf /var/lib/apt/lists/*

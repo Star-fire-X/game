@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     ca-certificates \
     ninja-build \
+    bison \
+    flex \
     # 运行时库开发包
     libpq-dev \
     libhiredis-dev \

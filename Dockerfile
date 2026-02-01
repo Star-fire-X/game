@@ -20,6 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libtool \
     bison \
     flex \
+    python3 \
+    python3-pip \
+    ninja-build \
     # 运行时库开发包
     libpq-dev \
     libhiredis-dev \

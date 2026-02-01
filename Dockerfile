@@ -34,22 +34,7 @@ RUN git clone --depth 1 https://github.com/microsoft/vcpkg.git ${VCPKG_ROOT} && 
     ${VCPKG_ROOT}/bootstrap-vcpkg.sh -disableMetrics
 
 # 安装仅服务端需要的依赖（排除客户端依赖）
-RUN ${VCPKG_ROOT}/vcpkg install \
-    asio \
-    benchmark \
-    entt \
-    flatbuffers \
-    gtest \
-    hiredis \
-    libpqxx \
-    luajit \
-    nlohmann-json \
-    rapidcheck \
-    sol2 \
-    spdlog \
-    tbb \
-    yaml-cpp \
-    --triplet=x64-linux
+RUN ${VCPKG_ROOT}/vcpkg install --triplet=x64-linux
 
 # ============================================================================
 # Stage 2: builder - 编译所有服务可执行文件

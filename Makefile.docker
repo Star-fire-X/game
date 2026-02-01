@@ -1,0 +1,302 @@
+.PHONY: help build build-gateway build-world build-game build-db \
+        up down restart logs ps clean clean-all \
+        scale-game test-build push pull
+
+# 默认配置
+COMPOSE_FILE := docker-compose.yml
+TAG := latest
+REGISTRY :=
+GAME_REPLICAS := 3
+
+help: ## 显示帮助信息
+	@echo "MIR2 Docker 管理命令"
+	@echo "===================="
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+# ============================================================================
+# 构建命令
+# ============================================================================
+
+build: ## 构建所有服务镜像
+	@echo "构建所有服务..."
+	docker compose build
+
+build-gateway: ## 构建 Gateway 服务
+	@echo "构建 Gateway 服务..."
+	docker compose build gateway
+
+build-world: ## 构建 World 服务
+	@echo "构建 World 服务..."
+	docker compose build world
+
+build-game: ## 构建 Game 服务
+	@echo "构建 Game 服务..."
+	docker compose build game
+
+build-db: ## 构建 DB 服务
+	@echo "构建 DB 服务..."
+	docker compose build db
+
+build-no-cache: ## 不使用缓存构建所有服务
+	@echo "不使用缓存构建所有服务..."
+	docker compose build --no-cache
+
+test-build: ## 测试构建（只构建 builder 阶段）
+	@echo "测试构建..."
+	docker build --target builder -t mir2-builder:test .
+
+# ============================================================================
+# 运行命令
+# ============================================================================
+
+up: ## 启动所有服务
+	@echo "启动所有服务..."
+	docker compose up -d
+
+up-verbose: ## 启动所有服务（显示日志）
+	@echo "启动所有服务（前台模式）..."
+	docker compose up
+
+down: ## 停止所有服务
+	@echo "停止所有服务..."
+	docker compose down
+
+restart: ## 重启所有服务
+	@echo "重启所有服务..."
+	docker compose restart
+
+restart-gateway: ## 重启 Gateway 服务
+	@echo "重启 Gateway 服务..."
+	docker compose restart gateway
+
+restart-world: ## 重启 World 服务
+	@echo "重启 World 服务..."
+	docker compose restart world
+
+restart-game: ## 重启 Game 服务
+	@echo "重启 Game 服务..."
+	docker compose restart game
+
+restart-db: ## 重启 DB 服务
+	@echo "重启 DB 服务..."
+	docker compose restart db
+
+# ============================================================================
+# 监控命令
+# ============================================================================
+
+logs: ## 查看所有服务日志
+	docker compose logs -f
+
+logs-gateway: ## 查看 Gateway 日志
+	docker compose logs -f gateway
+
+logs-world: ## 查看 World 日志
+	docker compose logs -f world
+
+logs-game: ## 查看 Game 日志
+	docker compose logs -f game
+
+logs-db: ## 查看 DB 日志
+	docker compose logs -f db
+
+ps: ## 查看服务状态
+	docker compose ps
+
+stats: ## 查看资源使用情况
+	docker stats
+
+top: ## 查看容器进程
+	docker compose top
+
+# ============================================================================
+# 扩展命令
+# ============================================================================
+
+scale-game: ## 扩展 Game 服务（使用 GAME_REPLICAS 变量）
+	@echo "扩展 Game 服务到 $(GAME_REPLICAS) 个实例..."
+	docker compose up -d --scale game=$(GAME_REPLICAS)
+
+scale-game-3: ## 扩展 Game 服务到 3 个实例
+	@$(MAKE) scale-game GAME_REPLICAS=3
+
+scale-game-5: ## 扩展 Game 服务到 5 个实例
+	@$(MAKE) scale-game GAME_REPLICAS=5
+
+# ============================================================================
+# 调试命令
+# ============================================================================
+
+shell-gateway: ## 进入 Gateway 容器 shell
+	docker compose exec gateway /bin/bash
+
+shell-world: ## 进入 World 容器 shell
+	docker compose exec world /bin/bash
+
+shell-game: ## 进入 Game 容器 shell
+	docker compose exec game /bin/bash
+
+shell-db: ## 进入 DB 容器 shell
+	docker compose exec db /bin/bash
+
+shell-postgres: ## 进入 PostgreSQL 容器 shell
+	docker compose exec postgres /bin/bash
+
+shell-redis: ## 进入 Redis 容器 shell
+	docker compose exec redis /bin/sh
+
+psql: ## 连接到 PostgreSQL
+	docker compose exec postgres psql -U mir2 -d mir2
+
+redis-cli: ## 连接到 Redis
+	docker compose exec redis redis-cli
+
+# ============================================================================
+# 清理命令
+# ============================================================================
+
+clean: ## 停止服务并删除容器
+	@echo "停止服务并删除容器..."
+	docker compose down
+
+clean-volumes: ## 停止服务并删除容器和数据卷（危险！）
+	@echo "⚠️  警告：这将删除所有数据！"
+	@read -p "确认删除所有数据？[y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		docker compose down -v; \
+	fi
+
+clean-images: ## 删除所有构建的镜像
+	@echo "删除 MIR2 镜像..."
+	docker images | grep mir2 | awk '{print $$3}' | xargs -r docker rmi -f
+
+clean-all: ## 完全清理（容器、卷、镜像、缓存）
+	@echo "⚠️  警告：这将删除所有容器、数据、镜像和缓存！"
+	@read -p "确认完全清理？[y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		docker compose down -v; \
+		docker images | grep mir2 | awk '{print $$3}' | xargs -r docker rmi -f; \
+		docker builder prune -af; \
+	fi
+
+clean-logs: ## 清理容器日志
+	@echo "清理容器日志..."
+	docker compose exec gateway find /opt/mir2/logs/ -name "*.log" -mtime +7 -delete || true
+	docker compose exec world find /opt/mir2/logs/ -name "*.log" -mtime +7 -delete || true
+	docker compose exec game find /opt/mir2/logs/ -name "*.log" -mtime +7 -delete || true
+	docker compose exec db find /opt/mir2/logs/ -name "*.log" -mtime +7 -delete || true
+
+# ============================================================================
+# 备份和恢复
+# ============================================================================
+
+backup-db: ## 备份 PostgreSQL 数据库
+	@echo "备份数据库..."
+	@mkdir -p backup
+	docker compose exec -T postgres pg_dump -U mir2 mir2 > backup/mir2_backup_$$(date +%Y%m%d_%H%M%S).sql
+	@echo "备份完成: backup/mir2_backup_$$(date +%Y%m%d_%H%M%S).sql"
+
+restore-db: ## 恢复 PostgreSQL 数据库（需要指定 BACKUP_FILE 变量）
+	@if [ -z "$(BACKUP_FILE)" ]; then \
+		echo "错误：请指定 BACKUP_FILE 变量"; \
+		echo "示例: make restore-db BACKUP_FILE=backup/mir2_backup_20260201_120000.sql"; \
+		exit 1; \
+	fi
+	@echo "恢复数据库: $(BACKUP_FILE)"
+	docker compose exec -T postgres psql -U mir2 mir2 < $(BACKUP_FILE)
+	@echo "恢复完成"
+
+backup-volumes: ## 备份所有数据卷
+	@echo "备份数据卷..."
+	@mkdir -p backup
+	docker run --rm -v mir2-cpp_postgres_data:/data -v $$(pwd)/backup:/backup \
+		busybox tar czf /backup/postgres_data_$$(date +%Y%m%d_%H%M%S).tar.gz /data
+	docker run --rm -v mir2-cpp_redis_data:/data -v $$(pwd)/backup:/backup \
+		busybox tar czf /backup/redis_data_$$(date +%Y%m%d_%H%M%S).tar.gz /data
+	@echo "备份完成"
+
+# ============================================================================
+# 镜像仓库命令
+# ============================================================================
+
+push: ## 推送所有镜像到仓库（需要先设置 REGISTRY）
+	@if [ -z "$(REGISTRY)" ]; then \
+		echo "错误：请设置 REGISTRY 变量"; \
+		echo "示例: make push REGISTRY=myregistry.com/mir2"; \
+		exit 1; \
+	fi
+	@echo "推送镜像到 $(REGISTRY)..."
+	docker tag mir2-gateway:$(TAG) $(REGISTRY)/gateway:$(TAG)
+	docker tag mir2-world:$(TAG) $(REGISTRY)/world:$(TAG)
+	docker tag mir2-game:$(TAG) $(REGISTRY)/game:$(TAG)
+	docker tag mir2-db:$(TAG) $(REGISTRY)/db:$(TAG)
+	docker push $(REGISTRY)/gateway:$(TAG)
+	docker push $(REGISTRY)/world:$(TAG)
+	docker push $(REGISTRY)/game:$(TAG)
+	docker push $(REGISTRY)/db:$(TAG)
+
+pull: ## 从仓库拉取所有镜像（需要先设置 REGISTRY）
+	@if [ -z "$(REGISTRY)" ]; then \
+		echo "错误：请设置 REGISTRY 变量"; \
+		exit 1; \
+	fi
+	@echo "从 $(REGISTRY) 拉取镜像..."
+	docker pull $(REGISTRY)/gateway:$(TAG)
+	docker pull $(REGISTRY)/world:$(TAG)
+	docker pull $(REGISTRY)/game:$(TAG)
+	docker pull $(REGISTRY)/db:$(TAG)
+
+# ============================================================================
+# 开发命令
+# ============================================================================
+
+dev-up: ## 启动开发环境（仅数据库）
+	docker compose up -d postgres redis
+
+dev-down: ## 停止开发环境
+	docker compose down postgres redis
+
+# ============================================================================
+# 验证命令
+# ============================================================================
+
+health-check: ## 检查所有服务健康状态
+	@echo "检查服务健康状态..."
+	@docker compose ps
+	@echo ""
+	@echo "PostgreSQL 健康检查:"
+	@docker compose exec postgres pg_isready -U mir2 || echo "❌ PostgreSQL 未就绪"
+	@echo ""
+	@echo "Redis 健康检查:"
+	@docker compose exec redis redis-cli ping || echo "❌ Redis 未就绪"
+	@echo ""
+	@echo "Gateway 端口检查:"
+	@nc -zv localhost 7000 2>&1 | grep succeeded && echo "✓ Gateway 正常" || echo "❌ Gateway 无响应"
+	@echo ""
+	@echo "World 端口检查:"
+	@nc -zv localhost 7100 2>&1 | grep succeeded && echo "✓ World 正常" || echo "❌ World 无响应"
+
+version: ## 显示版本信息
+	@echo "Docker 版本:"
+	@docker --version
+	@echo ""
+	@echo "Docker Compose 版本:"
+	@docker compose version
+	@echo ""
+	@echo "MIR2 镜像:"
+	@docker images | grep mir2 || echo "未找到 MIR2 镜像"
+
+# ============================================================================
+# 快捷命令
+# ============================================================================
+
+rebuild: clean build up ## 重新构建并启动所有服务
+
+reset: clean-volumes build up ## 完全重置（删除数据并重新构建）
+
+quick-start: build up logs ## 快速开始（构建、启动、查看日志）
+
+.DEFAULT_GOAL := help

@@ -1,0 +1,201 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 19,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vcpkg-windows-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "D:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_FEATURE_FLAGS": "manifests",
+        "VCPKG_MANIFEST_MODE": "ON",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    },
+    {
+      "name": "vcpkg-linux-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build-linux",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{HOME}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_FEATURE_FLAGS": "manifests",
+        "VCPKG_MANIFEST_MODE": "ON",
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "vcpkg-wsl-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build-wsl",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "/home/wsluser/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_FEATURE_FLAGS": "manifests",
+        "VCPKG_MANIFEST_MODE": "ON",
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "vcpkg-debug",
+      "displayName": "vcpkg debug",
+      "description": "Configure with vcpkg toolchain (Debug)",
+      "inherits": "vcpkg-windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "vcpkg-release",
+      "displayName": "vcpkg release",
+      "description": "Configure with vcpkg toolchain (Release)",
+      "inherits": "vcpkg-windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "vcpkg-benchmark",
+      "displayName": "vcpkg benchmark",
+      "description": "Configure with vcpkg toolchain (Release + benchmarks)",
+      "inherits": "vcpkg-release",
+      "cacheVariables": {
+        "BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "vcpkg-linux-debug",
+      "displayName": "vcpkg linux debug",
+      "description": "Configure with vcpkg toolchain (Linux Debug)",
+      "inherits": "vcpkg-linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "vcpkg-linux-release",
+      "displayName": "vcpkg linux release",
+      "description": "Configure with vcpkg toolchain (Linux Release)",
+      "inherits": "vcpkg-linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "vcpkg-wsl-debug",
+      "displayName": "vcpkg wsl debug",
+      "description": "Configure with vcpkg toolchain (WSL Debug)",
+      "inherits": "vcpkg-wsl-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "vcpkg-wsl-release",
+      "displayName": "vcpkg wsl release",
+      "description": "Configure with vcpkg toolchain (WSL Release)",
+      "inherits": "vcpkg-wsl-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "local-debug",
+      "displayName": "local debug",
+      "description": "Configure without vcpkg (Debug)",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "local-release",
+      "displayName": "local release",
+      "description": "Configure without vcpkg (Release)",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vcpkg-debug",
+      "configurePreset": "vcpkg-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-release",
+      "configurePreset": "vcpkg-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-benchmark",
+      "configurePreset": "vcpkg-benchmark",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-linux-debug",
+      "configurePreset": "vcpkg-linux-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-linux-release",
+      "configurePreset": "vcpkg-linux-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "vcpkg-wsl-debug",
+      "configurePreset": "vcpkg-wsl-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vcpkg-wsl-release",
+      "configurePreset": "vcpkg-wsl-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "local-debug",
+      "configurePreset": "local-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "local-release",
+      "configurePreset": "local-release",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "vcpkg-debug",
+      "configurePreset": "vcpkg-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-linux-debug",
+      "configurePreset": "vcpkg-linux-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vcpkg-wsl-debug",
+      "configurePreset": "vcpkg-wsl-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "local-debug",
+      "configurePreset": "local-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "legend2",
+  "version": "0.1.0",
+  "description": "Legend of Mir 2 Game Client/Server",
+  "dependencies": [
+    "asio",
+    "benchmark",
+    "entt",
+    "flatbuffers",
+    "gtest",
+    "hiredis",
+    "libpqxx",
+    "luajit",
+    "nlohmann-json",
+    "rapidcheck",
+    "sdl2",
+    "sdl2-image",
+    "sdl2-mixer",
+    "sdl2-ttf",
+    "sol2",
+    "spdlog",
+    "tbb",
+    "yaml-cpp"
+  ]
+}

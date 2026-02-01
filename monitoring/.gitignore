@@ -1,0 +1,23 @@
+# Grafana data
+grafana-data/
+
+# Prometheus data
+prometheus-data/
+
+# Alertmanager data
+alertmanager-data/
+
+# Docker volumes
+*.volume
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

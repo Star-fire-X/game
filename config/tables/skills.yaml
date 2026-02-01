@@ -1,0 +1,550 @@
+skills:
+  # Warrior skills
+  - id: 3
+    name: "攻杀剑术"
+    description: "基础剑法，增加50%伤害"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 7
+    is_passive: false
+    mp_cost: 3
+    cooldown_ms: 800
+    range: 1
+    min_power: 3
+    max_power: 8
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 4
+    name: "刺杀剑术"
+    description: "直线突刺穿透攻击，2-3格范围"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 25
+    is_passive: false
+    mp_cost: 5
+    cooldown_ms: 1000
+    range: 3
+    min_power: 5
+    max_power: 15
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 7
+    name: "半月弯刀"
+    description: "前方3x3范围攻击"
+    skill_type: PHYSICAL
+    target_type: AOE_ENEMY
+    required_class: WARRIOR
+    required_level: 28
+    is_passive: false
+    mp_cost: 8
+    cooldown_ms: 1500
+    range: 1
+    aoe_radius: 1
+    min_power: 4
+    max_power: 12
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 12
+    name: "烈火剑法"
+    description: "火焰强化近战攻击，物理+火焰伤害"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 35
+    is_passive: false
+    mp_cost: 12
+    cooldown_ms: 3000
+    range: 1
+    min_power: 10
+    max_power: 25
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 25
+    name: "莲月剑法"
+    description: "连续攻击两次"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 36
+    is_passive: false
+    mp_cost: 10
+    cooldown_ms: 2000
+    range: 1
+    min_power: 6
+    max_power: 18
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 26
+    name: "开天斩"
+    description: "蓄力强力攻击，伤害翻倍"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 38
+    is_passive: false
+    mp_cost: 15
+    cooldown_ms: 3500
+    range: 1
+    min_power: 12
+    max_power: 30
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 27
+    name: "逐日剑法"
+    description: "远程剑气攻击"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 40
+    is_passive: false
+    mp_cost: 13
+    cooldown_ms: 2000
+    range: 3
+    min_power: 8
+    max_power: 20
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 28
+    name: "野蛮冲撞"
+    description: "冲撞推开敌人"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 30
+    mp_cost: 10
+    cooldown_ms: 2000
+    range: 1
+    min_power: 6
+    max_power: 16
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  # Mage skills
+  - id: 1
+    name: "火球术"
+    description: "发射火球攻击敌人"
+    skill_type: MAGICAL
+    target_type: SINGLE_ENEMY
+    required_class: MAGE
+    required_level: 7
+    is_passive: false
+    mp_cost: 4
+    cooldown_ms: 800
+    range: 7
+    min_power: 6
+    max_power: 12
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 8
+    name: "抗拒火环"
+    description: "推开近身敌人"
+    skill_type: MAGICAL
+    target_type: AOE_ENEMY
+    required_class: MAGE
+    required_level: 12
+    is_passive: false
+    mp_cost: 10
+    cooldown_ms: 3000
+    range: 0
+    min_power: 4
+    max_power: 10
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 11
+    name: "雷电术"
+    description: "召唤雷电攻击单体"
+    skill_type: MAGICAL
+    target_type: SINGLE_ENEMY
+    required_class: MAGE
+    required_level: 19
+    is_passive: false
+    mp_cost: 14
+    cooldown_ms: 1000
+    range: 7
+    min_power: 8
+    max_power: 16
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 23
+    name: "爆裂火焰"
+    description: "范围爆炸火焰攻击"
+    skill_type: MAGICAL
+    target_type: AOE_ENEMY
+    required_class: MAGE
+    required_level: 29
+    is_passive: false
+    mp_cost: 20
+    cooldown_ms: 2000
+    range: 7
+    min_power: 10
+    max_power: 20
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 31
+    name: "魔法盾"
+    description: "吸收伤害的护盾"
+    skill_type: BUFF
+    target_type: SELF
+    required_class: MAGE
+    required_level: 24
+    is_passive: false
+    mp_cost: 15
+    cooldown_ms: 5000
+    range: 0
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 33
+    name: "冰咆哮"
+    description: "寒冰范围伤害"
+    skill_type: MAGICAL
+    target_type: AOE_ENEMY
+    required_class: MAGE
+    required_level: 35
+    is_passive: false
+    mp_cost: 25
+    cooldown_ms: 2500
+    range: 7
+    min_power: 12
+    max_power: 24
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  # Taoist skills
+  - id: 2
+    name: "治愈术"
+    description: "恢复目标生命值"
+    skill_type: HEAL
+    target_type: SINGLE_ALLY
+    required_class: TAOIST
+    required_level: 7
+    is_passive: false
+    mp_cost: 4
+    cooldown_ms: 1000
+    range: 7
+    min_power: 6
+    max_power: 12
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 6
+    name: "施毒术"
+    description: "对敌人施加持续伤害"
+    skill_type: DEBUFF
+    target_type: SINGLE_ENEMY
+    required_class: TAOIST
+    required_level: 14
+    is_passive: false
+    mp_cost: 5
+    cooldown_ms: 1500
+    range: 7
+    min_power: 3
+    max_power: 8
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 15
+    name: "神圣战甲"
+    description: "提升防御力"
+    skill_type: BUFF
+    target_type: AOE_ALLY
+    required_class: TAOIST
+    required_level: 25
+    is_passive: false
+    mp_cost: 5
+    cooldown_ms: 5000
+    range: 0
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 17
+    name: "召唤骷髅"
+    description: "召唤骷髅协助战斗"
+    skill_type: BUFF
+    target_type: SELF
+    required_class: TAOIST
+    required_level: 19
+    is_passive: false
+    mp_cost: 10
+    cooldown_ms: 5000
+    range: 0
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 18
+    name: "隐身术"
+    description: "使自身隐身"
+    skill_type: BUFF
+    target_type: SELF
+    required_class: TAOIST
+    required_level: 20
+    is_passive: false
+    mp_cost: 8
+    cooldown_ms: 3000
+    range: 0
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 29
+    name: "群体治愈"
+    description: "治疗附近友方"
+    skill_type: HEAL
+    target_type: AOE_ALLY
+    required_class: TAOIST
+    required_level: 33
+    is_passive: false
+    mp_cost: 12
+    cooldown_ms: 2000
+    range: 7
+    min_power: 8
+    max_power: 16
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  # 战士扩展技能
+  - id: 25
+    name: "圆月弯刀"
+    description: "大范围弧形斩击"
+    skill_type: PHYSICAL
+    target_type: AOE_ENEMY
+    required_class: WARRIOR
+    required_level: 35
+    is_passive: false
+    mp_cost: 12
+    cooldown_ms: 2000
+    range: 2
+    min_power: 10
+    max_power: 22
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 48
+    name: "抱月刀法"
+    description: "击退敌人的强力斩击"
+    skill_type: PHYSICAL
+    target_type: SINGLE_ENEMY
+    required_class: WARRIOR
+    required_level: 42
+    is_passive: false
+    mp_cost: 15
+    cooldown_ms: 2500
+    range: 1
+    min_power: 12
+    max_power: 28
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 49
+    name: "狮子吼"
+    description: "范围眩晕敌人"
+    skill_type: PHYSICAL
+    target_type: AOE_ENEMY
+    required_class: WARRIOR
+    required_level: 45
+    is_passive: false
+    mp_cost: 20
+    cooldown_ms: 8000
+    range: 3
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 50
+    name: "无极真气"
+    description: "提升攻击力"
+    skill_type: BUFF
+    target_type: SELF
+    required_class: WARRIOR
+    required_level: 48
+    is_passive: false
+    mp_cost: 25
+    cooldown_ms: 60000
+    range: 0
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  # 法师扩展技能
+  - id: 5
+    name: "大火球"
+    description: "强化火球攻击"
+    skill_type: MAGICAL
+    target_type: SINGLE_ENEMY
+    required_class: MAGE
+    required_level: 15
+    is_passive: false
+    mp_cost: 8
+    cooldown_ms: 1000
+    range: 8
+    min_power: 10
+    max_power: 20
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 9
+    name: "火墙"
+    description: "创建持续伤害火焰区域"
+    skill_type: MAGICAL
+    target_type: AOE_GROUND
+    required_class: MAGE
+    required_level: 24
+    is_passive: false
+    mp_cost: 15
+    cooldown_ms: 3000
+    range: 7
+    min_power: 5
+    max_power: 12
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 10
+    name: "疾光电影"
+    description: "直线8格闪电攻击"
+    skill_type: MAGICAL
+    target_type: LINE_ENEMY
+    required_class: MAGE
+    required_level: 26
+    is_passive: false
+    mp_cost: 12
+    cooldown_ms: 1500
+    range: 8
+    min_power: 8
+    max_power: 18
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 22
+    name: "地狱火"
+    description: "十字火焰攻击"
+    skill_type: MAGICAL
+    target_type: AOE_ENEMY
+    required_class: MAGE
+    required_level: 35
+    is_passive: false
+    mp_cost: 18
+    cooldown_ms: 2500
+    range: 5
+    min_power: 12
+    max_power: 25
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 24
+    name: "雷电风暴"
+    description: "范围雷电攻击"
+    skill_type: MAGICAL
+    target_type: AOE_ENEMY
+    required_class: MAGE
+    required_level: 38
+    is_passive: false
+    mp_cost: 22
+    cooldown_ms: 3000
+    range: 6
+    min_power: 15
+    max_power: 30
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  # 道士扩展技能
+  - id: 14
+    name: "幽灵盾"
+    description: "提升魔法防御"
+    skill_type: BUFF
+    target_type: SINGLE_ALLY
+    required_class: TAOIST
+    required_level: 22
+    is_passive: false
+    mp_cost: 8
+    cooldown_ms: 2000
+    range: 7
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 16
+    name: "圣言术"
+    description: "对不死系怪物造成巨大伤害"
+    skill_type: MAGICAL
+    target_type: SINGLE_ENEMY
+    required_class: TAOIST
+    required_level: 25
+    is_passive: false
+    mp_cost: 15
+    cooldown_ms: 3000
+    range: 7
+    min_power: 20
+    max_power: 50
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 19
+    name: "集体隐身"
+    description: "使附近友方隐身"
+    skill_type: BUFF
+    target_type: AOE_ALLY
+    required_class: TAOIST
+    required_level: 28
+    is_passive: false
+    mp_cost: 15
+    cooldown_ms: 5000
+    range: 5
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 21
+    name: "瞬息移动"
+    description: "随机传送到附近位置"
+    skill_type: BUFF
+    target_type: SELF
+    required_class: TAOIST
+    required_level: 30
+    is_passive: false
+    mp_cost: 20
+    cooldown_ms: 10000
+    range: 0
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]
+
+  - id: 30
+    name: "召唤神兽"
+    description: "召唤强力神兽协助战斗"
+    skill_type: BUFF
+    target_type: SELF
+    required_class: TAOIST
+    required_level: 35
+    is_passive: false
+    mp_cost: 25
+    cooldown_ms: 10000
+    range: 0
+    min_power: 0
+    max_power: 0
+    train_level_req: [1, 7, 11, 15]
+    train_points_req: [0, 500, 2000, 5000]

@@ -1,0 +1,21 @@
+maps:
+  - id: 0
+    name: "比奇城"
+    attributes:
+      is_safe_zone: true
+      no_teleport: false
+      min_level: 1
+      max_level: 255
+    fixes:
+      - [100, 100]
+      - [101, 100]
+  - id: 3
+    name: "祖玛阁"
+    attributes:
+      fight_zone: true
+      dark_level: 2
+    fixes:
+      - [329, 332]
+      - [329, 333]
+      - [330, 332]
+      - [330, 333]

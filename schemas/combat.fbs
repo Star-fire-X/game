@@ -1,0 +1,111 @@
+// combat.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table AttackReq {
+  target_id: ulong;
+  target_type: EntityType;
+}
+
+table AttackRsp {
+  code: ErrorCode;
+  attacker_id: ulong;
+  target_id: ulong;
+  damage: int;
+  target_hp: int;
+  target_dead: bool;
+}
+
+table SkillReq {
+  skill_id: uint;
+  target_id: ulong;
+}
+
+// 技能施放结果
+enum SkillResult : ubyte {
+  HIT = 0,
+  MISS = 1,
+  RESISTED = 2,
+  BLOCKED = 3,
+  IMMUNE = 4
+}
+
+table SkillRsp {
+  code: ErrorCode;
+  caster_id: ulong;
+  target_id: ulong;
+  damage: int;
+  healing: int;
+  target_dead: bool;
+  skill_id: uint;
+  result: SkillResult;
+  cooldown_ms: uint;
+}
+
+table Death {
+  entity_id: ulong;
+  entity_type: EntityType;
+  killer_id: ulong;
+  killer_type: EntityType;
+}
+
+table Respawn {
+  entity_id: ulong;
+  entity_type: EntityType;
+  x: int;
+  y: int;
+  hp: int;
+  mp: int;
+}
+
+table BuffAdd {
+  entity_id: ulong;
+  entity_type: EntityType;
+  buff_id: uint;
+  duration_ms: uint;
+  stack_count: ushort;
+}
+
+table BuffRemove {
+  entity_id: ulong;
+  entity_type: EntityType;
+  buff_id: uint;
+}
+
+// 技能特效类型
+enum EffectType : ubyte {
+  NONE = 0,
+  CAST = 1,       // 施法特效(施法者身上)
+  PROJECTILE = 2, // 弹道特效
+  HIT = 3,        // 命中特效(目标身上)
+  AOE = 4         // 范围特效(地面)
+}
+
+// 技能特效通知(服务端->客户端)
+table SkillEffect {
+  caster_id: ulong;
+  target_id: ulong;
+  skill_id: uint;
+  effect_type: EffectType;
+  effect_id: string;      // 特效资源ID
+  sound_id: string;       // 音效资源ID
+  x: int;                 // 特效位置X
+  y: int;                 // 特效位置Y
+  duration_ms: uint;      // 持续时间
+}
+
+// 通用特效播放(服务端->客户端)
+table PlayEffect {
+  effect_id: string;
+  x: int;
+  y: int;
+  direction: ubyte;
+  duration_ms: uint;
+}
+
+// 通用音效播放(服务端->客户端)
+table PlaySound {
+  sound_id: string;
+  x: int;
+  y: int;
+}

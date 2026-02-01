@@ -1,0 +1,32 @@
+{
+  "scripts": [
+    {
+      "id": "merchant_default",
+      "commands": [
+        {"op": "SAY", "text": "Welcome! Take a look at my goods."},
+        {"op": "OPEN_MERCHANT", "store_id": 1001}
+      ]
+    },
+    {
+      "id": "quest_intro",
+      "commands": [
+        {"op": "SAY", "text": "Brave hero, I have a task for you."},
+        {"op": "START_QUEST", "quest_id": 2001}
+      ]
+    },
+    {
+      "id": "teleport_bichi",
+      "commands": [
+        {"op": "SAY", "text": "Teleporting now."},
+        {"op": "TELEPORT", "map_id": 2, "x": 120, "y": 88}
+      ]
+    },
+    {
+      "id": "reward_sample",
+      "commands": [
+        {"op": "GIVE_ITEM", "item_id": 3001, "count": 1},
+        {"op": "TAKE_GOLD", "amount": 500}
+      ]
+    }
+  ]
+}

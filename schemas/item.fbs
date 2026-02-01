@@ -1,0 +1,72 @@
+// item.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table ItemInfo {
+  item_id: uint;
+  count: uint;
+  durability: int;
+}
+
+table PickupItemReq {
+  item_id: uint;
+}
+
+table PickupItemRsp {
+  code: ErrorCode;
+  item_id: uint;
+}
+
+table InventoryItem {
+  slot: ushort;
+  item: ItemInfo;
+}
+
+table InventoryUpdate {
+  items: [InventoryItem];
+}
+
+table UseItemReq {
+  slot: ushort;
+  item_id: uint;
+}
+
+table UseItemRsp {
+  code: ErrorCode;
+  slot: ushort;
+  item_id: uint;
+  remaining: uint;
+}
+
+table DropItemReq {
+  slot: ushort;
+  item_id: uint;
+  count: uint;
+}
+
+table DropItemRsp {
+  code: ErrorCode;
+  item_id: uint;
+  count: uint;
+}
+
+table EquipReq {
+  slot: ushort;
+  item_id: uint;
+}
+
+table UnequipReq {
+  slot: ushort;
+}
+
+table EquipRsp {
+  code: ErrorCode;
+  slot: ushort;
+  item_id: uint;
+}
+
+table UnequipRsp {
+  code: ErrorCode;
+  slot: ushort;
+  item_id: uint;
+}

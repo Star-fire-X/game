@@ -1,0 +1,66 @@
+// login.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table LoginReq {
+  username: string (required);
+  password: string (required);
+  version: string;
+}
+
+table LoginRsp {
+  code: ErrorCode;
+  account_id: ulong;
+  session_token: string;
+}
+
+table CreateRoleReq {
+  name: string (required);
+  profession: Profession;
+  gender: Gender;
+}
+
+table CreateRoleRsp {
+  code: ErrorCode;
+  player_id: ulong;
+}
+
+table SelectRoleReq {
+  player_id: ulong;
+}
+
+table SelectRoleRsp {
+  code: ErrorCode;
+  player_id: ulong;
+}
+
+table LogoutReq {
+  account_id: ulong;
+  session_token: string;
+}
+
+table RoleListReq {
+  account_id: ulong;
+  session_token: string;
+}
+
+table CharacterInfo {
+  player_id: ulong;
+  name: string;
+  profession: Profession;
+  gender: Gender;
+  level: ushort;
+  map_id: uint;
+  x: int;
+  y: int;
+  gold: ulong;
+}
+
+table RoleListRsp {
+  code: ErrorCode;
+  roles: [CharacterInfo];
+}
+
+table RoleUpdate {
+  character: CharacterInfo;
+}

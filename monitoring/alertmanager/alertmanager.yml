@@ -1,0 +1,78 @@
+# Alertmanager Configuration for Legend2 Gateway
+global:
+  resolve_timeout: 5m
+  smtp_from: 'alertmanager@legend2.local'
+  smtp_smarthost: 'localhost:25'
+  smtp_require_tls: false
+
+# Alert routing rules
+route:
+  receiver: 'default-receiver'
+  group_by: ['alertname', 'component', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+
+  routes:
+    # Critical alerts - immediate notification
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      continue: true
+
+    # Warning alerts - grouped notification
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      group_wait: 30s
+      group_interval: 5m
+
+    # Info alerts - less frequent notification
+    - match:
+        severity: info
+      receiver: 'info-receiver'
+      repeat_interval: 24h
+
+# Receiver definitions
+receivers:
+  - name: 'default-receiver'
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook'
+        send_resolved: true
+
+  - name: 'critical-receiver'
+    # Example: Webhook notification
+    webhook_configs:
+      - url: 'http://localhost:5001/critical'
+        send_resolved: true
+    # Example: Email notification (uncomment to use)
+    # email_configs:
+    #   - to: 'ops-team@legend2.local'
+    #     subject: '[CRITICAL] {{ .GroupLabels.alertname }}'
+    #     html: '{{ template "email.default.html" . }}'
+
+  - name: 'warning-receiver'
+    webhook_configs:
+      - url: 'http://localhost:5001/warning'
+        send_resolved: true
+
+  - name: 'info-receiver'
+    webhook_configs:
+      - url: 'http://localhost:5001/info'
+        send_resolved: true
+
+# Inhibition rules (suppress certain alerts when others are active)
+inhibit_rules:
+  # Suppress warning alerts when critical alert is firing
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['component', 'service']
+
+  # Suppress info alerts when warning or critical alerts are firing
+  - source_match_re:
+      severity: 'critical|warning'
+    target_match:
+      severity: 'info'
+    equal: ['component', 'service']

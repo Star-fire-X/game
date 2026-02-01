@@ -1,0 +1,106 @@
+# Docker Compose Development Override
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Features:
+# - All internal ports exposed for debugging
+# - LOG_LEVEL=debug for verbose logging
+# - Health checks disabled for faster startup
+# - Hot-reload volumes for development
+
+version: '3.8'
+
+services:
+  # PostgreSQL - 开发配置
+  postgres:
+    environment:
+      - LOG_LEVEL=debug
+    ports:
+      - "5432:5432"  # 已暴露，保持不变
+    healthcheck:
+      disable: true
+
+  # Redis - 开发配置
+  redis:
+    environment:
+      - LOG_LEVEL=debug
+    ports:
+      - "6379:6379"  # 已暴露，保持不变
+    healthcheck:
+      disable: true
+    command: redis-server --appendonly yes --loglevel debug
+
+  # DB 服务 - 开发配置
+  db:
+    environment:
+      - LOG_LEVEL=debug
+      - MIR2_DB_HOST=postgres
+      - MIR2_DB_PORT=5432
+      - MIR2_DB_NAME=mir2
+      - MIR2_DB_USER=mir2
+      - MIR2_DB_PASSWORD=mir2_password
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    ports:
+      - "7300:7300"  # 已暴露，保持不变
+    depends_on:
+      postgres:
+        condition: service_started  # 移除健康检查依赖
+      redis:
+        condition: service_started  # 移除健康检查依赖
+    healthcheck:
+      disable: true
+    restart: "no"  # 开发环境不自动重启
+
+  # World 服务 - 开发配置
+  world:
+    environment:
+      - LOG_LEVEL=debug
+      - MIR2_DB_SERVICE=db:7300
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    ports:
+      - "7100:7100"  # 已暴露，保持不变
+    depends_on:
+      - db
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  # Game 服务 - 开发配置
+  game:
+    environment:
+      - LOG_LEVEL=debug
+      - MIR2_WORLD_SERVICE=world:7100
+      - MIR2_DB_SERVICE=db:7300
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    ports:
+      - "7200-7210:7200"  # 已暴露，保持不变
+      # 额外暴露调试端口（如果需要）
+      # - "9200-9210:9200"  # GDB remote debugging ports
+    depends_on:
+      - world
+      - db
+    healthcheck:
+      disable: true
+    restart: "no"
+    deploy:
+      replicas: 1
+
+  # Gateway 服务 - 开发配置
+  gateway:
+    environment:
+      - LOG_LEVEL=debug
+      - MIR2_WORLD_SERVICE=world:7100
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    ports:
+      - "7000:7000"  # 已暴露，保持不变
+      # 额外暴露调试端口（如果需要）
+      # - "9000:9000"  # GDB remote debugging port
+    depends_on:
+      - world
+      - game
+    healthcheck:
+      disable: true
+    restart: "no"

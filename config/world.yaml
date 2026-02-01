@@ -1,0 +1,43 @@
+server:
+  id: 2
+  name: "Mir2-World"
+  bind_ip: "0.0.0.0"
+  port: 7001
+  metrics_port: 9091
+  io_threads: 2
+  max_connections: 2000
+  tick_interval_ms: 50
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "mir2"
+  password: "your_password_here"
+  database: "mir2_game"
+  pool_size: 10
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+
+log:
+  level: "info"
+  path: "logs"
+  max_size_mb: 100
+  max_files: 10
+
+services:
+  world:
+    host: "127.0.0.1"
+    port: 7001
+  game:
+    host: "127.0.0.1"
+    port: 7003
+  db:
+    host: "127.0.0.1"
+    port: 7002
+
+ecs:
+  world_registry_reserve: 1000

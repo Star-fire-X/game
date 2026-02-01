@@ -1,0 +1,197 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# IDE files
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.pdb
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Test output
+Testing/
+*.log
+
+# Package files
+*.zip
+*.tar.gz
+*.7z
+
+# vcpkg dependency directories
+vcpkg_installed/
+vcpkg-cache/
+
+# Project-specific debug and export directories
+debug_Prguse/
+debug_export/
+debug_prguse3/
+wil2png_all/
+
+# ============================================================================
+# Game assets - Audio files (DO NOT COMMIT)
+# ============================================================================
+Wav/
+MUSIC/
+# Audio file formats
+*.wav
+*.WAV
+*.mp3
+*.MP3
+*.ogg
+*.OGG
+*.flac
+*.FLAC
+*.aac
+*.AAC
+*.wma
+*.WMA
+*.m4a
+*.M4A
+*.opus
+*.OPUS
+
+# ============================================================================
+# Game assets - Map files (DO NOT COMMIT)
+# ============================================================================
+Map/
+# Map file formats
+*.map
+*.MAP
+*.tmx
+*.TMX
+*.tiled
+*.TILED
+*.json (map data)
+
+# ============================================================================
+# Game assets - Data files (DO NOT COMMIT)
+# ============================================================================
+Data/
+# Data file formats
+*.wil
+*.WIL
+*.wzl
+*.WZL
+*.pak
+*.PAK
+
+# Runtime data files
+*.db
+*.sqlite
+*.sqlite3
+
+# Test results
+test_results.xml
+*.junit
+
+# AI assistant configuration
+.claude/
+.kiro/
+.serena/
+
+# System files
+Thumbs.db
+Desktop.ini
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Additional build artifacts (Visual Studio)
+*.ilk
+*.exp
+*.manifest
+*.iobj
+*.ipdb
+*.pgd
+*.rsp
+*.sbr
+*.vc.db
+*.vc.opendb.vsidx
+
+# ============================================================================
+# Docker related files
+# ============================================================================
+
+# Docker secrets (NEVER commit real passwords!)
+secrets/db_password.txt
+secrets/*.txt
+!secrets/*.example
+
+# Environment variables (contains sensitive data)
+.env
+.env.local
+.env.*.local
+
+# Docker runtime logs
+logs/
+*.log
+
+# Docker volumes data (if mounted locally)
+postgres_data/
+redis_data/
+db_logs/
+world_logs/
+game_logs/
+gateway_logs/
+
+# Docker build cache
+.docker-cache/
+
+# Docker compose override files (personal configurations)
+docker-compose.override.yml
+
+# ============================================================================
+# Development and temporary files
+# ============================================================================
+
+# Codeagent and AI assistant session files
+*.jsonl
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Temporary documentation (keep only final versions)
+*_DRAFT.md
+*_TEMP.md
+
+# Session and cache files
+.cache/
+tmp/
+temp/
+
+# 忽略传奇资源文件
+Data/
+*.wil
+*.wzl
+*.pak
+# 忽略编译产物
+build/
+bin/
+*.exe

@@ -1,0 +1,31 @@
+monsters:
+  - id: 20001
+    name: "Slime"
+    level: 1
+    hp: 50
+    attack: 5
+    defense: 2
+    exp: 10
+    gold: 3
+    race: 10
+    appearance: 0
+  - id: 20002
+    name: "Skeleton Warrior"
+    level: 3
+    hp: 100
+    attack: 12
+    defense: 5
+    exp: 30
+    gold: 10
+    race: 14
+    appearance: 0
+  - id: 20003
+    name: "Deer"
+    level: 2
+    hp: 80
+    attack: 8
+    defense: 3
+    exp: 20
+    gold: 5
+    race: 11
+    appearance: 0

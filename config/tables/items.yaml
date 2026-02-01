@@ -1,0 +1,6 @@
+items:
+  - id: 10001
+    name: "Healing Potion"
+    type: 1
+    stack_limit: 99
+    effect: "heal"

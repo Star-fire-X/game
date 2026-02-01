@@ -1,0 +1,25 @@
+// internal.fbs
+namespace mir2.internal;
+
+enum ServiceType : ubyte {
+  NONE = 0,
+  GATEWAY = 1,
+  WORLD = 2,
+  GAME = 3,
+  DB = 4
+}
+
+table ServiceHello {
+  service: ServiceType;
+}
+
+table ServiceHelloAck {
+  service: ServiceType;
+  ok: bool;
+}
+
+table RoutedMessage {
+  client_id: ulong;
+  msg_id: ushort;
+  payload: [ubyte];
+}

@@ -1,0 +1,13 @@
+events:
+  - event_id: 1
+    name: "Weekend Double EXP"
+    type: "double_exp"
+    duration_seconds: 86400
+    rate: 2.0
+  - event_id: 2
+    name: "Monster Invasion"
+    type: "invasion"
+    duration_seconds: 3600
+    monster_ids: [501, 502, 503]
+    spawn_count: 20
+    spawn_map_id: 3

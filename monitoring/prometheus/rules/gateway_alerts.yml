@@ -1,0 +1,106 @@
+# Prometheus Alert Rules for Legend2 Gateway
+groups:
+  - name: gateway_alerts
+    interval: 30s
+    rules:
+      # Service Connection Failure Alert
+      - alert: HighServiceDisconnectionRate
+        expr: |
+          (
+            rate(gateway_service_disconnected_world[5m]) +
+            rate(gateway_service_disconnected_game[5m]) +
+            rate(gateway_service_disconnected_db[5m])
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "High service disconnection rate detected"
+          description: "Gateway service disconnection rate is {{ $value | humanize }} per second (threshold: 0.05/s)"
+
+      # World Service Connection Failure
+      - alert: WorldServiceConnectionFailure
+        expr: |
+          gateway_service_connected_world /
+          (gateway_service_connected_world + gateway_service_disconnected_world + 0.001) < 0.95
+        for: 3m
+        labels:
+          severity: critical
+          component: gateway
+          service: world
+        annotations:
+          summary: "World service connection rate below 95%"
+          description: "World service connection success rate is {{ $value | humanizePercentage }} (threshold: 95%)"
+
+      # Game Service Connection Failure
+      - alert: GameServiceConnectionFailure
+        expr: |
+          gateway_service_connected_game /
+          (gateway_service_connected_game + gateway_service_disconnected_game + 0.001) < 0.95
+        for: 3m
+        labels:
+          severity: critical
+          component: gateway
+          service: game
+        annotations:
+          summary: "Game service connection rate below 95%"
+          description: "Game service connection success rate is {{ $value | humanizePercentage }} (threshold: 95%)"
+
+      # DB Service Connection Failure
+      - alert: DBServiceConnectionFailure
+        expr: |
+          gateway_service_connected_db /
+          (gateway_service_connected_db + gateway_service_disconnected_db + 0.001) < 0.95
+        for: 3m
+        labels:
+          severity: critical
+          component: gateway
+          service: db
+        annotations:
+          summary: "DB service connection rate below 95%"
+          description: "DB service connection success rate is {{ $value | humanizePercentage }} (threshold: 95%)"
+
+      # High Session Unregister Rate
+      - alert: HighSessionUnregisterRate
+        expr: rate(gateway_session_unregister[1m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "High session unregister rate detected"
+          description: "Session unregister rate is {{ $value | humanize }} per second (threshold: 10/s)"
+
+      # Route Table Size Warning
+      - alert: LargeRouteTableSize
+        expr: gateway_route_table_connection_count > 5000 or gateway_route_table_user_count > 5000
+        for: 5m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "Route table size exceeds threshold"
+          description: "Route table size is abnormally large: Connections={{ $labels.connection_count }}, Users={{ $labels.user_count }}"
+
+      # No Traffic Alert
+      - alert: NoForwardTraffic
+        expr: rate(gateway_forward_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "No message forwarding activity detected"
+          description: "Gateway has not forwarded any messages in the last 5 minutes"
+
+      # Low User Registration Rate (Possible Issue)
+      - alert: LowUserRegistrationRate
+        expr: rate(gateway_user_register[5m]) < 0.01
+        for: 10m
+        labels:
+          severity: info
+          component: gateway
+        annotations:
+          summary: "Very low user registration rate"
+          description: "User registration rate is {{ $value | humanize }} per second, which might indicate a problem"

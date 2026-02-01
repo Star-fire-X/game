@@ -1,0 +1,25 @@
+# Timed event configuration example.
+
+events:
+  - event_id: 1
+    name: "World BOSS Spawn"
+    trigger_type: "daily"
+    hour: 20
+    minute: 0
+    action_type: "boss_spawn"
+    params:
+      boss_id: 1001
+      map_id: 3
+      x: 330
+      y: 330
+  - event_id: 2
+    name: "Double EXP Event"
+    trigger_type: "weekly"
+    day_of_week: 6
+    hour: 18
+    minute: 0
+    action_type: "global_buff"
+    params:
+      buff_type: "exp"
+      rate: 2.0
+      duration: 7200

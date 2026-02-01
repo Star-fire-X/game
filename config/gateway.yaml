@@ -1,0 +1,113 @@
+server:
+  id: 1
+  name: "Mir2-Gateway"
+  bind_ip: "0.0.0.0"
+  port: 7000
+  metrics_port: 9090
+  io_threads: 4
+  max_connections: 5000
+  tick_interval_ms: 50
+  heartbeat_timeout_ms: 30000
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "mir2"
+  password: "your_password_here"
+  database: "mir2_game"
+  pool_size: 10
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+
+log:
+  level: "info"
+  path: "logs"
+  max_size_mb: 100
+  max_files: 10
+
+services:
+  world:
+    host: "127.0.0.1"
+    port: 7001
+  game:
+    host: "127.0.0.1"
+    port: 7003
+  db:
+    host: "127.0.0.1"
+    port: 7002
+
+# 消息路由表：msg_id -> 目标服务
+# require_auth: 是否需要认证后才能转发
+message_routes:
+  # ========== DB 服务（数据库代理）==========
+  # 登录模块
+  - msg_id: 1001  # kLoginReq
+    service: db
+    require_auth: false
+  - msg_id: 1003  # kLogout
+    service: db
+    require_auth: true
+
+  # ========== World 服务（全局逻辑）==========
+  # 角色管理
+  - msg_id: 1010  # kCreateRoleReq
+    service: world
+    require_auth: true
+  - msg_id: 1012  # kSelectRoleReq
+    service: world
+    require_auth: true
+  - msg_id: 1020  # kRoleListReq
+    service: world
+    require_auth: true
+
+  # 社交模块
+  - msg_id: 5001  # kChatReq
+    service: world
+    require_auth: true
+  - msg_id: 5010  # kPrivateChat
+    service: world
+    require_auth: true
+  - msg_id: 5020  # kGuildChat
+    service: world
+    require_auth: true
+
+  # ========== Game 服务（地图实例、战斗逻辑）==========
+  # 游戏模块
+  - msg_id: 2010  # kMoveReq
+    service: game
+    require_auth: true
+  - msg_id: 2030  # kChangeMap
+    service: game
+    require_auth: true
+  - msg_id: 2031  # kTeleport
+    service: game
+    require_auth: true
+
+  # 战斗模块
+  - msg_id: 3001  # kAttackReq
+    service: game
+    require_auth: true
+  - msg_id: 3010  # kSkillReq
+    service: game
+    require_auth: true
+
+  # 物品模块
+  - msg_id: 4010  # kUseItemReq
+    service: game
+    require_auth: true
+  - msg_id: 4020  # kDropItemReq
+    service: game
+    require_auth: true
+  - msg_id: 4030  # kPickupItemReq
+    service: game
+    require_auth: true
+  - msg_id: 4040  # kEquipReq
+    service: game
+    require_auth: true
+  - msg_id: 4041  # kUnequipReq
+    service: game
+    require_auth: true

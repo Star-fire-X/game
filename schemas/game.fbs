@@ -1,0 +1,108 @@
+// game.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table PlayerInfo {
+  id: ulong;
+  name: string;
+  profession: Profession;
+  level: ushort;
+  hp: int;
+  max_hp: int;
+  mp: int;
+  max_mp: int;
+  map_id: uint;
+  x: int;
+  y: int;
+  gold: ulong;
+}
+
+table MoveReq {
+  target_x: int;
+  target_y: int;
+}
+
+table MoveRsp {
+  code: ErrorCode;
+  x: int;
+  y: int;
+}
+
+table EntityEnter {
+  entity_id: ulong;
+  entity_type: EntityType;
+  x: int;
+  y: int;
+  direction: ubyte;
+  // Monster extension fields
+  template_id: uint = 0;
+  name: string;
+  hp: int = 0;
+  max_hp: int = 0;
+  level: ushort = 1;
+}
+
+table EntityLeave {
+  entity_id: ulong;
+  entity_type: EntityType;
+}
+
+table Damage {
+  attacker_id: ulong;
+  target_id: ulong;
+  damage: int;
+  is_crit: bool;
+  target_hp: int;
+}
+
+table EnterGameRsp {
+  code: ErrorCode;
+  player: PlayerInfo;
+}
+
+table EntityMove {
+  entity_id: ulong;
+  entity_type: EntityType;
+  x: int;
+  y: int;
+  direction: ubyte;
+}
+
+table EntityUpdate {
+  entity_id: ulong;
+  entity_type: EntityType;
+  hp: int;
+  max_hp: int;
+  mp: int;
+  max_mp: int;
+  level: ushort;
+}
+
+table ChangeMap {
+  map_id: uint;
+  x: int;
+  y: int;
+}
+
+table Teleport {
+  map_id: uint;
+  x: int;
+  y: int;
+}
+
+table EntitySnapshot {
+  entity_id: ulong;
+  entity_type: EntityType;
+  x: int;
+  y: int;
+  direction: ubyte;
+  hp: int;
+  max_hp: int;
+  mp: int;
+  max_mp: int;
+}
+
+table StateSync {
+  player: PlayerInfo;
+  entities: [EntitySnapshot];
+}

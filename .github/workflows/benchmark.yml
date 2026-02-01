@@ -1,0 +1,63 @@
+name: Benchmark
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: C:\vcpkg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "$env:VCPKG_ROOT")) {
+            git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
+          }
+          if (-Not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
+            & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
+          }
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset vcpkg-benchmark
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset vcpkg-benchmark --target combat_core_benchmark
+
+      - name: Run benchmarks
+        shell: pwsh
+        run: >-
+          build/vcpkg-benchmark/bin/Release/combat_core_benchmark.exe
+          --benchmark_format=json
+          --benchmark_out=benchmark_results.json
+          --benchmark_min_time=1s
+
+      - name: Check thresholds
+        shell: pwsh
+        run: python scripts/check_benchmark.py benchmark_results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_results.json

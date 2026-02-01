@@ -1,0 +1,160 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:16-bookworm
+    container_name: mir2-postgres
+    environment:
+      POSTGRES_DB: mir2
+      POSTGRES_USER: mir2
+      POSTGRES_PASSWORD: mir2_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mir2"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mir2-network
+
+  # Redis 缓存
+  redis:
+    image: redis:7-bookworm
+    container_name: mir2-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - mir2-network
+
+  # DB 服务
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: db
+    container_name: mir2-db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - MIR2_DB_HOST=postgres
+      - MIR2_DB_PORT=5432
+      - MIR2_DB_NAME=mir2
+      - MIR2_DB_USER=mir2
+      - MIR2_DB_PASSWORD=mir2_password
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    volumes:
+      - ./config:/opt/mir2/config:ro
+      - db_logs:/opt/mir2/logs
+    ports:
+      - "7300:7300"
+    networks:
+      - mir2-network
+    restart: unless-stopped
+
+  # World 服务
+  world:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: world
+    container_name: mir2-world
+    depends_on:
+      - db
+    environment:
+      - MIR2_DB_SERVICE=db:7300
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    volumes:
+      - ./config:/opt/mir2/config:ro
+      - ./config/tables:/opt/mir2/data:ro
+      - world_logs:/opt/mir2/logs
+    ports:
+      - "7100:7100"
+    networks:
+      - mir2-network
+    restart: unless-stopped
+
+  # Game 服务（可扩展多个实例）
+  game:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: game
+    depends_on:
+      - world
+      - db
+    environment:
+      - MIR2_WORLD_SERVICE=world:7100
+      - MIR2_DB_SERVICE=db:7300
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    volumes:
+      - ./config:/opt/mir2/config:ro
+      - ./config/tables:/opt/mir2/data:ro
+      - game_logs:/opt/mir2/logs
+    ports:
+      - "7200-7210:7200"
+    networks:
+      - mir2-network
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  # Gateway 服务
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gateway
+    container_name: mir2-gateway
+    depends_on:
+      - world
+      - game
+    environment:
+      - MIR2_WORLD_SERVICE=world:7100
+      - MIR2_REDIS_HOST=redis
+      - MIR2_REDIS_PORT=6379
+    volumes:
+      - ./config:/opt/mir2/config:ro
+      - gateway_logs:/opt/mir2/logs
+    ports:
+      - "7000:7000"
+    networks:
+      - mir2-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  db_logs:
+    driver: local
+  world_logs:
+    driver: local
+  game_logs:
+    driver: local
+  gateway_logs:
+    driver: local
+
+networks:
+  mir2-network:
+    driver: bridge

@@ -1,0 +1,25 @@
+// system.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table Heartbeat {
+  seq: uint;
+  client_time: uint;
+}
+
+table HeartbeatRsp {
+  seq: uint;
+  server_time: uint;
+}
+
+table Kick {
+  reason: ErrorCode;
+  message: string;
+  reason_text: string;
+}
+
+table ServerNotice {
+  level: ushort;
+  message: string;
+  timestamp: uint;
+}

@@ -1,0 +1,10 @@
+// guild.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table GuildInfo {
+  id: ulong;
+  name: string;
+  level: ushort;
+  member_count: uint;
+}

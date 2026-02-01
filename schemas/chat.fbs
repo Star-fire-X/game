@@ -1,0 +1,24 @@
+// chat.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+enum ChatChannel : ubyte { WORLD = 0, PRIVATE = 1, GUILD = 2, SYSTEM = 3 }
+
+table ChatReq {
+  channel: ChatChannel;
+  content: string;
+  target_id: ulong;
+}
+
+table ChatRsp {
+  code: ErrorCode;
+}
+
+table ChatMessage {
+  channel: ChatChannel;
+  from_id: ulong;
+  from_name: string;
+  to_id: ulong;
+  content: string;
+  timestamp: uint;
+}

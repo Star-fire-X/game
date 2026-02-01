@@ -1,0 +1,65 @@
+# Build artifacts
+build/
+cmake-build-*/
+out/
+bin/
+lib/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.cmake
+CMakeFiles/
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clang-format
+
+# Git
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Documentation
+*.md
+docs/
+
+# Tests
+tests/
+benchmarks/
+
+# Temporary files
+*.tmp
+*.log
+*.cache
+*.jsonl
+.DS_Store
+Thumbs.db
+logs/
+
+# vcpkg (will be downloaded in container)
+vcpkg/
+vcpkg_installed/
+
+# Node modules (if any)
+node_modules/
+
+# Python (if any)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.env
+
+# Monitoring/migrations (not needed in container)
+monitoring/
+migrations/

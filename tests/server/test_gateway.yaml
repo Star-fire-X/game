@@ -1,0 +1,51 @@
+server:
+  id: 1
+  name: "Test-Gateway"
+  bind_ip: "127.0.0.1"
+  port: 17000
+  io_threads: 2
+  max_connections: 100
+  tick_interval_ms: 50
+  heartbeat_timeout_ms: 30000
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "test"
+  password: "test"
+  database: "test_db"
+  pool_size: 2
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+
+log:
+  level: "debug"
+  path: "test_logs"
+  max_size_mb: 10
+  max_files: 3
+
+services:
+  world:
+    host: "127.0.0.1"
+    port: 17001
+  game:
+    host: "127.0.0.1"
+    port: 17003
+  db:
+    host: "127.0.0.1"
+    port: 17002
+
+message_routes:
+  - msg_id: 1001
+    service: db
+    require_auth: false
+  - msg_id: 1010
+    service: world
+    require_auth: true
+  - msg_id: 2010
+    service: game
+    require_auth: true

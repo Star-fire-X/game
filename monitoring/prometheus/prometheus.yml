@@ -1,0 +1,62 @@
+# Prometheus Configuration for Legend2 Gateway Monitoring
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    cluster: 'legend2'
+    environment: 'production'
+
+# Alertmanager configuration (optional)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load alert rules
+rule_files:
+  - '/etc/prometheus/rules/*.yml'
+
+# Scrape configurations
+scrape_configs:
+  # Gateway Service Metrics
+  - job_name: 'gateway'
+    static_configs:
+      - targets:
+          - 'gateway:9101'
+        labels:
+          service: 'gateway'
+          component: 'network'
+
+  # World Service Metrics (if exposed)
+  - job_name: 'world'
+    static_configs:
+      - targets:
+          - 'world:9102'
+        labels:
+          service: 'world'
+          component: 'game-logic'
+
+  # Game Service Metrics (if exposed)
+  - job_name: 'game'
+    static_configs:
+      - targets:
+          - 'game:9103'
+        labels:
+          service: 'game'
+          component: 'game-instance'
+
+  # DB Service Metrics (if exposed)
+  - job_name: 'db'
+    static_configs:
+      - targets:
+          - 'db:9104'
+        labels:
+          service: 'db'
+          component: 'database'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets:
+          - 'localhost:9090'

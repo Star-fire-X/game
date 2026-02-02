@@ -15,8 +15,15 @@ namespace mir2::cache {
 // 性能目标：Get <1μs, Set <1μs（含锁开销）
 class LocalLRUCache {
 public:
-    // 默认容量 1000 条目
+    // 配置结构体
+    struct Config {
+        size_t capacity = 1000;  // 默认容量 1000 条目
+    };
+
+    // 构造函数（接受配置或直接指定容量）
     explicit LocalLRUCache(size_t capacity = 1000);
+    explicit LocalLRUCache(const Config& config)
+        : LocalLRUCache(config.capacity) {}
 
     // 析构函数
     ~LocalLRUCache();

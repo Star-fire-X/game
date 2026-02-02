@@ -193,6 +193,7 @@ target_link_libraries(mir2_server_lib PUBLIC
     EnTT::EnTT
     spdlog::spdlog
     yaml-cpp::yaml-cpp
+    nlohmann_json::nlohmann_json
 )
 
 if(LEGEND2_BUILD_DB)
@@ -231,6 +232,9 @@ if(LEGEND2_BUILD_DB)
 endif()
 
 set(LEGEND2_BUILD_DB ${LEGEND2_BUILD_DB} PARENT_SCOPE)
+
+# ECS State Persistence Module
+add_subdirectory(persistence)
 
 add_executable(mir2_game apps/game_main.cc)
 target_link_libraries(mir2_game PRIVATE mir2_server_lib)

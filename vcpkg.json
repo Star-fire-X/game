@@ -13,6 +13,7 @@
     "libpqxx",
     "luajit",
     "nlohmann-json",
+    "openssl",
     "rapidcheck",
     "sdl2",
     "sdl2-image",

@@ -70,6 +70,7 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/level_up_system_test.cpp
     server/ecs/inventory_system_test.cpp
     server/ecs/npc_ai_system_test.cpp
+    server/persistence_test.cc
     server/entity/boss_behavior_test.cpp
     server/entity/boss_manager_test.cpp
     server/entity/boss_integration_test.cpp

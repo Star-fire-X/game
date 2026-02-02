@@ -8,6 +8,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <functional>
 #include "common/types.h"
 
 namespace mir2::ecs {
@@ -17,6 +18,8 @@ namespace mir2::ecs {
  */
 class PathfindingHelper {
 public:
+    using WalkableChecker = std::function<bool(int32_t x, int32_t y)>;
+
     /**
      * @brief 简单寻路：朝目标移动一步
      * @return 下一步位置
@@ -26,7 +29,7 @@ public:
         int32_t target_x, int32_t target_y);
 
     /**
-     * @brief A*寻路算法
+     * @brief A*寻路算法（无障碍物检查，直线路径）
      * @return 路径点序列
      */
     static std::vector<mir2::common::Position> FindPath(
@@ -35,9 +38,27 @@ public:
         int32_t max_steps = 80);
 
     /**
+     * @brief A*寻路算法（带障碍物检查）
+     * @param walkable_checker 可行走性检查回调
+     * @return 路径点序列，空表示无法到达
+     */
+    static std::vector<mir2::common::Position> FindPath(
+        int32_t start_x, int32_t start_y,
+        int32_t end_x, int32_t end_y,
+        const WalkableChecker& walkable_checker,
+        int32_t max_steps = 80);
+
+    /**
      * @brief 计算曼哈顿距离
      */
     static int32_t ManhattanDistance(
+        int32_t x1, int32_t y1,
+        int32_t x2, int32_t y2);
+
+    /**
+     * @brief 计算切比雪夫距离（8方向移动）
+     */
+    static int32_t ChebyshevDistance(
         int32_t x1, int32_t y1,
         int32_t x2, int32_t y2);
 };

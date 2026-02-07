@@ -1,5 +1,6 @@
 #include "log/logger.h"
 
+#include <array>
 #include <filesystem>
 #include <vector>
 
@@ -10,6 +11,19 @@
 namespace mir2::log {
 
 namespace {
+
+constexpr const char* kLogPattern = "[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v";
+constexpr std::array<LogCategory, 9> kAllCategories = {
+    LogCategory::kSystem,
+    LogCategory::kNetwork,
+    LogCategory::kGame,
+    LogCategory::kCombat,
+    LogCategory::kTrade,
+    LogCategory::kSecurity,
+    LogCategory::kDatabase,
+    LogCategory::kGateway,
+    LogCategory::kWorld,
+};
 
 const char* CategoryName(LogCategory category) {
   switch (category) {
@@ -40,40 +54,42 @@ const char* CategoryName(LogCategory category) {
 
 bool Logger::Initialize(const std::string& log_path, const std::string& level,
                         int max_size_mb, int max_files) {
-  std::filesystem::create_directories(log_path);
+  try {
+    std::filesystem::create_directories(log_path);
 
-  spdlog::level::level_enum log_level = spdlog::level::from_str(level);
-  auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-  console_sink->set_level(log_level);
+    spdlog::level::level_enum log_level = spdlog::level::from_str(level);
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console_sink->set_level(log_level);
 
-  const size_t max_size = static_cast<size_t>(max_size_mb) * 1024 * 1024;
-  const size_t max_file_count = static_cast<size_t>(max_files);
+    const size_t max_size = static_cast<size_t>(max_size_mb) * 1024 * 1024;
+    const size_t max_file_count = static_cast<size_t>(max_files);
 
-  for (const auto category : {
-           LogCategory::kSystem,
-           LogCategory::kNetwork,
-           LogCategory::kGame,
-           LogCategory::kCombat,
-           LogCategory::kTrade,
-           LogCategory::kSecurity,
-           LogCategory::kDatabase,
-           LogCategory::kGateway,
-           LogCategory::kWorld}) {
-    const std::string file_name = log_path + "/" + CategoryName(category) + ".log";
-    auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-        file_name, max_size, max_file_count);
-    file_sink->set_level(log_level);
+    loggers_.clear();
+    for (const auto category : kAllCategories) {
+      const std::string logger_name = CategoryName(category);
+      if (spdlog::get(logger_name)) {
+        spdlog::drop(logger_name);
+      }
 
-    std::vector<spdlog::sink_ptr> sinks{console_sink, file_sink};
-    auto logger = std::make_shared<spdlog::logger>(CategoryName(category), sinks.begin(), sinks.end());
-    logger->set_level(log_level);
-    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
+      const std::string file_name = log_path + "/" + logger_name + ".log";
+      auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+          file_name, max_size, max_file_count);
+      file_sink->set_level(log_level);
 
-    spdlog::register_logger(logger);
-    loggers_[category] = logger;
+      std::vector<spdlog::sink_ptr> sinks{console_sink, file_sink};
+      auto logger = std::make_shared<spdlog::logger>(
+          logger_name, sinks.begin(), sinks.end());
+      logger->set_level(log_level);
+      logger->set_pattern(kLogPattern);
+
+      spdlog::register_logger(logger);
+      loggers_[category] = logger;
+    }
+
+    return true;
+  } catch (...) {
+    return false;
   }
-
-  return true;
 }
 
 void Logger::Shutdown() {

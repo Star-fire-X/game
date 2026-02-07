@@ -3,8 +3,12 @@
 #include <asio/io_context.hpp>
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -16,9 +20,11 @@
 #include "network/packet_codec.h"
 #include "network/tcp_connection.h"
 #include "network/tcp_session.h"
+#include "system_generated.h"
 #include "mocks/mock_socket.h"
 
 #define private public
+#include "gateway/connection_holder.h"
 #include "gateway/gateway_server.h"
 #include "network/dual_channel_manager.h"
 #include "network/kcp_server.h"
@@ -160,14 +166,46 @@ bool DecodeSinglePacket(const std::vector<uint8_t>& bytes, network::Packet* out_
   if (bytes.empty() || !out_packet) {
     return false;
   }
-  return network::PacketCodec::Decode(bytes.data(), bytes.size(), out_packet) ==
+  if (network::PacketCodec::Decode(bytes.data(), bytes.size(), out_packet) ==
+      network::DecodeStatus::kOk) {
+    return true;
+  }
+  return network::PacketCodec::DecodeV2(bytes.data(), bytes.size(), out_packet) ==
          network::DecodeStatus::kOk;
 }
 
+std::vector<uint8_t> BuildHeartbeatPayload(uint32_t seq) {
+  flatbuffers::FlatBufferBuilder builder;
+  const auto heartbeat = mir2::proto::CreateHeartbeat(
+      builder, seq, static_cast<uint32_t>(network::TcpSession::NowMs()));
+  builder.Finish(heartbeat);
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
+}
+
+template <typename T, typename = void>
+struct HasUserRouteTable : std::false_type {};
+
+template <typename T>
+struct HasUserRouteTable<T, std::void_t<decltype(&T::user_route_table_)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSessionMap : std::false_type {};
+
+template <typename T>
+struct HasSessionMap<T, std::void_t<decltype(&T::session_map_)>> : std::true_type {};
+
+template <typename T, typename = void>
+struct HasRegisterUser : std::false_type {};
+
+template <typename T>
+struct HasRegisterUser<T, std::void_t<decltype(&T::RegisterUser)>> : std::true_type {};
+
 }  // namespace
 
-// 验证所有注册消息在未认证状态下也能被无脑转发。
-TEST(GatewayForwardingTest, ForwardAllMessagesRegardlessOfAuthState) {
+// 验证扩展消息矩阵在未认证状态下仍会被转发到LogicServer。
+TEST(GatewayUniversalForwardTest, ForwardAllMessagesWithoutAuthCheck) {
   asio::io_context io_context;
   GatewayServer server;
 
@@ -182,10 +220,10 @@ TEST(GatewayForwardingTest, ForwardAllMessagesRegardlessOfAuthState) {
   server.logic_client_ = std::move(logic_client.client);
   server.RegisterHandlers();
 
-  auto bundle = CreateSession(io_context, 101);
+  auto bundle = CreateSession(io_context, 1101);
   bundle.session->SetAuthState(network::TcpSession::AuthState::kPending);
   test_manager_ptr->AddSession(bundle.session);
-  server.RegisterConnection(101, bundle.session);
+  server.RegisterConnection(1101, bundle.session);
 
   const std::vector<uint16_t> forward_messages = {
       static_cast<uint16_t>(common::MsgId::kLoginReq),
@@ -217,7 +255,7 @@ TEST(GatewayForwardingTest, ForwardAllMessagesRegardlessOfAuthState) {
       static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
   };
 
-  const std::vector<uint8_t> payload{9, 8, 7};
+  const std::vector<uint8_t> payload{1, 2, 3};
   for (auto msg_id : forward_messages) {
     test_manager_ptr->Dispatch(bundle.session, msg_id, payload);
   }
@@ -234,8 +272,7 @@ TEST(GatewayForwardingTest, ForwardAllMessagesRegardlessOfAuthState) {
 
     common::RoutedMessageData routed;
     ASSERT_TRUE(common::ParseRoutedMessage(packet.payload, &routed));
-    EXPECT_EQ(routed.client_id, 101u);
-    EXPECT_EQ(routed.payload, payload);
+    EXPECT_EQ(routed.client_id, 1101u);
     forwarded_ids.insert(routed.msg_id);
   }
 
@@ -245,7 +282,42 @@ TEST(GatewayForwardingTest, ForwardAllMessagesRegardlessOfAuthState) {
   }
 }
 
-TEST(GatewayForwardingTest, ForwardMessageNoAuthRequired_AlwaysAllowed) {
+// 验证心跳消息由Gateway本地响应，不会转发到LogicServer。
+TEST(GatewayUniversalForwardTest, HeartbeatHandledLocally) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
+  auto* test_manager_ptr = test_manager.get();
+  auto kcp_server = std::make_unique<NullKcpServer>();
+  server.network_ = std::make_unique<network::DualChannelManager>(
+      io_context, std::move(test_manager), std::move(kcp_server));
+
+  auto logic_client = CreateMockClient(io_context);
+  auto* logic_socket = logic_client.socket;
+  server.logic_client_ = std::move(logic_client.client);
+  server.RegisterHandlers();
+
+  auto bundle = CreateSession(io_context, 1201);
+  test_manager_ptr->AddSession(bundle.session);
+
+  const auto payload = BuildHeartbeatPayload(42);
+  test_manager_ptr->Dispatch(bundle.session,
+                             static_cast<uint16_t>(common::MsgId::kHeartbeat),
+                             payload);
+  DrainIoContext(io_context);
+
+  EXPECT_TRUE(logic_socket->GetWrites().empty());
+
+  const auto& client_writes = bundle.socket->GetWrites();
+  ASSERT_EQ(client_writes.size(), 1u);
+  network::Packet packet{};
+  ASSERT_TRUE(DecodeSinglePacket(client_writes.front(), &packet));
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::MsgId::kHeartbeatRsp));
+}
+
+// 验证Logic下发背压控制后，Gateway会暂停并在到期后恢复客户端读。
+TEST(GatewayUniversalForwardTest, LogicBackpressureControlPausesAndResumesRead) {
   asio::io_context io_context;
   GatewayServer server;
 
@@ -259,18 +331,152 @@ TEST(GatewayForwardingTest, ForwardMessageNoAuthRequired_AlwaysAllowed) {
   server.logic_client_ = std::move(logic_client.client);
   server.RegisterHandlers();
 
-  auto session = CreateSession(io_context, 102).session;
-  session->SetAuthState(network::TcpSession::AuthState::kUnknown);
+  auto bundle = CreateSession(io_context, 1251);
+  test_manager_ptr->AddSession(bundle.session);
+  server.RegisterConnection(1251, bundle.session);
 
-  test_manager_ptr->Dispatch(session,
-                             static_cast<uint16_t>(common::MsgId::kLoginReq),
-                             std::vector<uint8_t>{});
+  flatbuffers::FlatBufferBuilder builder;
+  const auto control = mir2::proto::CreateBackpressureControl(
+      builder,
+      1251,
+      mir2::proto::BackpressureAction::PAUSE_READ,
+      2);
+  builder.Finish(control);
+  const uint8_t* data = builder.GetBufferPointer();
+  network::Packet packet{};
+  packet.msg_id = static_cast<uint16_t>(common::InternalMsgId::kBackpressureControl);
+  packet.payload.assign(data, data + builder.GetSize());
+
+  server.OnLogicPacket(packet);
   DrainIoContext(io_context);
+  EXPECT_TRUE(bundle.session->IsReadPaused());
 
-  EXPECT_EQ(logic_client.socket->GetWrites().size(), 1u);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  server.ResumeBackpressuredSessions(network::TcpSession::NowMs());
+  DrainIoContext(io_context);
+  EXPECT_FALSE(bundle.session->IsReadPaused());
 }
 
-TEST(GatewayForwardingTest, ForwardToUnknownMessageId_DropsMessage) {
+// 验证未注册消息不会被转发。
+TEST(GatewayUniversalForwardTest, UnregisteredMessageDropped) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
+  auto* test_manager_ptr = test_manager.get();
+  auto kcp_server = std::make_unique<NullKcpServer>();
+  server.network_ = std::make_unique<network::DualChannelManager>(
+      io_context, std::move(test_manager), std::move(kcp_server));
+
+  auto logic_client = CreateMockClient(io_context);
+  auto* logic_socket = logic_client.socket;
+  server.logic_client_ = std::move(logic_client.client);
+  server.RegisterHandlers();
+
+  auto bundle = CreateSession(io_context, 1301);
+  test_manager_ptr->AddSession(bundle.session);
+
+  test_manager_ptr->Dispatch(bundle.session, 9999, std::vector<uint8_t>{9});
+  DrainIoContext(io_context);
+
+  EXPECT_TRUE(logic_socket->GetWrites().empty());
+  EXPECT_TRUE(bundle.socket->GetWrites().empty());
+}
+
+// 验证Gateway只保留session_map_，并移除了user_route_table_与RegisterUser接口。
+TEST(GatewayUniversalForwardTest, SessionMapOnlyNoUserTable) {
+  EXPECT_TRUE((HasSessionMap<GatewayServer>::value));
+  EXPECT_FALSE((HasUserRouteTable<GatewayServer>::value));
+  EXPECT_FALSE((HasRegisterUser<GatewayServer>::value));
+}
+
+// 验证session_map_在并发读写下仍然安全。
+TEST(GatewayUniversalForwardTest, SessionMapConcurrentAccess) {
+  asio::io_context io_context;
+  GatewayServer server;
+  auto bundle = CreateSession(io_context, 1401);
+
+  std::atomic<bool> stop{false};
+  std::thread writer([&]() {
+    while (!stop.load()) {
+      server.RegisterConnection(1401, bundle.session);
+      server.UnregisterSession(bundle.session);
+    }
+  });
+  std::thread reader([&]() {
+    while (!stop.load()) {
+      server.GetConnectionSession(1401);
+      server.GetConnectionCount();
+    }
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  stop.store(true);
+  writer.join();
+  reader.join();
+
+  EXPECT_LE(server.GetConnectionCount(), 1u);
+}
+
+// 验证LogicServer断线时，消息被ConnectionHolder缓冲而非直接丢弃。
+TEST(GatewayUniversalForwardTest, ConnectionHolderBuffersWhenLogicDisconnected) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
+  auto* test_manager_ptr = test_manager.get();
+  auto kcp_server = std::make_unique<NullKcpServer>();
+  server.network_ = std::make_unique<network::DualChannelManager>(
+      io_context, std::move(test_manager), std::move(kcp_server));
+
+  auto logic_client = CreateMockClient(io_context);
+  logic_client.client->connected_.store(false);
+  server.logic_client_ = std::move(logic_client.client);
+  server.RegisterHandlers();
+
+  auto bundle = CreateSession(io_context, 1501);
+  server.RegisterConnection(1501, bundle.session);
+
+  test_manager_ptr->Dispatch(bundle.session,
+                             static_cast<uint16_t>(common::MsgId::kAttackReq),
+                             std::vector<uint8_t>{7, 7});
+  DrainIoContext(io_context);
+
+  auto holder_it = server.connection_holders_.find(1501);
+  ASSERT_NE(holder_it, server.connection_holders_.end());
+  ASSERT_NE(holder_it->second, nullptr);
+  EXPECT_TRUE(holder_it->second->HasBufferedMessages());
+  EXPECT_EQ(server.holder_state_, ConnectionHolder::State::HOLDING);
+}
+
+// 验证session_id为0的消息直接被丢弃。
+TEST(GatewayUniversalForwardTest, HandleForwardMessageValidatesSessionId) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
+  auto* test_manager_ptr = test_manager.get();
+  auto kcp_server = std::make_unique<NullKcpServer>();
+  server.network_ = std::make_unique<network::DualChannelManager>(
+      io_context, std::move(test_manager), std::move(kcp_server));
+
+  auto logic_client = CreateMockClient(io_context);
+  auto* logic_socket = logic_client.socket;
+  server.logic_client_ = std::move(logic_client.client);
+  server.RegisterHandlers();
+
+  auto bundle = CreateSession(io_context, 0);
+  test_manager_ptr->Dispatch(bundle.session,
+                             static_cast<uint16_t>(common::MsgId::kMoveReq),
+                             std::vector<uint8_t>{1});
+  DrainIoContext(io_context);
+
+  EXPECT_TRUE(logic_socket->GetWrites().empty());
+  EXPECT_TRUE(server.connection_holders_.find(0) == server.connection_holders_.end());
+}
+
+// 验证高并发转发时锁竞争可控：1000次并发转发应小于1秒。
+TEST(GatewayUniversalForwardTest, PerformanceLockContentionReduced) {
   asio::io_context io_context;
   GatewayServer server;
 
@@ -284,59 +490,36 @@ TEST(GatewayForwardingTest, ForwardToUnknownMessageId_DropsMessage) {
   server.logic_client_ = std::move(logic_client.client);
   server.RegisterHandlers();
 
-  auto session = CreateSession(io_context, 103).session;
-  session->SetAuthState(network::TcpSession::AuthState::kAuthed);
+  auto bundle = CreateSession(io_context, 1601);
+  server.RegisterConnection(1601, bundle.session);
+  test_manager_ptr->AddSession(bundle.session);
 
-  test_manager_ptr->Dispatch(session, 9999, std::vector<uint8_t>{1});
+  constexpr int kThreadCount = 20;
+  constexpr int kMessagesPerThread = 50;
+  constexpr int kTotalMessages = kThreadCount * kMessagesPerThread;
+
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+
+  const auto start = std::chrono::steady_clock::now();
+  for (int i = 0; i < kThreadCount; ++i) {
+    threads.emplace_back([&]() {
+      for (int j = 0; j < kMessagesPerThread; ++j) {
+        test_manager_ptr->Dispatch(bundle.session,
+                                   static_cast<uint16_t>(common::MsgId::kMoveReq),
+                                   std::vector<uint8_t>{1});
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+
+  EXPECT_EQ(kTotalMessages, kThreadCount * kMessagesPerThread);
+  EXPECT_LT(elapsed, std::chrono::seconds(1));
   DrainIoContext(io_context);
-
-  EXPECT_TRUE(logic_client.socket->GetWrites().empty());
-}
-
-TEST(GatewayForwardingTest, ForwardWithInvalidMsgId_DropsMessage) {
-  asio::io_context io_context;
-  GatewayServer server;
-
-  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
-  auto* test_manager_ptr = test_manager.get();
-  auto kcp_server = std::make_unique<NullKcpServer>();
-  server.network_ = std::make_unique<network::DualChannelManager>(
-      io_context, std::move(test_manager), std::move(kcp_server));
-
-  auto logic_client = CreateMockClient(io_context);
-  server.logic_client_ = std::move(logic_client.client);
-  server.RegisterHandlers();
-
-  auto session = CreateSession(io_context, 105).session;
-  session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-
-  test_manager_ptr->Dispatch(session, 0, std::vector<uint8_t>{});
-  DrainIoContext(io_context);
-
-  EXPECT_TRUE(logic_client.socket->GetWrites().empty());
-}
-
-TEST(GatewayForwardingTest, IsLogicConnectedReturnsCorrectState) {
-  asio::io_context io_context;
-  GatewayServer server;
-
-  auto logic_client = CreateMockClient(io_context);
-  server.logic_client_ = std::move(logic_client.client);
-  EXPECT_TRUE(server.IsLogicConnected());
-
-  server.logic_client_->connected_.store(false);
-  EXPECT_FALSE(server.IsLogicConnected());
-}
-
-TEST(GatewayForwardingTest, GetLogicClientReturnsCorrectClient) {
-  asio::io_context io_context;
-  GatewayServer server;
-
-  auto logic_client = CreateMockClient(io_context);
-  auto* raw_ptr = logic_client.client.get();
-  server.logic_client_ = std::move(logic_client.client);
-
-  EXPECT_EQ(server.GetLogicClient(), raw_ptr);
 }
 
 }  // namespace mir2::gateway

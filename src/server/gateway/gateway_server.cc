@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <utility>
 #include <flatbuffers/flatbuffers.h>
 
 #include <asio/post.hpp>
@@ -10,6 +11,11 @@
 #include "common/enums.h"
 #include "server/common/error_codes.h"
 #include "common/internal_message_helper.h"
+#include "common/protocol/message_codec.h"
+#include "game_generated.h"
+#include "guild_generated.h"
+#include "login_generated.h"
+#include "network/tcp_session.h"
 #include "config/config_manager.h"
 #include "log/logger.h"
 #include "monitor/metrics.h"
@@ -18,8 +24,63 @@
 namespace mir2::gateway {
 
 namespace {
-// 硬编码路由规则已迁移到 MessageRouter，保留此命名空间用于未来工具函数
 constexpr float kStaleRouteCleanupIntervalSec = 30.0f;
+constexpr uint32_t kDefaultBackpressurePauseMs = 100;
+constexpr uint32_t kMaxBackpressurePauseMs = 2000;
+
+struct ConnectionSnapshot {
+  uint64_t client_id = 0;
+  uint32_t player_id = 0;
+  uint32_t account_id = 0;
+  std::string ip_address;
+  uint64_t connected_at_ms = 0;
+  uint64_t last_active_ms = 0;
+};
+
+void UpdateSessionContextFromLogicMessage(
+    const std::shared_ptr<network::TcpSession>& session,
+    uint16_t msg_id,
+    const std::vector<uint8_t>& payload) {
+  if (!session || payload.empty()) {
+    return;
+  }
+
+  if (msg_id == static_cast<uint16_t>(common::MsgId::kLoginRsp)) {
+    common::LoginResponse response;
+    const auto status = common::DecodeLoginResponse(msg_id, payload, &response);
+    if (status == common::MessageCodecStatus::kOk && response.account_id != 0) {
+      session->SetAccountId(response.account_id);
+    }
+    return;
+  }
+
+  if (msg_id == static_cast<uint16_t>(common::MsgId::kSelectRoleRsp)) {
+    flatbuffers::Verifier verifier(payload.data(), payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::SelectRoleRsp>(nullptr)) {
+      return;
+    }
+    const auto* rsp = flatbuffers::GetRoot<mir2::proto::SelectRoleRsp>(payload.data());
+    if (rsp && rsp->player_id() != 0) {
+      session->SetUserId(rsp->player_id());
+    }
+    return;
+  }
+
+  if (msg_id == static_cast<uint16_t>(common::MsgId::kEnterGameRsp)) {
+    flatbuffers::Verifier verifier(payload.data(), payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::EnterGameRsp>(nullptr)) {
+      return;
+    }
+    const auto* rsp = flatbuffers::GetRoot<mir2::proto::EnterGameRsp>(payload.data());
+    if (!rsp) {
+      return;
+    }
+    const auto* player = rsp->player();
+    if (player && player->id() != 0) {
+      session->SetUserId(player->id());
+    }
+  }
+}
 }  // namespace
 
 bool GatewayServer::Initialize(const std::string& config_path) {
@@ -40,23 +101,22 @@ bool GatewayServer::Initialize(const std::string& config_path) {
   }
   monitor::Metrics::Instance().Init(server_config.metrics_port);
 
-  network_ = std::make_unique<network::NetworkManager>(app_.GetIoContext());
-  if (!network_->Start(server_config.bind_ip, server_config.port, server_config.max_connections)) {
+  const uint16_t tcp_port = server_config.port;
+  uint16_t udp_port = server_config.udp_port;
+  if (udp_port == 0) {
+    udp_port = static_cast<uint16_t>(tcp_port + 1);
+    if (udp_port == 0) {
+      udp_port = tcp_port;
+    }
+  }
+
+  network_ = std::make_unique<network::DualChannelManager>(app_.GetIoContext());
+  if (!network_->Start(server_config.bind_ip, tcp_port, udp_port, server_config.max_connections)) {
     SYSLOG_ERROR("GatewayServer network start failed");
     return false;
   }
 
-  ConnectServices();
-
-  // 加载消息路由表（先尝试从配置加载，失败则使用默认路由）
-  if (!message_router_.LoadRoutesFromConfig(config_path)) {
-    SYSLOG_WARN("Failed to load message routes from config, using default routes");
-  }
-
-  // 如果配置未提供路由表，注册默认路由规则
-  if (message_router_.GetRouteCount() == 0) {
-    RegisterDefaultRoutes();
-  }
+  ConnectLogicService();
 
   RegisterHandlers();
   SYSLOG_INFO("GatewayServer initialized");
@@ -71,14 +131,8 @@ void GatewayServer::Run() {
 }
 
 void GatewayServer::Shutdown() {
-  if (world_client_) {
-    world_client_->Close();
-  }
-  if (game_client_) {
-    game_client_->Close();
-  }
-  if (db_client_) {
-    db_client_->Close();
+  if (logic_client_) {
+    logic_client_->Close();
   }
   if (network_) {
     network_->Stop();
@@ -111,17 +165,17 @@ void GatewayServer::Tick(float delta_time) {
     }
 
     const int64_t now_ms = network::TcpSession::NowMs();
+    ResumeBackpressuredSessions(now_ms);
     CheckHeartbeatTimeouts(sessions, now_ms);
+    FlushBufferedMessages();
 
     stale_route_cleanup_elapsed_sec_ += delta_time;
     if (stale_route_cleanup_elapsed_sec_ >= kStaleRouteCleanupIntervalSec) {
         stale_route_cleanup_elapsed_sec_ -= kStaleRouteCleanupIntervalSec;
         CleanupStaleRoutes();
         monitor::Metrics::Instance().SetGauge(
-            "gateway.route_table.connection_count",
-            static_cast<int64_t>(GetConnectionRouteCount()));
-        monitor::Metrics::Instance().SetGauge("gateway.route_table.user_count",
-                                              static_cast<int64_t>(GetUserRouteCount()));
+            "gateway.session_count",
+            static_cast<int64_t>(GetConnectionCount()));
     }
 }
 
@@ -164,8 +218,15 @@ void GatewayServer::RegisterConnection(uint64_t connection_id,
     }
 
     {
-        std::unique_lock<std::shared_mutex> lock(route_table_mutex_);
-        connection_route_table_[resolved_id] = session;
+        std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+        session_map_[resolved_id] = session;
+        auto& holder = connection_holders_[resolved_id];
+        if (!holder) {
+            holder = std::make_unique<ConnectionHolder>();
+        }
+        ApplyHolderState(*holder, holder_state_);
+        connection_connected_at_ms_[resolved_id] = network::TcpSession::NowMs();
+        client_backpressure_until_ms_.erase(resolved_id);
     }
 
     session->SetDisconnectedHandler([this](const std::shared_ptr<network::TcpSession>& disconnected) {
@@ -173,29 +234,7 @@ void GatewayServer::RegisterConnection(uint64_t connection_id,
     });
 }
 
-void GatewayServer::RegisterUser(uint64_t user_id,
-                                 const std::shared_ptr<network::TcpSession>& session) {
-    if (!session || user_id == 0) {
-        return;
-    }
-    if (session->GetAuthState() != network::TcpSession::AuthState::kAuthed) {
-        return;
-    }
-
-    {
-        std::unique_lock<std::shared_mutex> lock(route_table_mutex_);
-        auto it = user_route_table_.find(user_id);
-        if (it != user_route_table_.end() && it->second && it->second != session) {
-            SYSLOG_WARN("Duplicate login detected, kicking previous session (user_id={})", user_id);
-            it->second->SetUserId(0);
-            it->second->Kick(common::ErrorCode::kKickDuplicateLogin, "Duplicate login");
-        }
-        user_route_table_[user_id] = session;
-        session->SetUserId(user_id);
-    }
-
-    monitor::Metrics::Instance().IncrementCounter("gateway.user.register");
-}
+// RegisterUser 已移除：双进程架构下，UserID 由 LogicServer 管理
 
 void GatewayServer::UnregisterSession(const std::shared_ptr<network::TcpSession>& session) {
     if (!session) {
@@ -203,34 +242,23 @@ void GatewayServer::UnregisterSession(const std::shared_ptr<network::TcpSession>
     }
 
     const uint64_t connection_id = session->GetSessionId();
-    const uint64_t user_id = session->GetUserId();
 
-    {
-        std::unique_lock<std::shared_mutex> lock(route_table_mutex_);
-        if (connection_id != 0) {
-            auto it = connection_route_table_.find(connection_id);
-            if (it != connection_route_table_.end() && it->second == session) {
-                connection_route_table_.erase(it);
-            }
-        }
-
-        if (user_id != 0) {
-            auto it = user_route_table_.find(user_id);
-            if (it != user_route_table_.end() && it->second == session) {
-                user_route_table_.erase(it);
-            }
-        } else {
-            for (auto it = user_route_table_.begin(); it != user_route_table_.end();) {
-                if (it->second == session) {
-                    it = user_route_table_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
+    if (network_ && connection_id != 0) {
+        network_->UnbindKcpSession(connection_id);
     }
 
-    session->SetUserId(0);
+    {
+        std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+        if (connection_id != 0) {
+            auto it = session_map_.find(connection_id);
+            if (it != session_map_.end() && it->second == session) {
+                session_map_.erase(it);
+            }
+            connection_holders_.erase(connection_id);
+            connection_connected_at_ms_.erase(connection_id);
+            client_backpressure_until_ms_.erase(connection_id);
+        }
+    }
 
     monitor::Metrics::Instance().IncrementCounter("gateway.session.unregister");
     NotifyClientDisconnected(connection_id);
@@ -238,96 +266,47 @@ void GatewayServer::UnregisterSession(const std::shared_ptr<network::TcpSession>
 
 void GatewayServer::CleanupStaleRoutes() {
     size_t before_connections = 0;
-    size_t before_users = 0;
     size_t after_connections = 0;
-    size_t after_users = 0;
 
     {
-        std::unique_lock<std::shared_mutex> lock(route_table_mutex_);
-        before_connections = connection_route_table_.size();
-        before_users = user_route_table_.size();
+        std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+        before_connections = session_map_.size();
+        std::vector<uint64_t> removed_connections;
 
-        for (auto it = connection_route_table_.begin(); it != connection_route_table_.end();) {
+        for (auto it = session_map_.begin(); it != session_map_.end();) {
             const auto& session = it->second;
             if (!session || session->GetState() == network::TcpSession::SessionState::kClosed) {
-                it = connection_route_table_.erase(it);
+                removed_connections.push_back(it->first);
+                it = session_map_.erase(it);
             } else {
                 ++it;
             }
         }
 
-        for (auto it = user_route_table_.begin(); it != user_route_table_.end();) {
-            const auto& session = it->second;
-            if (!session || session->GetState() == network::TcpSession::SessionState::kClosed) {
-                if (session) {
-                    session->SetUserId(0);
-                }
-                it = user_route_table_.erase(it);
-            } else {
-                ++it;
-            }
+        for (uint64_t connection_id : removed_connections) {
+            connection_holders_.erase(connection_id);
+            connection_connected_at_ms_.erase(connection_id);
+            client_backpressure_until_ms_.erase(connection_id);
         }
 
-        after_connections = connection_route_table_.size();
-        after_users = user_route_table_.size();
+        after_connections = session_map_.size();
     }
 
-    SYSLOG_INFO("Cleanup stale routes: connection {}->{} user {}->{}",
-                before_connections, after_connections, before_users, after_users);
+    SYSLOG_INFO("Cleanup stale sessions: {}->{}", before_connections, after_connections);
 }
 
 std::shared_ptr<network::TcpSession> GatewayServer::GetConnectionSession(uint64_t connection_id) const {
-    std::shared_lock<std::shared_mutex> lock(route_table_mutex_);
-    auto it = connection_route_table_.find(connection_id);
-    if (it != connection_route_table_.end()) {
+    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    auto it = session_map_.find(connection_id);
+    if (it != session_map_.end()) {
         return it->second;
     }
     return nullptr;
 }
 
-std::shared_ptr<network::TcpSession> GatewayServer::GetUserSession(uint64_t user_id) const {
-    std::shared_lock<std::shared_mutex> lock(route_table_mutex_);
-    auto it = user_route_table_.find(user_id);
-    if (it != user_route_table_.end()) {
-        return it->second;
-    }
-    return nullptr;
-}
-
-size_t GatewayServer::GetConnectionRouteCount() const {
-    std::shared_lock<std::shared_mutex> lock(route_table_mutex_);
-    return connection_route_table_.size();
-}
-
-size_t GatewayServer::GetUserRouteCount() const {
-    std::shared_lock<std::shared_mutex> lock(route_table_mutex_);
-    return user_route_table_.size();
-}
-
-void GatewayServer::RegisterDefaultRoutes() {
-  // DB 服务消息（不需要认证）
-  message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kLoginReq),
-                                common::ServiceType::kDb, false);
-
-  // Logout 由网关显式处理并通知 World/Game 服务。
-
-  // World 服务消息（需要认证）
-  message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
-                                common::ServiceType::kWorld, true);
-  message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
-                                common::ServiceType::kWorld, true);
-  message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kRoleListReq),
-                                common::ServiceType::kWorld, true);
-
-  // Game 服务消息（需要认证）
-  message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kMoveReq),
-                                common::ServiceType::kGame, true);
-  message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kAttackReq),
-                                common::ServiceType::kGame, true);
-  message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kSkillReq),
-                                common::ServiceType::kGame, true);
-
-  SYSLOG_INFO("Registered {} default message routes", message_router_.GetRouteCount());
+size_t GatewayServer::GetConnectionCount() const {
+    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    return session_map_.size();
 }
 
 void GatewayServer::RegisterHandlers() {
@@ -335,333 +314,160 @@ void GatewayServer::RegisterHandlers() {
     return;
   }
 
+  // 心跳消息特殊处理：Gateway 直接响应，不转发
   network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kHeartbeat),
                             [this](const std::shared_ptr<network::TcpSession>& session,
                                    const std::vector<uint8_t>& payload) {
-                              if (!session) {
-                                return;
-                              }
-                              uint32_t seq = 0;
-                              if (!payload.empty()) {
-                                flatbuffers::Verifier verifier(payload.data(), payload.size());
-                                if (verifier.VerifyBuffer<mir2::proto::Heartbeat>(nullptr)) {
-                                  const auto* hb =
-                                      flatbuffers::GetRoot<mir2::proto::Heartbeat>(payload.data());
-                                  if (hb) {
-                                    seq = hb->seq();
-                                  }
-                                }
-                              }
-
-                              const uint32_t server_time = static_cast<uint32_t>(
-                                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      std::chrono::steady_clock::now().time_since_epoch())
-                                      .count());
-                              flatbuffers::FlatBufferBuilder builder;
-                              const auto rsp = mir2::proto::CreateHeartbeatRsp(
-                                  builder, seq, server_time);
-                              builder.Finish(rsp);
-                              const uint8_t* data = builder.GetBufferPointer();
-                              std::vector<uint8_t> rsp_payload(data, data + builder.GetSize());
-                              session->Send(static_cast<uint16_t>(common::MsgId::kHeartbeatRsp),
-                                            rsp_payload);
+                              HandleHeartbeat(session, payload);
                             });
 
-  auto forward_handler = [this](const std::shared_ptr<network::TcpSession>& session,
-                                uint16_t msg_id,
-                                const std::vector<uint8_t>& payload) {
-    if (!session) {
-      return;
-    }
-
-    // 使用动态路由表查找目标服务
-    const auto target = message_router_.GetRouteTarget(msg_id);
-    if (!target) {
-      SYSLOG_WARN("No route found for msg_id={}, dropping message", msg_id);
-      return;
-    }
-
-    if (!IsServiceConnected(*target)) {
-      SYSLOG_ERROR("Service not connected, msg_id={} target={}",
-                   msg_id, static_cast<int>(*target));
-      return;
-    }
-
-    // 检查认证要求
-    if (message_router_.RequiresAuth(msg_id) &&
-        session->GetAuthState() != network::TcpSession::AuthState::kAuthed) {
-      SYSLOG_WARN("Unauthorized message msg_id={} from session={}, dropping", msg_id, session->GetSessionId());
-      return;
-    }
-
-    const uint64_t client_id = session->GetSessionId();
-    ForwardToService(*target, client_id, msg_id, payload);
+  // 通用转发处理器：所有其他消息无脑转发到 LogicServer
+  // 双进程架构下，认证检查由 LogicServer 负责
+  auto universal_forward_handler = [this](const std::shared_ptr<network::TcpSession>& session,
+                                          uint16_t msg_id,
+                                          const std::vector<uint8_t>& payload) {
+    HandleForwardMessage(session, msg_id, payload);
   };
 
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kLoginReq),
-                            [forward_handler](const std::shared_ptr<network::TcpSession>& session,
-                                              const std::vector<uint8_t>& payload) {
-                              forward_handler(session,
-                                              static_cast<uint16_t>(common::MsgId::kLoginReq),
-                                              payload);
-                            });
+  // 批量注册需要转发的消息类型
+  const std::vector<uint16_t> forward_messages = {
+    static_cast<uint16_t>(common::MsgId::kLoginReq),
+    static_cast<uint16_t>(common::MsgId::kLogout),
+    static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
+    static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
+    static_cast<uint16_t>(common::MsgId::kRoleListReq),
+    static_cast<uint16_t>(common::MsgId::kMoveReq),
+    static_cast<uint16_t>(common::MsgId::kAttackReq),
+    static_cast<uint16_t>(common::MsgId::kSkillReq),
+    static_cast<uint16_t>(common::MsgId::kChatReq),
+    static_cast<uint16_t>(common::MsgId::kUseItemReq),
+    static_cast<uint16_t>(common::MsgId::kDropItemReq),
+    static_cast<uint16_t>(common::MsgId::kPickupItemReq),
+    static_cast<uint16_t>(common::MsgId::kEquipReq),
+    static_cast<uint16_t>(common::MsgId::kUnequipReq),
+    static_cast<uint16_t>(common::MsgId::kNpcInteractReq),
+    static_cast<uint16_t>(common::MsgId::kNpcMenuSelect),
+    static_cast<uint16_t>(common::MsgId::kGuildChat),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::KICK),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::MAKE_ALLY),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::BREAK_ALLY),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_NOTICE),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
+  };
 
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kLogout),
-                            [this](const std::shared_ptr<network::TcpSession>& session,
-                                   const std::vector<uint8_t>& payload) {
-                              if (!session) {
-                                return;
-                              }
-                              if (session->GetAuthState() != network::TcpSession::AuthState::kAuthed) {
-                                SYSLOG_WARN("Unauthorized logout from session={}, dropping",
-                                            session->GetSessionId());
-                                return;
-                              }
-                              const uint64_t client_id = session->GetSessionId();
-                              ForwardToService(common::ServiceType::kWorld, client_id,
-                                               static_cast<uint16_t>(common::MsgId::kLogout),
-                                               payload);
-                              ForwardToService(common::ServiceType::kGame, client_id,
-                                               static_cast<uint16_t>(common::MsgId::kLogout),
-                                               payload);
-                            });
+  for (auto msg_id : forward_messages) {
+    network_->RegisterHandler(
+        msg_id,
+        [universal_forward_handler, msg_id](const std::shared_ptr<network::TcpSession>& session,
+                                            const std::vector<uint8_t>& payload) {
+          universal_forward_handler(session, msg_id, payload);
+        });
+  }
 
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
-                            [forward_handler](const std::shared_ptr<network::TcpSession>& session,
-                                              const std::vector<uint8_t>& payload) {
-                              forward_handler(session,
-                                              static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
-                                              payload);
-                            });
-
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
-                            [forward_handler](const std::shared_ptr<network::TcpSession>& session,
-                                              const std::vector<uint8_t>& payload) {
-                              forward_handler(session,
-                                              static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
-                                              payload);
-                            });
-
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kRoleListReq),
-                            [forward_handler](const std::shared_ptr<network::TcpSession>& session,
-                                              const std::vector<uint8_t>& payload) {
-                              forward_handler(session,
-                                              static_cast<uint16_t>(common::MsgId::kRoleListReq),
-                                              payload);
-                            });
-
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kMoveReq),
-                            [forward_handler](const std::shared_ptr<network::TcpSession>& session,
-                                              const std::vector<uint8_t>& payload) {
-                              forward_handler(session, static_cast<uint16_t>(common::MsgId::kMoveReq),
-                                              payload);
-                            });
-
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kAttackReq),
-                            [forward_handler](const std::shared_ptr<network::TcpSession>& session,
-                                              const std::vector<uint8_t>& payload) {
-                              forward_handler(session,
-                                              static_cast<uint16_t>(common::MsgId::kAttackReq),
-                                              payload);
-                            });
-
-  network_->RegisterHandler(static_cast<uint16_t>(common::MsgId::kSkillReq),
-                            [forward_handler](const std::shared_ptr<network::TcpSession>& session,
-                                              const std::vector<uint8_t>& payload) {
-                              forward_handler(session, static_cast<uint16_t>(common::MsgId::kSkillReq),
-                                              payload);
-                            });
+  SYSLOG_INFO("Gateway registered {} message handlers (universal forward mode)",
+              forward_messages.size() + 1);
 }
 
-bool GatewayServer::ConnectServices() {
-  StartAsyncConnect(common::ServiceType::kWorld);
-  StartAsyncConnect(common::ServiceType::kGame);
-  StartAsyncConnect(common::ServiceType::kDb);
+bool GatewayServer::ConnectLogicService() {
+  StartAsyncConnect();
   return true;
 }
 
-void GatewayServer::StartAsyncConnect(common::ServiceType service) {
-  asio::post(app_.GetIoContext(), [this, service]() {
-    bool success = false;
-    switch (service) {
-      case common::ServiceType::kWorld:
-        success = ConnectToWorldService();
-        break;
-      case common::ServiceType::kGame:
-        success = ConnectToGameService();
-        break;
-      case common::ServiceType::kDb:
-        success = ConnectToDbService();
-        break;
-      default:
-        break;
-    }
-
-    if (!success) {
-      SYSLOG_ERROR("Initial connect failed, scheduling reconnect (service={})",
-                   static_cast<int>(service));
-      ScheduleReconnect(service, 0);
+void GatewayServer::StartAsyncConnect() {
+  asio::post(app_.GetIoContext(), [this]() {
+    if (!ConnectToLogicService()) {
+      SYSLOG_ERROR("Initial connect failed, scheduling reconnect (logic)");
+      ScheduleReconnect(0);
     }
   });
 }
 
-bool GatewayServer::IsServiceConnected(common::ServiceType service) const {
-  const auto* client = GetServiceClient(service);
-  return client && client->IsConnected();
+bool GatewayServer::IsLogicConnected() const {
+  return logic_client_ && logic_client_->IsConnected();
 }
 
-bool GatewayServer::ConnectToWorldService() {
+bool GatewayServer::ConnectToLogicService() {
   const auto& services = config::ConfigManager::Instance().GetServiceConfig();
 
-  if (!world_client_) {
-    world_client_ = std::make_unique<network::TcpClient>(app_.GetIoContext());
+  if (!logic_client_) {
+    logic_client_ = std::make_unique<network::TcpClient>(app_.GetIoContext());
   }
-  world_client_->SetPacketHandler([this](const network::Packet& packet) {
-    OnServicePacket(common::ServiceType::kWorld, packet);
+  logic_client_->SetPacketHandler([this](const network::Packet& packet) {
+    OnLogicPacket(packet);
   });
-  world_client_->SetDisconnectHandler([this]() {
-    SYSLOG_ERROR("World service disconnected, scheduling reconnect");
-    ScheduleReconnect(common::ServiceType::kWorld, 0);
+  logic_client_->SetDisconnectHandler([this]() {
+    SYSLOG_ERROR("Logic service disconnected, scheduling reconnect");
+    EnterHoldingState();
+    ScheduleReconnect(0);
   });
-  if (!world_client_->Connect(services.world.host, services.world.port)) {
-    SYSLOG_ERROR("Failed to connect World service");
-    monitor::Metrics::Instance().IncrementCounter("gateway.service.disconnected.world");
+
+  const auto& logic_endpoint = services.logic;
+  if (!logic_client_->Connect(logic_endpoint.host, logic_endpoint.port)) {
+    SYSLOG_ERROR("Failed to connect Logic service");
+    monitor::Metrics::Instance().IncrementCounter("gateway.service.disconnected.logic");
     return false;
   }
-  monitor::Metrics::Instance().IncrementCounter("gateway.service.connected.world");
-  world_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kServiceHello),
+  monitor::Metrics::Instance().IncrementCounter("gateway.service.connected.logic");
+  logic_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kServiceHello),
                       common::BuildServiceHello(common::ServiceType::kGateway));
   return true;
 }
 
-bool GatewayServer::ConnectToGameService() {
-  const auto& services = config::ConfigManager::Instance().GetServiceConfig();
-
-  if (!game_client_) {
-    game_client_ = std::make_unique<network::TcpClient>(app_.GetIoContext());
-  }
-  game_client_->SetPacketHandler([this](const network::Packet& packet) {
-    OnServicePacket(common::ServiceType::kGame, packet);
-  });
-  game_client_->SetDisconnectHandler([this]() {
-    SYSLOG_ERROR("Game service disconnected, scheduling reconnect");
-    ScheduleReconnect(common::ServiceType::kGame, 0);
-  });
-  if (!game_client_->Connect(services.game.host, services.game.port)) {
-    SYSLOG_ERROR("Failed to connect Game service");
-    monitor::Metrics::Instance().IncrementCounter("gateway.service.disconnected.game");
-    return false;
-  }
-  monitor::Metrics::Instance().IncrementCounter("gateway.service.connected.game");
-  game_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kServiceHello),
-                     common::BuildServiceHello(common::ServiceType::kGateway));
-  return true;
-}
-
-bool GatewayServer::ConnectToDbService() {
-  const auto& services = config::ConfigManager::Instance().GetServiceConfig();
-
-  if (!db_client_) {
-    db_client_ = std::make_unique<network::TcpClient>(app_.GetIoContext());
-  }
-  db_client_->SetPacketHandler([this](const network::Packet& packet) {
-    OnServicePacket(common::ServiceType::kDb, packet);
-  });
-  db_client_->SetDisconnectHandler([this]() {
-    SYSLOG_ERROR("DB service disconnected, scheduling reconnect");
-    ScheduleReconnect(common::ServiceType::kDb, 0);
-  });
-  if (!db_client_->Connect(services.db.host, services.db.port)) {
-    SYSLOG_ERROR("Failed to connect DB service");
-    monitor::Metrics::Instance().IncrementCounter("gateway.service.disconnected.db");
-    return false;
-  }
-  monitor::Metrics::Instance().IncrementCounter("gateway.service.connected.db");
-  db_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kServiceHello),
-                   common::BuildServiceHello(common::ServiceType::kGateway));
-  return true;
-}
-
-void GatewayServer::ScheduleReconnect(common::ServiceType service, int retry_count) {
+void GatewayServer::ScheduleReconnect(int retry_count) {
   {
     std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-    if (reconnecting_[service]) {
+    if (logic_reconnecting_) {
       return;
     }
-    reconnecting_[service] = true;
+    logic_reconnecting_ = true;
   }
 
   const int capped_retry = std::min(retry_count, 5);
   const int delay_ms = std::min(1000 * (1 << capped_retry), 30000);
-  SYSLOG_INFO("Scheduling reconnect to service {} in {}ms (retry={})",
-              static_cast<int>(service), delay_ms, retry_count);
+  SYSLOG_INFO("Scheduling reconnect to logic service in {}ms (retry={})",
+              delay_ms, retry_count);
 
   auto timer = std::make_shared<asio::steady_timer>(
       app_.GetIoContext(), std::chrono::milliseconds(delay_ms));
-  timer->async_wait([this, service, retry_count, timer](const asio::error_code& ec) {
+  timer->async_wait([this, retry_count, timer](const asio::error_code& ec) {
     if (ec) {
       std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-      reconnecting_[service] = false;
+      logic_reconnecting_ = false;
       return;
     }
 
-    bool success = false;
-    switch (service) {
-      case common::ServiceType::kWorld:
-        success = ConnectToWorldService();
-        break;
-      case common::ServiceType::kGame:
-        success = ConnectToGameService();
-        break;
-      case common::ServiceType::kDb:
-        success = ConnectToDbService();
-        break;
-      default:
-        break;
-    }
-
-    if (success) {
-      SYSLOG_INFO("Reconnected to service {}", static_cast<int>(service));
+    if (ConnectToLogicService()) {
+      SYSLOG_INFO("Reconnected to logic service");
       std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-      reconnecting_[service] = false;
+      logic_reconnecting_ = false;
       return;
     }
 
     {
       std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-      reconnecting_[service] = false;
+      logic_reconnecting_ = false;
     }
-    ScheduleReconnect(service, retry_count + 1);
+    ScheduleReconnect(retry_count + 1);
   });
 }
 
-void GatewayServer::ForwardToService(common::ServiceType service, uint64_t client_id, uint16_t msg_id,
-                                    const std::vector<uint8_t>& payload) {
-  auto* client = GetServiceClient(service);
-  if (!client || !client->IsConnected()) {
-    SYSLOG_ERROR("Service not connected, service={} msg_id={}",
-                 static_cast<int>(service), msg_id);
+void GatewayServer::ForwardToLogic(uint64_t client_id, uint16_t msg_id,
+                                   const std::vector<uint8_t>& payload) {
+  if (!logic_client_ || !logic_client_->IsConnected()) {
+    SYSLOG_ERROR("Logic service not connected, msg_id={}", msg_id);
     return;
   }
 
   monitor::Metrics::Instance().IncrementCounter("gateway.forward.total");
-  switch (service) {
-    case common::ServiceType::kWorld:
-      monitor::Metrics::Instance().IncrementCounter("gateway.forward.service.world");
-      break;
-    case common::ServiceType::kGame:
-      monitor::Metrics::Instance().IncrementCounter("gateway.forward.service.game");
-      break;
-    case common::ServiceType::kDb:
-      monitor::Metrics::Instance().IncrementCounter("gateway.forward.service.db");
-      break;
-    default:
-      monitor::Metrics::Instance().IncrementCounter("gateway.forward.service.unknown");
-      break;
-  }
+  monitor::Metrics::Instance().IncrementCounter("gateway.forward.service.logic");
 
   const auto routed = common::BuildRoutedMessage(client_id, msg_id, payload);
-  client->Send(static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), routed);
+  logic_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), routed);
 }
 
 void GatewayServer::NotifyClientDisconnected(uint64_t client_id) {
@@ -669,15 +475,12 @@ void GatewayServer::NotifyClientDisconnected(uint64_t client_id) {
     return;
   }
   const std::vector<uint8_t> empty_payload;
-  ForwardToService(common::ServiceType::kWorld, client_id,
-                   static_cast<uint16_t>(common::MsgId::kLogout),
-                   empty_payload);
-  ForwardToService(common::ServiceType::kGame, client_id,
-                   static_cast<uint16_t>(common::MsgId::kLogout),
-                   empty_payload);
+  ForwardToLogic(client_id,
+                 static_cast<uint16_t>(common::MsgId::kLogout),
+                 empty_payload);
 }
 
-void GatewayServer::OnServicePacket(common::ServiceType service, const network::Packet& packet) {
+void GatewayServer::OnLogicPacket(const network::Packet& packet) {
   if (!network_) {
     return;
   }
@@ -686,9 +489,63 @@ void GatewayServer::OnServicePacket(common::ServiceType service, const network::
     common::ServiceType remote = common::ServiceType::kGateway;
     bool ok = false;
     if (common::ParseServiceHelloAck(packet.payload, &remote, &ok)) {
-      SYSLOG_INFO("Service handshake ack: service={} remote={} ok={}",
-                  static_cast<int>(service), static_cast<int>(remote), ok);
+      SYSLOG_INFO("Logic service handshake ack: remote={} ok={}",
+                  static_cast<int>(remote), ok);
     }
+    return;
+  }
+
+  if (packet.msg_id == static_cast<uint16_t>(common::InternalMsgId::kContextRestore)) {
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::ContextRestore>(nullptr)) {
+      SYSLOG_WARN("Gateway failed to verify ContextRestore request");
+      return;
+    }
+    const auto* request =
+        flatbuffers::GetRoot<mir2::proto::ContextRestore>(packet.payload.data());
+    if (!request) {
+      return;
+    }
+    const uint32_t request_id = request->request_id();
+    const auto response_payload = BuildContextRestoreResponse(request_id);
+    if (logic_client_) {
+      logic_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kContextRestore),
+                          response_payload);
+    }
+    EnterRestoringState();
+    return;
+  }
+
+  if (packet.msg_id == static_cast<uint16_t>(common::InternalMsgId::kLogicReady)) {
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::LogicReady>(nullptr)) {
+      SYSLOG_WARN("Gateway failed to verify LogicReady");
+      return;
+    }
+    const auto* ready = flatbuffers::GetRoot<mir2::proto::LogicReady>(packet.payload.data());
+    if (!ready) {
+      return;
+    }
+    SYSLOG_INFO("LogicReady received (prewarm_count={}, duration_ms={})",
+                ready->prewarm_count(), ready->prewarm_duration_ms());
+    if (network_) {
+      flatbuffers::FlatBufferBuilder builder;
+      const uint8_t reason = 0;  // LogicRestart
+      const uint64_t timestamp_ms = static_cast<uint64_t>(network::TcpSession::NowMs());
+      const auto reset = mir2::proto::CreateKcpReset(builder, reason, timestamp_ms);
+      builder.Finish(reset);
+      const uint8_t* data = builder.GetBufferPointer();
+      std::vector<uint8_t> payload(data, data + builder.GetSize());
+      network_->Broadcast(static_cast<uint16_t>(common::InternalMsgId::kKcpReset), payload);
+      SYSLOG_INFO("Broadcast KcpReset to {} sessions", network_->GetConnectionCount());
+    }
+    EnterFlushingState();
+    return;
+  }
+
+  if (packet.msg_id ==
+      static_cast<uint16_t>(common::InternalMsgId::kBackpressureControl)) {
+    HandleBackpressureControl(packet.payload);
     return;
   }
 
@@ -707,19 +564,360 @@ void GatewayServer::OnServicePacket(common::ServiceType service, const network::
     SYSLOG_ERROR("Client session not found, client_id={}", routed.client_id);
     return;
   }
-  session->Send(routed.msg_id, routed.payload);
+  UpdateSessionContextFromLogicMessage(session, routed.msg_id, routed.payload);
+  network_->Send(routed.client_id, routed.msg_id, routed.payload);
 }
 
-network::TcpClient* GatewayServer::GetServiceClient(common::ServiceType service) const {
-  switch (service) {
-    case common::ServiceType::kWorld:
-      return world_client_.get();
-    case common::ServiceType::kGame:
-      return game_client_.get();
-    case common::ServiceType::kDb:
-      return db_client_.get();
-    default:
-      return nullptr;
+void GatewayServer::HandleBackpressureControl(const std::vector<uint8_t>& payload) {
+  if (payload.empty()) {
+    return;
+  }
+
+  flatbuffers::Verifier verifier(payload.data(), payload.size());
+  if (!verifier.VerifyBuffer<mir2::proto::BackpressureControl>(nullptr)) {
+    SYSLOG_WARN("Gateway failed to verify BackpressureControl");
+    return;
+  }
+
+  const auto* control =
+      flatbuffers::GetRoot<mir2::proto::BackpressureControl>(payload.data());
+  if (!control || control->client_id() == 0) {
+    return;
+  }
+
+  const uint64_t client_id = control->client_id();
+  const auto action = control->action();
+  auto session = GetConnectionSession(client_id);
+  if (!session) {
+    SYSLOG_DEBUG("Gateway backpressure target missing (client_id={})", client_id);
+    return;
+  }
+
+  if (action == mir2::proto::BackpressureAction::RESUME_READ) {
+    session->ResumeRead();
+    {
+      std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+      client_backpressure_until_ms_.erase(client_id);
+    }
+    monitor::Metrics::Instance().IncrementCounter("gateway.backpressure.resume_total");
+    return;
+  }
+
+  const uint32_t pause_ms = std::clamp(
+      control->duration_ms() == 0 ? kDefaultBackpressurePauseMs : control->duration_ms(),
+      1u,
+      kMaxBackpressurePauseMs);
+  const int64_t until_ms = network::TcpSession::NowMs() + pause_ms;
+
+  session->PauseRead();
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    auto& existing = client_backpressure_until_ms_[client_id];
+    if (existing < until_ms) {
+      existing = until_ms;
+    }
+  }
+  monitor::Metrics::Instance().IncrementCounter("gateway.backpressure.pause_total");
+}
+
+void GatewayServer::ResumeBackpressuredSessions(int64_t now_ms) {
+  std::vector<std::shared_ptr<network::TcpSession>> sessions_to_resume;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    for (auto it = client_backpressure_until_ms_.begin();
+         it != client_backpressure_until_ms_.end();) {
+      if (now_ms < it->second) {
+        ++it;
+        continue;
+      }
+      auto session_it = session_map_.find(it->first);
+      if (session_it != session_map_.end() && session_it->second) {
+        sessions_to_resume.push_back(session_it->second);
+      }
+      it = client_backpressure_until_ms_.erase(it);
+    }
+  }
+
+  for (const auto& session : sessions_to_resume) {
+    if (session) {
+      session->ResumeRead();
+      monitor::Metrics::Instance().IncrementCounter("gateway.backpressure.resume_total");
+    }
+  }
+}
+
+std::vector<uint8_t> GatewayServer::BuildContextRestoreResponse(uint32_t request_id) const {
+  std::vector<ConnectionSnapshot> snapshot;
+  {
+    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    snapshot.reserve(session_map_.size());
+    for (const auto& [client_id, session] : session_map_) {
+      if (!session || session->GetState() == network::TcpSession::SessionState::kClosed) {
+        continue;
+      }
+      ConnectionSnapshot entry;
+      entry.client_id = client_id;
+      entry.player_id = static_cast<uint32_t>(session->GetUserId());
+      entry.account_id = static_cast<uint32_t>(session->GetAccountId());
+      entry.ip_address = session->GetRemoteAddress();
+      auto it = connection_connected_at_ms_.find(client_id);
+      entry.connected_at_ms = it != connection_connected_at_ms_.end()
+          ? static_cast<uint64_t>(it->second)
+          : static_cast<uint64_t>(network::TcpSession::NowMs());
+      entry.last_active_ms = static_cast<uint64_t>(session->GetLastHeartbeatMs());
+      snapshot.push_back(std::move(entry));
+    }
+  }
+
+  flatbuffers::FlatBufferBuilder builder;
+  std::vector<flatbuffers::Offset<mir2::proto::ConnectionContext>> contexts;
+  contexts.reserve(snapshot.size());
+  for (const auto& entry : snapshot) {
+    const auto ip_offset = builder.CreateString(entry.ip_address);
+    contexts.push_back(mir2::proto::CreateConnectionContext(
+        builder,
+        entry.client_id,
+        entry.player_id,
+        entry.account_id,
+        ip_offset,
+        entry.connected_at_ms,
+        entry.last_active_ms));
+  }
+
+  const auto connections_offset = builder.CreateVector(contexts);
+  const auto response = mir2::proto::CreateContextRestoreResponse(
+      builder,
+      request_id,
+      connections_offset,
+      static_cast<uint32_t>(snapshot.size()));
+  builder.Finish(response);
+
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
+}
+
+void GatewayServer::EnterHoldingState() {
+  std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+  if (holder_state_ != ConnectionHolder::State::FORWARDING) {
+    return;
+  }
+  holder_state_ = ConnectionHolder::State::HOLDING;
+  for (auto& [_, holder] : connection_holders_) {
+    if (holder) {
+      ApplyHolderState(*holder, holder_state_);
+    }
+  }
+}
+
+void GatewayServer::EnterRestoringState() {
+  std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+  if (holder_state_ == ConnectionHolder::State::FLUSHING ||
+      holder_state_ == ConnectionHolder::State::RESTORING) {
+    return;
+  }
+  holder_state_ = ConnectionHolder::State::RESTORING;
+  for (auto& [_, holder] : connection_holders_) {
+    if (holder) {
+      ApplyHolderState(*holder, holder_state_);
+    }
+  }
+}
+
+void GatewayServer::EnterFlushingState() {
+  std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+  if (holder_state_ == ConnectionHolder::State::FLUSHING) {
+    return;
+  }
+  holder_state_ = ConnectionHolder::State::FLUSHING;
+  for (auto& [_, holder] : connection_holders_) {
+    if (holder) {
+      ApplyHolderState(*holder, holder_state_);
+    }
+  }
+}
+
+void GatewayServer::FlushBufferedMessages() {
+  if (!IsLogicConnected()) {
+    return;
+  }
+
+  std::vector<std::pair<uint64_t, BufferedMessage>> drained;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    if (holder_state_ != ConnectionHolder::State::FLUSHING) {
+      return;
+    }
+
+    for (auto& [client_id, holder] : connection_holders_) {
+      if (!holder) {
+        continue;
+      }
+      BufferedMessage message{};
+      while (holder->PopBufferedMessage(&message)) {
+        drained.emplace_back(client_id, std::move(message));
+        message = BufferedMessage{};
+      }
+    }
+
+    bool empty = true;
+    for (const auto& [_, holder] : connection_holders_) {
+      if (holder && holder->HasBufferedMessages()) {
+        empty = false;
+        break;
+      }
+    }
+
+    if (empty) {
+      holder_state_ = ConnectionHolder::State::FORWARDING;
+      for (auto& [_, holder] : connection_holders_) {
+        if (holder) {
+          ApplyHolderState(*holder, holder_state_);
+        }
+      }
+    }
+  }
+
+  for (auto& entry : drained) {
+    const uint64_t client_id = entry.first;
+    BufferedMessage message = std::move(entry.second);
+    asio::post(app_.GetIoContext(),
+               [this, client_id, message = std::move(message)]() mutable {
+                 ForwardToLogic(client_id, message.msg_id, message.payload);
+               });
+  }
+}
+
+void GatewayServer::ApplyHolderState(ConnectionHolder& holder,
+                                     ConnectionHolder::State target) {
+  switch (target) {
+    case ConnectionHolder::State::FORWARDING:
+      if (holder.GetState() == ConnectionHolder::State::HOLDING) {
+        holder.EnterRestoring();
+      }
+      if (holder.GetState() == ConnectionHolder::State::RESTORING) {
+        holder.EnterFlushing();
+      }
+      if (holder.GetState() == ConnectionHolder::State::FLUSHING) {
+        holder.ReturnToForwarding();
+      }
+      break;
+    case ConnectionHolder::State::HOLDING:
+      holder.EnterHolding();
+      break;
+    case ConnectionHolder::State::RESTORING:
+      if (holder.GetState() == ConnectionHolder::State::FORWARDING) {
+        holder.EnterHolding();
+      }
+      if (holder.GetState() == ConnectionHolder::State::HOLDING) {
+        holder.EnterRestoring();
+      }
+      break;
+    case ConnectionHolder::State::FLUSHING:
+      if (holder.GetState() == ConnectionHolder::State::FORWARDING) {
+        holder.EnterHolding();
+      }
+      if (holder.GetState() == ConnectionHolder::State::HOLDING) {
+        holder.EnterRestoring();
+      }
+      if (holder.GetState() == ConnectionHolder::State::RESTORING) {
+        holder.EnterFlushing();
+      }
+      break;
+  }
+}
+
+network::TcpClient* GatewayServer::GetLogicClient() const {
+  return logic_client_.get();
+}
+
+void GatewayServer::HandleHeartbeat(const std::shared_ptr<network::TcpSession>& session,
+                                    const std::vector<uint8_t>& payload) {
+  if (!session) {
+    return;
+  }
+
+  uint32_t seq = 0;
+  if (!payload.empty()) {
+    flatbuffers::Verifier verifier(payload.data(), payload.size());
+    if (verifier.VerifyBuffer<mir2::proto::Heartbeat>(nullptr)) {
+      const auto* hb = flatbuffers::GetRoot<mir2::proto::Heartbeat>(payload.data());
+      if (hb) {
+        seq = hb->seq();
+      }
+    }
+  }
+
+  const uint32_t server_time = static_cast<uint32_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+
+  flatbuffers::FlatBufferBuilder builder;
+  const auto rsp = mir2::proto::CreateHeartbeatRsp(builder, seq, server_time);
+  builder.Finish(rsp);
+
+  const uint8_t* data = builder.GetBufferPointer();
+  std::vector<uint8_t> rsp_payload(data, data + builder.GetSize());
+
+  if (network_) {
+    network_->Send(session->GetSessionId(),
+                   static_cast<uint16_t>(common::MsgId::kHeartbeatRsp),
+                   rsp_payload);
+  } else {
+    session->Send(static_cast<uint16_t>(common::MsgId::kHeartbeatRsp), rsp_payload);
+  }
+}
+
+void GatewayServer::HandleForwardMessage(const std::shared_ptr<network::TcpSession>& session,
+                                         uint16_t msg_id,
+                                         const std::vector<uint8_t>& payload) {
+  if (!session) {
+    return;
+  }
+
+  const uint64_t client_id = session->GetSessionId();
+  if (client_id == 0) {
+    SYSLOG_WARN("Invalid session ID, dropping message msg_id={}", msg_id);
+    return;
+  }
+
+  // 检查 LogicServer 连接状态
+  if (!IsLogicConnected()) {
+    EnterHoldingState();
+  }
+
+  // 通过 ConnectionHolder 处理消息（缓冲或转发）
+  ConnectionHolder::Action action = ConnectionHolder::Action::kForward;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    auto& holder = connection_holders_[client_id];
+    if (!holder) {
+      holder = std::make_unique<ConnectionHolder>();
+      ApplyHolderState(*holder, holder_state_);
+      connection_connected_at_ms_.try_emplace(client_id, network::TcpSession::NowMs());
+    }
+    action = holder->HandleClientMessage(msg_id, mir2::common::ChannelType::kTcp, payload);
+  }
+
+  // 根据 ConnectionHolder 的决策执行操作
+  switch (action) {
+    case ConnectionHolder::Action::kForward:
+      if (!IsLogicConnected()) {
+        SYSLOG_ERROR("Logic service not connected, msg_id={}", msg_id);
+        return;
+      }
+      ForwardToLogic(client_id, msg_id, payload);
+      break;
+    case ConnectionHolder::Action::kBuffered:
+      // 消息已缓冲，等待 LogicServer 恢复
+      break;
+    case ConnectionHolder::Action::kDroppedRealtime:
+      // 实时消息已丢弃（如移动消息）
+      break;
+    case ConnectionHolder::Action::kDisconnect:
+      // 缓冲区溢出，踢下线
+      session->Kick(common::ErrorCode::kKickAdminManual, "Gateway holding overflow");
+      break;
   }
 }
 

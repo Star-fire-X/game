@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_SPATIAL_QUERY_H
-#define LEGEND2_SERVER_ECS_SPATIAL_QUERY_H
+#ifndef MIR2_SERVER_ECS_SPATIAL_QUERY_H_
+#define MIR2_SERVER_ECS_SPATIAL_QUERY_H_
 
 #include "ecs/components/transform_component.h"
 #include "common/types.h"

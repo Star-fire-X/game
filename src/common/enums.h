@@ -72,6 +72,9 @@ enum class MsgId : uint16_t {
   kChatRsp = 5002,
   kPrivateChat = 5010,
   kGuildChat = 5020,
+  kTeamChat = 5030,
+  kAreaChat = 5040,
+  kSystemMsg = 5050,
 
   // ========== NPC模块 (6000-6999) ==========
   kNpcInteractReq = 6001,   // 玩家点击NPC请求
@@ -87,7 +90,11 @@ enum class MsgId : uint16_t {
   kHeartbeat = 9001,
   kHeartbeatRsp = 9002,
   kKick = 9010,
-  kServerNotice = 9020
+  kServerNotice = 9020,
+  kKcpUpgradeRequest = 9100,
+  kKcpUpgradeResponse = 9101,
+  kKcpHeartbeat = 9102,
+  kKcpHeartbeatAck = 9103
 };
 
 /**
@@ -95,8 +102,9 @@ enum class MsgId : uint16_t {
  */
 enum class PacketFlags : uint8_t {
   kNone = 0x00,
-  kEncrypted = 0x01,  // bit0: 加密
-  kCompressed = 0x02  // bit1: 压缩
+  kCompressed = 0x01,  // bit0: 压缩
+  kChannelKcp = 0x02,  // bit1: KCP 通道
+  kEncrypted = 0x04    // bit2: 预留(加密)
 };
 
 /**
@@ -243,9 +251,7 @@ enum class AttackType : uint8_t {
  */
 enum class ServiceType : uint8_t {
   kGateway = 1,
-  kWorld = 2,
-  kGame = 3,
-  kDb = 4
+  kLogic = 3  // 保持值为3以兼容旧协议（原kGame）
 };
 
 /**
@@ -254,7 +260,11 @@ enum class ServiceType : uint8_t {
 enum class InternalMsgId : uint16_t {
   kServiceHello = 60000,
   kServiceHelloAck = 60001,
-  kRoutedMessage = 60010
+  kRoutedMessage = 60010,
+  kContextRestore = 60020,   // LogicServer -> Gateway: 请求连接上下文
+  kLogicReady = 60021,       // LogicServer -> Gateway: Pre-warm完成，可转发
+  kKcpReset = 60022,         // Gateway -> Client: 重置KCP会话
+  kBackpressureControl = 60023  // LogicServer <-> Gateway: socket读背压控制
 };
 
 }  // namespace mir2::common

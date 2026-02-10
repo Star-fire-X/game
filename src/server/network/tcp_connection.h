@@ -85,7 +85,12 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
   using BytesHandler = std::function<void(const uint8_t*, size_t)>;
   using DisconnectHandler = std::function<void(uint64_t)>;
 
-  TcpConnection(std::unique_ptr<SocketAdapter> socket, uint64_t connection_id);
+  // Prevent unbounded memory growth when peers read slowly.
+  static constexpr size_t kDefaultMaxWriteQueueSize = 100;
+
+  TcpConnection(std::unique_ptr<SocketAdapter> socket,
+                uint64_t connection_id,
+                size_t max_write_queue_size = kDefaultMaxWriteQueueSize);
 
   /**
    * @brief 启动读循环
@@ -96,6 +101,7 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
    * @brief 发送原始字节流
    */
   void SendRaw(const std::vector<uint8_t>& bytes);
+  void SendRaw(std::vector<uint8_t>&& bytes);
 
   /**
    * @brief 关闭连接
@@ -108,6 +114,21 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
   void SetReadHandler(BytesHandler handler);
 
   /**
+   * @brief Pause socket read loop (backpressure).
+   */
+  void PauseRead();
+
+  /**
+   * @brief Resume socket read loop.
+   */
+  void ResumeRead();
+
+  /**
+   * @brief Whether read loop is currently paused.
+   */
+  bool IsReadPaused() const { return read_paused_.load(std::memory_order_acquire); }
+
+  /**
    * @brief 设置断开回调
    */
   void SetDisconnectHandler(DisconnectHandler handler);
@@ -118,9 +139,6 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
   IoExecutor GetExecutor() { return socket_->GetExecutor(); }
 
  private:
-  // Prevent unbounded memory growth when clients read slowly.
-  static constexpr size_t kMaxWriteQueueSize = 100;
-
   void DoRead();
   void DoWrite();
 
@@ -128,7 +146,11 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
   uint64_t connection_id_ = 0;
   std::array<uint8_t, 4096> read_buffer_{};
   std::deque<std::vector<uint8_t>> write_queue_;
+  size_t max_write_queue_size_ = kDefaultMaxWriteQueueSize;
   std::atomic<bool> writing_{false};
+  std::atomic<bool> read_in_flight_{false};
+  std::atomic<bool> read_paused_{false};
+  std::atomic<bool> closed_{false};
 
   BytesHandler read_handler_;
   DisconnectHandler disconnect_handler_;

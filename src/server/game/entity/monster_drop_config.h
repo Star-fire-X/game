@@ -3,8 +3,8 @@
  * @brief 怪物掉落配置
  */
 
-#ifndef MIR2_GAME_ENTITY_MONSTER_DROP_CONFIG_H
-#define MIR2_GAME_ENTITY_MONSTER_DROP_CONFIG_H
+#ifndef MIR2_GAME_ENTITY_MONSTER_DROP_CONFIG_H_
+#define MIR2_GAME_ENTITY_MONSTER_DROP_CONFIG_H_
 
 #include <cstdint>
 #include <vector>
@@ -43,4 +43,4 @@ enum class LootOwnershipMode : uint8_t {
 
 }  // namespace mir2::game::entity
 
-#endif  // MIR2_GAME_ENTITY_MONSTER_DROP_CONFIG_H
+#endif  // MIR2_GAME_ENTITY_MONSTER_DROP_CONFIG_H_

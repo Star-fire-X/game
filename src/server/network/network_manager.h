@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -82,7 +82,7 @@ class NetworkManager {
   TcpServer server_;
   MessageDispatcher dispatcher_;
 
-  mutable std::mutex mutex_;
+  mutable std::shared_mutex mutex_;
   std::unordered_map<uint64_t, std::shared_ptr<TcpConnection>> connections_;
   std::unordered_map<uint64_t, std::shared_ptr<TcpSession>> sessions_;
   int64_t last_heartbeat_check_ms_ = 0;

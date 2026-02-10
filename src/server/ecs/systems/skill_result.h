@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_SKILL_RESULT_H
-#define LEGEND2_SERVER_ECS_SKILL_RESULT_H
+#ifndef MIR2_SERVER_ECS_SKILL_RESULT_H_
+#define MIR2_SERVER_ECS_SKILL_RESULT_H_
 
 #include "ecs/components/effect_component.h"
 #include "common/types/error_codes.h"

@@ -6,6 +6,7 @@
 #include "ecs/dirty_tracker.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/combat_events.h"
+#include "ecs/systems/effect_system.h"
 #include "ecs/systems/equipment_bonus_system.h"
 #include "ecs/systems/passive_skill_system.h"
 #include "ecs/systems/spatial_query.h"
@@ -169,7 +170,7 @@ void CombatSystem::Update(entt::registry& registry, float delta_time) {
         return;
     }
 
-    combat_group_.each([&](entt::entity entity,
+    combat_group_.each([&](entt::entity /*entity*/,
                            CombatComponent& combat,
                            CharacterAttributesComponent& attributes,
                            CharacterStateComponent& state) {
@@ -186,7 +187,9 @@ void CombatSystem::Update(entt::registry& registry, float delta_time) {
 }
 
 int CombatSystem::TakeDamage(entt::registry& registry, entt::entity entity, int damage,
-                             EventBus* event_bus) {
+                             EventBus* event_bus,
+                             entt::entity killer,
+                             uint32_t skill_id) {
     auto* attributes = registry.try_get<CharacterAttributesComponent>(entity);
     if (!attributes) {
         return 0;
@@ -199,10 +202,14 @@ int CombatSystem::TakeDamage(entt::registry& registry, entt::entity entity, int 
 
     // 确保至少造成1点伤害
     int actual_damage = std::max(1, damage);
-    // HP不能低于0
-    attributes->hp = std::max(0, attributes->hp - actual_damage);
-    dirty_tracker::mark_attributes_dirty(registry, entity);
+    const int old_hp = attributes->hp;
+    if (actual_damage >= old_hp) {
+        Die(registry, entity, event_bus, killer, skill_id);
+        return old_hp;
+    }
 
+    attributes->hp = old_hp - actual_damage;
+    dirty_tracker::mark_attributes_dirty(registry, entity);
     return actual_damage;
 }
 
@@ -238,7 +245,7 @@ legend2::DamageResult CombatSystem::TakeDamageWithCalc(entt::registry& registry,
     auto result = legend2::combat::DamageCalculator::calculate(input, config, rolls);
 
     if (!result.is_miss) {
-        TakeDamage(registry, target, result.final_damage, event_bus);
+        TakeDamage(registry, target, result.final_damage, event_bus, attacker, 0);
 
         // 麻痹戒指效果(Shape:113) - 10%概率定身目标
         if (has_ring_with_shape(registry, attacker, 113)) {
@@ -258,6 +265,7 @@ legend2::DamageResult CombatSystem::TakeDamageWithCalc(entt::registry& registry,
             events::DamageDealtEvent event;
             event.attacker = attacker;
             event.target = target;
+            event.skill_id = 0;
             event.damage = result.final_damage;
             event.is_critical = result.is_critical;
             event.is_miss = false;
@@ -330,33 +338,42 @@ bool CombatSystem::ConsumeMP(entt::registry& registry, entt::entity entity, int 
     return true;
 }
 
-void CombatSystem::Die(entt::registry& registry, entt::entity entity, EventBus* event_bus) {
+void CombatSystem::Die(entt::registry& registry, entt::entity entity, EventBus* event_bus,
+                       entt::entity killer, uint32_t skill_id) {
     auto* attributes = registry.try_get<CharacterAttributesComponent>(entity);
     if (!attributes) {
         return;
     }
 
-    if (attributes->hp != 0) {
-        // 复活戒指效果(Shape:114) - 死亡时自动复活
-        if (has_ring_with_shape(registry, entity, 114)) {
-            // 恢复30%的HP，避免死亡
-            const int revive_hp = static_cast<int>(attributes->max_hp * 0.3);
-            attributes->hp = revive_hp;
-            dirty_tracker::mark_attributes_dirty(registry, entity);
+    if (attributes->hp <= 0) {
+        return;
+    }
 
-            // TODO: 消耗复活戒指的耐久度
-            return; // 复活成功，不执行死亡逻辑
-        }
-
-        attributes->hp = 0;
+    // 复活戒指效果(Shape:114) - 死亡时自动复活
+    if (has_ring_with_shape(registry, entity, 114)) {
+        // 恢复30%的HP，避免死亡
+        const int revive_hp = static_cast<int>(attributes->max_hp * 0.3);
+        attributes->hp = revive_hp;
         dirty_tracker::mark_attributes_dirty(registry, entity);
 
-        // 发布死亡事件
-        if (event_bus) {
-            events::EntityDeathEvent event;
-            event.entity = entity;
-            event_bus->Publish(event);
+        // TODO: 消耗复活戒指的耐久度
+        return; // 复活成功，不执行死亡逻辑
+    }
+
+    attributes->hp = 0;
+    dirty_tracker::mark_attributes_dirty(registry, entity);
+
+    // 发布死亡事件
+    if (event_bus) {
+        events::EntityDeathEvent event;
+        event.entity = entity;
+        event.killer = killer;
+        event.skill_id = skill_id;
+        if (const auto* state = registry.try_get<CharacterStateComponent>(entity)) {
+            event.position = state->position;
+            event.map_id = state->map_id;
         }
+        event_bus->Publish(event);
     }
 }
 
@@ -429,6 +446,10 @@ legend2::AttackResult CombatSystem::ExecuteAttack(entt::registry& registry,
     }
 
     auto damage = TakeDamageWithCalc(registry, attacker, target, config, event_bus);
+    if (!damage.is_miss) {
+        EffectSystem effect_system(registry);
+        effect_system.break_invisibility(attacker);
+    }
     const bool target_died = target_attributes->hp <= 0;
     return legend2::AttackResult::ok(damage, target_died);
 }
@@ -526,12 +547,13 @@ legend2::AttackResult CombatSystem::ProcessAttackWithType(entt::registry& regist
                 hit_result.final_damage = 1;
             }
 
-            TakeDamage(registry, current_target, hit_result.final_damage, event_bus);
+            TakeDamage(registry, current_target, hit_result.final_damage, event_bus, attacker, 0);
 
             if (event_bus) {
                 events::DamageDealtEvent event;
                 event.attacker = attacker;
                 event.target = current_target;
+                event.skill_id = 0;
                 event.damage = hit_result.final_damage;
                 event.is_critical = hit_result.is_critical;
                 event.is_miss = false;
@@ -563,6 +585,10 @@ legend2::AttackResult CombatSystem::ProcessAttackWithType(entt::registry& regist
         return legend2::AttackResult::error(mir2::common::ErrorCode::TARGET_NOT_FOUND);
     }
 
+    if (!primary_damage.is_miss) {
+        EffectSystem effect_system(registry);
+        effect_system.break_invisibility(attacker);
+    }
     const bool target_died = target_attributes->hp <= 0;
     return legend2::AttackResult::ok(primary_damage, target_died);
 }

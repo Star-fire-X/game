@@ -158,7 +158,7 @@ db_logs/
 world_logs/
 game_logs/
 gateway_logs/
-
+build-wsl/
 # Docker build cache
 .docker-cache/
 

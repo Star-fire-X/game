@@ -5,8 +5,8 @@
  * 提供线程安全的局部静态单例实现。
  */
 
-#ifndef MIR2_CORE_SINGLETON_H
-#define MIR2_CORE_SINGLETON_H
+#ifndef MIR2_CORE_SINGLETON_H_
+#define MIR2_CORE_SINGLETON_H_
 
 namespace mir2::core {
 
@@ -36,4 +36,4 @@ class Singleton {
 
 }  // namespace mir2::core
 
-#endif  // MIR2_CORE_SINGLETON_H
+#endif  // MIR2_CORE_SINGLETON_H_

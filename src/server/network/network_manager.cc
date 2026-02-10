@@ -2,6 +2,8 @@
 
 #include <asio/post.hpp>
 
+#include <shared_mutex>
+
 #include "monitor/metrics.h"
 
 namespace {
@@ -34,16 +36,22 @@ void NetworkManager::RegisterHandler(uint16_t msg_id, MessageHandler handler) {
 }
 
 void NetworkManager::Send(uint64_t connection_id, uint16_t msg_id, const std::vector<uint8_t>& payload) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = sessions_.find(connection_id);
-  if (it != sessions_.end() && it->second) {
-    it->second->Send(msg_id, payload);
+  std::shared_ptr<TcpSession> session;
+  {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    auto it = sessions_.find(connection_id);
+    if (it != sessions_.end()) {
+      session = it->second;
+    }
+  }
+  if (session) {
+    session->Send(msg_id, payload);
   }
 }
 
 void NetworkManager::Broadcast(uint16_t msg_id, const std::vector<uint8_t>& payload) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [_, session] : sessions_) {
+  auto sessions = GetAllSessions();
+  for (auto& session : sessions) {
     if (session) {
       session->Send(msg_id, payload);
     }
@@ -52,8 +60,8 @@ void NetworkManager::Broadcast(uint16_t msg_id, const std::vector<uint8_t>& payl
 
 void NetworkManager::BroadcastIf(uint16_t msg_id, const std::vector<uint8_t>& payload,
                                  SessionFilter filter) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [_, session] : sessions_) {
+  auto sessions = GetAllSessions();
+  for (auto& session : sessions) {
     if (session && (!filter || filter(session))) {
       session->Send(msg_id, payload);
     }
@@ -61,7 +69,7 @@ void NetworkManager::BroadcastIf(uint16_t msg_id, const std::vector<uint8_t>& pa
 }
 
 std::shared_ptr<TcpSession> NetworkManager::GetSession(uint64_t session_id) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = sessions_.find(session_id);
   if (it != sessions_.end()) {
     return it->second;
@@ -71,7 +79,7 @@ std::shared_ptr<TcpSession> NetworkManager::GetSession(uint64_t session_id) cons
 
 std::vector<std::shared_ptr<TcpSession>> NetworkManager::GetAllSessions() const {
   std::vector<std::shared_ptr<TcpSession>> result;
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   result.reserve(sessions_.size());
   for (const auto& [_, session] : sessions_) {
     if (session) {
@@ -82,7 +90,7 @@ std::vector<std::shared_ptr<TcpSession>> NetworkManager::GetAllSessions() const 
 }
 
 size_t NetworkManager::GetConnectionCount() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   return sessions_.size();
 }
 
@@ -99,7 +107,7 @@ void NetworkManager::Tick() {
     std::vector<std::shared_ptr<TcpSession>> expired_sessions;
     size_t timeout_count = 0;
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::shared_lock<std::shared_mutex> lock(mutex_);
       for (auto& [_, session] : sessions_) {
         if (!session) {
           continue;
@@ -134,7 +142,7 @@ void NetworkManager::AddConnection(const std::shared_ptr<TcpConnection>& connect
   });
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     connections_[connection->GetConnectionId()] = connection;
   }
 
@@ -144,7 +152,7 @@ void NetworkManager::AddConnection(const std::shared_ptr<TcpConnection>& connect
 void NetworkManager::RemoveConnection(uint64_t connection_id) {
   std::shared_ptr<TcpConnection> connection;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = connections_.find(connection_id);
     if (it == connections_.end()) {
       return;
@@ -157,7 +165,7 @@ void NetworkManager::RemoveConnection(uint64_t connection_id) {
 }
 
 std::shared_ptr<TcpConnection> NetworkManager::FindConnection(uint64_t connection_id) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = connections_.find(connection_id);
   if (it != connections_.end()) {
     return it->second;
@@ -168,7 +176,7 @@ std::shared_ptr<TcpConnection> NetworkManager::FindConnection(uint64_t connectio
 void NetworkManager::BroadcastRaw(const std::vector<uint8_t>& bytes) {
   std::vector<std::shared_ptr<TcpConnection>> connections;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     connections.reserve(connections_.size());
     for (const auto& [_, connection] : connections_) {
       if (connection) {
@@ -187,7 +195,7 @@ void NetworkManager::BroadcastRaw(const std::vector<uint8_t>& bytes) {
 void NetworkManager::Close(uint64_t connection_id) {
   std::shared_ptr<TcpConnection> connection;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = connections_.find(connection_id);
     if (it != connections_.end()) {
       connection = it->second;
@@ -202,7 +210,7 @@ void NetworkManager::Close(uint64_t connection_id) {
 void NetworkManager::StopAll() {
   std::vector<std::shared_ptr<TcpConnection>> connections;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     connections.reserve(connections_.size());
     for (const auto& [_, connection] : connections_) {
       if (connection) {
@@ -241,7 +249,7 @@ void NetworkManager::OnConnectionClosed(const std::shared_ptr<TcpConnection>& co
 
   std::shared_ptr<TcpSession> session;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = sessions_.find(connection->GetConnectionId());
     if (it != sessions_.end()) {
       session = it->second;
@@ -260,7 +268,7 @@ void NetworkManager::OnSessionConnected(const std::shared_ptr<TcpSession>& sessi
   }
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     sessions_[session->GetSessionId()] = session;
     monitor::Metrics::Instance().SetConnections(static_cast<int64_t>(sessions_.size()));
   }
@@ -280,7 +288,7 @@ void NetworkManager::OnSessionDisconnected(const std::shared_ptr<TcpSession>& se
   if (!session) {
     return;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   sessions_.erase(session->GetSessionId());
   monitor::Metrics::Instance().SetConnections(static_cast<int64_t>(sessions_.size()));
 }

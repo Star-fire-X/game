@@ -3,8 +3,8 @@
  * @brief 小队/组队组件定义
  */
 
-#ifndef MIR2_ECS_COMPONENTS_PARTY_COMPONENT_H
-#define MIR2_ECS_COMPONENTS_PARTY_COMPONENT_H
+#ifndef MIR2_ECS_COMPONENTS_PARTY_COMPONENT_H_
+#define MIR2_ECS_COMPONENTS_PARTY_COMPONENT_H_
 
 #include <entt/entt.hpp>
 #include <cstdint>
@@ -48,8 +48,9 @@ struct PartyComponent {
  */
 struct PartyMemberComponent {
     uint32_t party_id = 0;  ///< 所属小队ID
+    uint32_t character_id = 0;  ///< 角色ID（用于快速查询）
 };
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_COMPONENTS_PARTY_COMPONENT_H
+#endif  // MIR2_ECS_COMPONENTS_PARTY_COMPONENT_H_

@@ -3,15 +3,15 @@
  * @brief 配置管理器
  */
 
-#ifndef MIR2_CONFIG_CONFIG_MANAGER_H
-#define MIR2_CONFIG_CONFIG_MANAGER_H
+#ifndef MIR2_CONFIG_CONFIG_MANAGER_H_
+#define MIR2_CONFIG_CONFIG_MANAGER_H_
 
 #include <cstddef>
 #include <string>
 
 #include <yaml-cpp/yaml.h>
 
-#include "server/combat/combat_core.h"
+#include "server/ecs/systems/combat_core.h"
 #include "core/singleton.h"
 #include "common/constants.h"
 
@@ -25,10 +25,13 @@ struct ServerConfig {
   std::string name = "Mir2-Server";
   std::string bind_ip = "0.0.0.0";
   uint16_t port = common::kDefaultServerPort;
+  uint16_t udp_port = 0;
   int io_threads = common::kDefaultIoThreads;
   int max_connections = common::kMaxConnections;
   int tick_interval_ms = common::kDefaultTickIntervalMs;
   int heartbeat_timeout_ms = 30000;
+  int login_ip_rate_limit_capacity = 5;
+  int login_ip_rate_limit_refill_rate = 1;
   uint16_t metrics_port = 0;
 };
 
@@ -76,9 +79,7 @@ struct ServiceEndpoint {
  * @brief 服务集群配置
  */
 struct ServiceConfig {
-  ServiceEndpoint world{ "127.0.0.1", 7001 };
-  ServiceEndpoint game{ "127.0.0.1", 7003 };
-  ServiceEndpoint db{ "127.0.0.1", 7002 };
+  ServiceEndpoint logic{ "127.0.0.1", 8002 };
 };
 
 /**
@@ -109,6 +110,11 @@ class ConfigManager : public core::Singleton<ConfigManager> {
    */
   bool Reload();
 
+  /**
+   * @brief 检查配置是否已加载
+   */
+  bool IsLoaded() const { return loaded_; }
+
   const ServerConfig& GetServerConfig() const { return server_config_; }
   const DatabaseConfig& GetDatabaseConfig() const { return database_config_; }
   const RedisConfig& GetRedisConfig() const { return redis_config_; }
@@ -122,6 +128,7 @@ class ConfigManager : public core::Singleton<ConfigManager> {
 
   bool LoadCombatConfig(const std::string& config_path);
 
+  bool loaded_ = false;
   std::string config_path_;
   std::string combat_config_path_;
   ServerConfig server_config_;
@@ -135,4 +142,4 @@ class ConfigManager : public core::Singleton<ConfigManager> {
 
 }  // namespace mir2::config
 
-#endif  // MIR2_CONFIG_CONFIG_MANAGER_H
+#endif  // MIR2_CONFIG_CONFIG_MANAGER_H_

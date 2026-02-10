@@ -3,8 +3,8 @@
  * @brief NPC event definitions.
  */
 
-#ifndef MIR2_ECS_EVENTS_NPC_EVENTS_H
-#define MIR2_ECS_EVENTS_NPC_EVENTS_H
+#ifndef MIR2_ECS_EVENTS_NPC_EVENTS_H_
+#define MIR2_ECS_EVENTS_NPC_EVENTS_H_
 
 #include <cstdint>
 #include <string>
@@ -270,4 +270,4 @@ struct NpcGuardAlertEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // MIR2_ECS_EVENTS_NPC_EVENTS_H
+#endif  // MIR2_ECS_EVENTS_NPC_EVENTS_H_

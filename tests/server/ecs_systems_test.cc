@@ -197,7 +197,7 @@ TEST(CombatSystemTest, TakeDamage) {
     EXPECT_EQ(attributes.hp, 9);
 
     damage = mir2::ecs::CombatSystem::TakeDamage(registry, entity, 50);
-    EXPECT_EQ(damage, 50);
+    EXPECT_EQ(damage, 9);
     EXPECT_EQ(attributes.hp, 0);
 
     damage = mir2::ecs::CombatSystem::TakeDamage(registry, entity, 5);

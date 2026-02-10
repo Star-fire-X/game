@@ -4,17 +4,27 @@
 #include "ecs/components/equipment_component.h"
 #include "ecs/components/effect_component.h"
 #include "ecs/components/item_component.h"
+#include "ecs/components/monster_component.h"
 #include "ecs/components/skill_component.h"
+#include "ecs/components/transform_component.h"
 #include "ecs/dirty_tracker.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/skill_events.h"
 #include "ecs/systems/combat_system.h"
 #include "ecs/systems/damage_calculator.h"
+#include "ecs/systems/effect_system.h"
 #include "ecs/systems/effect_broadcaster.h"
+#include "ecs/systems/amulet_consumer.h"
+#include "ecs/systems/summon_system.h"
 #include "ecs/systems/spatial_query.h"
+#include "game/map/area_trigger.h"
+#include "game/map/map_instance.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <optional>
+#include <random>
 #include <utility>
 
 namespace mir2::ecs {
@@ -194,6 +204,38 @@ mir2::common::AmuletType resolve_amulet_type(const ItemComponent& item) {
     return mir2::common::AmuletType::NONE;
 }
 
+mir2::game::map::MapInstance* resolve_map_instance(entt::registry& registry) {
+    if (auto* map_ptr = registry.ctx().find<mir2::game::map::MapInstance*>()) {
+        return *map_ptr;
+    }
+    return nullptr;
+}
+
+bool resolve_entity_position(entt::registry& registry,
+                             entt::entity entity,
+                             mir2::common::Position* out_pos) {
+    if (!out_pos || !registry.valid(entity)) {
+        return false;
+    }
+
+    if (const auto* state = registry.try_get<CharacterStateComponent>(entity)) {
+        *out_pos = state->position;
+        return true;
+    }
+
+    if (const auto* transform = registry.try_get<TransformComponent>(entity)) {
+        *out_pos = transform->position;
+        return true;
+    }
+
+    return false;
+}
+
+uint32_t next_trap_effect_id() {
+    static std::atomic<uint32_t> next_id{1};
+    return next_id.fetch_add(1, std::memory_order_relaxed);
+}
+
 }  // namespace
 
 SkillSystem::SkillSystem(entt::registry& registry)
@@ -351,6 +393,10 @@ SkillCastResult SkillSystem::cast_skill(entt::entity caster,
                 dirty_tracker::mark_equipment_dirty(registry_, caster);
             }
         }
+    }
+
+    if (skill->consumes_talisman) {
+        ConsumeAmulet(registry_, caster);
     }
 
     if (skill->cooldown_ms > 0) {
@@ -583,6 +629,12 @@ mir2::common::ErrorCode SkillSystem::validate_cast(entt::entity caster,
         }
     }
 
+    if (skill.consumes_talisman) {
+        if (!CheckAmulet(registry_, caster)) {
+            return mir2::common::ErrorCode::ITEM_NOT_FOUND;
+        }
+    }
+
     if (!is_skill_ready(caster, skill.id)) {
         return mir2::common::ErrorCode::SKILL_ON_COOLDOWN;
     }
@@ -606,6 +658,290 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
     auto* caster_attributes = registry_.try_get<CharacterAttributesComponent>(caster);
     auto* target_attributes = registry_.try_get<CharacterAttributesComponent>(target);
     if (!caster_attributes || !target_attributes) {
+        return;
+    }
+
+    if (skill.id == mir2::common::constants::SKILL_ID_ERGUM) {
+        auto* caster_transform = registry_.try_get<TransformComponent>(caster);
+        auto* target_transform = registry_.try_get<TransformComponent>(target);
+        if (caster_transform && target_transform) {
+            const int dx = target_transform->position.x - caster_transform->position.x;
+            const int dy = target_transform->position.y - caster_transform->position.y;
+            const int step_x = (dx > 0) ? 1 : (dx < 0 ? -1 : 0);
+            const int step_y = (dy > 0) ? 1 : (dy < 0 ? -1 : 0);
+            if (step_x != 0 || step_y != 0) {
+                target_transform->position.x += step_x * 2;
+                target_transform->position.y += step_y * 2;
+                dirty_tracker::mark_state_dirty(registry_, target);
+            }
+        }
+
+        ActiveEffect stun_effect;
+        stun_effect.skill_id = skill.id;
+        stun_effect.source_entity = static_cast<uint32_t>(caster);
+        stun_effect.category = EffectCategory::STUN;
+        stun_effect.start_time_ms = current_time_ms_;
+        stun_effect.end_time_ms = current_time_ms_ + 2000;
+        stun_effect.last_tick_ms = current_time_ms_;
+
+        EffectSystem effect_system(registry_);
+        effect_system.apply_effect(target, stun_effect);
+
+        int damage = DamageCalculator::calculate_physical_damage(
+            *caster_attributes, *target_attributes, skill, skill_level);
+        apply_damage(caster, target, skill.id, damage);
+
+        if (effect_broadcaster_) {
+            effect_broadcaster_->broadcast_hit_effect(caster, target, skill);
+        }
+        return;
+    }
+
+    if (skill.id == mir2::common::constants::SKILL_ID_HOLYWORD) {
+        if (target_attributes->hp <= 0) {
+            return;
+        }
+
+        const bool is_undead = target_attributes->life_attrib != 0;
+        const int fixed_damage = skill.min_power + skill_level * 10;
+
+        if (is_undead) {
+            const float kill_chance = std::clamp(
+                0.10f + static_cast<float>(skill_level) * 0.05f, 0.0f, 1.0f);
+            static thread_local std::mt19937 rng(std::random_device{}());
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            const float roll = dist(rng);
+
+            if (roll < kill_chance) {
+                CombatSystem::Die(registry_, target, event_bus_, caster, skill.id);
+
+                if (effect_broadcaster_) {
+                    effect_broadcaster_->broadcast_hit_effect(caster, target, skill);
+                }
+                return;
+            }
+        }
+
+        apply_damage(caster, target, skill.id, fixed_damage);
+
+        if (effect_broadcaster_) {
+            effect_broadcaster_->broadcast_hit_effect(caster, target, skill);
+        }
+        return;
+    }
+
+    if (skill.id == mir2::common::constants::SKILL_ID_TELEPORT) {
+        if (target != caster) {
+            return;
+        }
+
+        auto* caster_state = registry_.try_get<CharacterStateComponent>(caster);
+        auto* caster_transform = registry_.try_get<TransformComponent>(caster);
+        if (!caster_state && !caster_transform) {
+            return;
+        }
+
+        const mir2::common::Position current_pos =
+            caster_state ? caster_state->position : caster_transform->position;
+        const int min_offset = 10;
+        const int max_offset = std::max(min_offset, 10 + skill_level * 5);
+
+        static thread_local std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<int> magnitude_dist(min_offset, max_offset);
+        std::uniform_int_distribution<int> sign_dist(0, 1);
+        const auto random_offset = [&]() {
+            int offset = magnitude_dist(rng);
+            if (sign_dist(rng) == 0) {
+                offset = -offset;
+            }
+            return offset;
+        };
+
+        mir2::common::Position new_pos{
+            current_pos.x + random_offset(),
+            current_pos.y + random_offset()
+        };
+
+        if (caster_state) {
+            caster_state->position = new_pos;
+        }
+        if (caster_transform) {
+            caster_transform->position = new_pos;
+        }
+
+        dirty_tracker::mark_state_dirty(registry_, caster);
+
+        if (effect_broadcaster_) {
+            effect_broadcaster_->broadcast_hit_effect(caster, target, skill);
+        }
+        return;
+    }
+
+    if (skill.id == mir2::common::constants::SKILL_ID_CHARM) {
+        if (target == caster) {
+            return;
+        }
+
+        if (!registry_.all_of<MonsterIdentityComponent>(target)) {
+            return;
+        }
+
+        auto* monster_ai = registry_.try_get<MonsterAIComponent>(target);
+        if (!monster_ai) {
+            return;
+        }
+
+        if (monster_ai->ai_type == MonsterAIType::kBossCowKing) {
+            return;
+        }
+
+        if (target_attributes->hp <= 0) {
+            return;
+        }
+
+        const int caster_level = caster_attributes->level;
+        const int monster_level = target_attributes->level;
+        const int safe_level = std::max(0, skill_level);
+        float chance = 0.20f + static_cast<float>(safe_level) * 0.10f -
+                       static_cast<float>(monster_level - caster_level) * 0.02f;
+        chance = std::clamp(chance, 0.0f, 1.0f);
+
+        static thread_local std::mt19937 rng(std::random_device{}());
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        if (dist(rng) <= chance) {
+            SummonSystem summon_system(registry_);
+            summon_system.convert_monster_to_summon(caster, target, safe_level);
+        }
+
+        if (effect_broadcaster_) {
+            effect_broadcaster_->broadcast_hit_effect(caster, target, skill);
+        }
+        return;
+    }
+
+    if (skill.id == mir2::common::constants::SKILL_ID_TRAPSPELL) {
+        mir2::common::Position center{};
+        if (!resolve_entity_position(registry_, target, &center)) {
+            return;
+        }
+
+        std::optional<uint32_t> trap_map_id;
+        if (const auto* state = registry_.try_get<CharacterStateComponent>(target)) {
+            trap_map_id = state->map_id;
+        } else if (const auto* state = registry_.try_get<CharacterStateComponent>(caster)) {
+            trap_map_id = state->map_id;
+        }
+
+        const int safe_level = std::max(0, skill_level);
+        const int32_t radius = 2 + safe_level;
+        const int64_t duration_ms =
+            5000 + static_cast<int64_t>(safe_level) * 2000;
+        const float duration_seconds = static_cast<float>(duration_ms) / 1000.0f;
+        const int64_t expire_time_ms = current_time_ms_ + duration_ms;
+
+        auto apply_trap_stun = [this, caster, expire_time_ms, trap_map_id](entt::entity entity) {
+            if (!registry_.valid(entity)) {
+                return;
+            }
+            if (current_time_ms_ > expire_time_ms) {
+                return;
+            }
+            if (!registry_.all_of<MonsterIdentityComponent>(entity)) {
+                return;
+            }
+            if (trap_map_id.has_value()) {
+                const auto* state = registry_.try_get<CharacterStateComponent>(entity);
+                if (!state || state->map_id != *trap_map_id) {
+                    return;
+                }
+            }
+
+            ActiveEffect stun_effect;
+            stun_effect.skill_id = mir2::common::constants::SKILL_ID_TRAPSPELL;
+            stun_effect.source_entity = static_cast<uint32_t>(caster);
+            stun_effect.category = EffectCategory::STUN;
+            stun_effect.start_time_ms = current_time_ms_;
+            stun_effect.end_time_ms = expire_time_ms;
+            stun_effect.last_tick_ms = current_time_ms_;
+
+            EffectSystem effect_system(registry_);
+            effect_system.apply_effect(entity, stun_effect);
+        };
+
+        SpatialQuery spatial_query(registry_);
+        const auto candidates = spatial_query.get_entities_in_radius(
+            center, static_cast<float>(radius), EntityFilter::MONSTERS_ONLY);
+        for (auto entity : candidates) {
+            apply_trap_stun(entity);
+        }
+
+        if (auto* map = resolve_map_instance(registry_)) {
+            const uint32_t effect_id = next_trap_effect_id();
+
+            mir2::game::map::ContinuousAreaEffect area_effect;
+            area_effect.effect_id = effect_id;
+            area_effect.type = mir2::game::map::AreaEffectType::kTrap;
+            area_effect.caster = caster;
+            area_effect.center_x = center.x;
+            area_effect.center_y = center.y;
+            area_effect.radius = radius;
+            area_effect.tick_interval = 1.0f;
+            area_effect.duration = duration_seconds;
+
+            map->AddContinuousAreaEffect(area_effect);
+
+            mir2::game::map::AreaTrigger trigger;
+            trigger.trigger_id = effect_id;
+            trigger.center_x = center.x;
+            trigger.center_y = center.y;
+            trigger.radius = radius;
+            trigger.effect_type = mir2::game::map::AreaEffectType::kTrap;
+            trigger.on_enter = [apply_trap_stun](entt::entity entity) {
+                apply_trap_stun(entity);
+            };
+
+            map->AddAreaTrigger(trigger);
+        }
+
+        if (effect_broadcaster_) {
+            effect_broadcaster_->broadcast_hit_effect(caster, target, skill);
+        }
+        return;
+    }
+
+    if (skill.id == mir2::common::constants::SKILL_ID_FIREWALL) {
+        mir2::common::Position center{};
+        if (!resolve_entity_position(registry_, target, &center)) {
+            return;
+        }
+
+        const int safe_level = std::max(0, skill_level);
+        const int32_t radius = 1 + safe_level;
+        const int64_t duration_ms =
+            10000 + static_cast<int64_t>(safe_level) * 3000;
+        const float duration_seconds = static_cast<float>(duration_ms) / 1000.0f;
+        const int32_t damage_per_tick = skill.min_power + safe_level * 5;
+
+        if (auto* map = resolve_map_instance(registry_)) {
+            const uint32_t effect_id = next_trap_effect_id();
+
+            mir2::game::map::ContinuousAreaEffect area_effect;
+            area_effect.effect_id = effect_id;
+            area_effect.type = mir2::game::map::AreaEffectType::kFire;
+            area_effect.caster = caster;
+            area_effect.center_x = center.x;
+            area_effect.center_y = center.y;
+            area_effect.radius = radius;
+            area_effect.tick_interval = 1.0f;
+            area_effect.damage_per_tick = damage_per_tick;
+            area_effect.duration = duration_seconds;
+
+            map->AddContinuousAreaEffect(area_effect);
+        }
+
+        if (effect_broadcaster_) {
+            effect_broadcaster_->broadcast_hit_effect(caster, target, skill);
+        }
         return;
     }
 
@@ -678,32 +1014,21 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
 
 void SkillSystem::apply_damage(entt::entity caster, entt::entity target, uint32_t skill_id,
                                int damage) {
-    auto* attributes = registry_.try_get<CharacterAttributesComponent>(target);
-    const int before_hp = attributes ? attributes->hp : 0;
-
-    const int actual_damage = CombatSystem::TakeDamage(registry_, target, damage);
+    const int actual_damage = CombatSystem::TakeDamage(
+        registry_, target, damage, event_bus_, caster, skill_id);
     if (actual_damage <= 0) {
         return;
     }
 
     if (event_bus_) {
         events::DamageDealtEvent event;
-        event.source = caster;
+        event.attacker = caster;
         event.target = target;
         event.skill_id = skill_id;
         event.damage = actual_damage;
         event.is_critical = false;
+        event.is_miss = false;
         event_bus_->Publish(event);
-    }
-
-    if (attributes && before_hp > 0 && attributes->hp <= 0) {
-        if (event_bus_) {
-            events::EntityDeathEvent event;
-            event.entity = target;
-            event.killer = caster;
-            event.killing_skill_id = skill_id;
-            event_bus_->Publish(event);
-        }
     }
 }
 

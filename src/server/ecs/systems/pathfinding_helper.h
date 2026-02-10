@@ -3,8 +3,8 @@
  * @brief 寻路辅助系统
  */
 
-#ifndef MIR2_ECS_SYSTEMS_PATHFINDING_HELPER_H
-#define MIR2_ECS_SYSTEMS_PATHFINDING_HELPER_H
+#ifndef MIR2_ECS_SYSTEMS_PATHFINDING_HELPER_H_
+#define MIR2_ECS_SYSTEMS_PATHFINDING_HELPER_H_
 
 #include <vector>
 #include <cstdint>
@@ -65,4 +65,4 @@ public:
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_SYSTEMS_PATHFINDING_HELPER_H
+#endif  // MIR2_ECS_SYSTEMS_PATHFINDING_HELPER_H_

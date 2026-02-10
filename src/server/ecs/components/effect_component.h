@@ -1,5 +1,5 @@
-#ifndef LEGEND2_ECS_EFFECT_COMPONENT_H
-#define LEGEND2_ECS_EFFECT_COMPONENT_H
+#ifndef MIR2_ECS_EFFECT_COMPONENT_H_
+#define MIR2_ECS_EFFECT_COMPONENT_H_
 
 #include <algorithm>
 #include <cstdint>
@@ -35,6 +35,11 @@ struct ActiveEffect {
     uint32_t source_entity = 0;
     EffectCategory category = EffectCategory::STAT_BUFF;
     int value = 0;
+    int magic_attack_bonus = 0;
+    int sc_bonus = 0;
+    int speed_bonus = 0;
+    int max_hp_bonus = 0;
+    int max_mp_bonus = 0;
     int64_t start_time_ms = 0;
     int64_t end_time_ms = 0;
     int64_t last_tick_ms = 0;
@@ -52,6 +57,11 @@ struct EffectListComponent {
     std::vector<ActiveEffect> effects;
     int applied_attack_bonus = 0;
     int applied_defense_penalty = 0;
+    int applied_magic_attack_bonus = 0;
+    int applied_sc_bonus = 0;
+    int applied_speed_bonus = 0;
+    int applied_max_hp_bonus = 0;
+    int applied_max_mp_bonus = 0;
     int applied_frenzy_attack_bonus = 0;    // 疯狂攻击加成
     int applied_frenzy_defense_penalty = 0; // 疯狂防御减少
 
@@ -106,4 +116,4 @@ struct EffectListComponent {
 
 } // namespace mir2::ecs
 
-#endif // LEGEND2_ECS_EFFECT_COMPONENT_H
+#endif // MIR2_ECS_EFFECT_COMPONENT_H_

@@ -3,8 +3,8 @@
  * @brief ECS NPC component definitions
  */
 
-#ifndef LEGEND2_SERVER_ECS_NPC_COMPONENT_H
-#define LEGEND2_SERVER_ECS_NPC_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_NPC_COMPONENT_H_
+#define MIR2_SERVER_ECS_NPC_COMPONENT_H_
 
 #include "common/types.h"
 #include "game/npc/npc_state_machine.h"
@@ -51,4 +51,4 @@ struct NpcScriptComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_NPC_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_NPC_COMPONENT_H_

@@ -5,12 +5,14 @@
 #include <array>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "common/enums.h"
 #include "common/internal_message_helper.h"
+#include "common/protocol/message_codec.h"
 #include "guild_generated.h"
 #include "network/message_dispatcher.h"
 #include "network/packet_codec.h"
@@ -164,6 +166,20 @@ bool DecodeSinglePacket(const std::vector<uint8_t>& bytes, network::Packet* out_
          network::DecodeStatus::kOk;
 }
 
+std::vector<uint8_t> BuildLoginReqPayload(const std::string& username) {
+  common::LoginRequest request;
+  request.username = username;
+  request.password = "pw";
+  request.version = "1.0";
+
+  common::MessageCodecStatus status = common::MessageCodecStatus::kOk;
+  auto payload = common::EncodeLoginRequest(request, &status);
+  if (status != common::MessageCodecStatus::kOk) {
+    return {};
+  }
+  return payload;
+}
+
 }  // namespace
 
 // 验证所有注册消息在未认证状态下也能被无脑转发。
@@ -268,6 +284,39 @@ TEST(GatewayForwardingTest, ForwardMessageNoAuthRequired_AlwaysAllowed) {
   DrainIoContext(io_context);
 
   EXPECT_EQ(logic_client.socket->GetWrites().size(), 1u);
+}
+
+TEST(GatewayForwardingTest, LoginRateLimitedPerIp) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
+  auto* test_manager_ptr = test_manager.get();
+  auto kcp_server = std::make_unique<NullKcpServer>();
+  server.network_ = std::make_unique<network::DualChannelManager>(
+      io_context, std::move(test_manager), std::move(kcp_server));
+
+  auto logic_client = CreateMockClient(io_context);
+  auto* logic_socket = logic_client.socket;
+  server.logic_client_ = std::move(logic_client.client);
+  server.RegisterHandlers();
+
+  auto bundle = CreateSession(io_context, 106);
+  test_manager_ptr->AddSession(bundle.session);
+  server.RegisterConnection(106, bundle.session);
+
+  const auto payload = BuildLoginReqPayload("ip_limit_user");
+  ASSERT_FALSE(payload.empty());
+
+  for (int i = 0; i < 6; ++i) {
+    test_manager_ptr->Dispatch(bundle.session,
+                               static_cast<uint16_t>(common::MsgId::kLoginReq),
+                               payload);
+  }
+  DrainIoContext(io_context);
+
+  EXPECT_EQ(logic_socket->GetWrites().size(), 5u);
+  EXPECT_GE(bundle.socket->GetWrites().size(), 1u);
 }
 
 TEST(GatewayForwardingTest, ForwardToUnknownMessageId_DropsMessage) {

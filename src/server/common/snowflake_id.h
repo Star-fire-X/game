@@ -1,5 +1,5 @@
-#ifndef MIR2_COMMON_SNOWFLAKE_ID_H
-#define MIR2_COMMON_SNOWFLAKE_ID_H
+#ifndef MIR2_COMMON_SNOWFLAKE_ID_H_
+#define MIR2_COMMON_SNOWFLAKE_ID_H_
 
 #include <atomic>
 #include <chrono>

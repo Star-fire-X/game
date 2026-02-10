@@ -1,6 +1,11 @@
 // common.fbs
 namespace mir2.proto;
 
+// FlatBuffers schema version (bump on breaking changes).
+enum SchemaVersion : uint {
+  kSchemaVersion = 1
+}
+
 enum MsgId : ushort {
   MSG_NONE = 0,
 
@@ -60,6 +65,9 @@ enum MsgId : ushort {
   MSG_CHAT_RSP = 5002,
   MSG_PRIVATE_CHAT = 5010,
   MSG_GUILD_CHAT = 5020,
+  MSG_TEAM_CHAT = 5030,
+  MSG_AREA_CHAT = 5040,
+  MSG_SYSTEM_MSG = 5050,
 
   // ========== 系统模块 (9000-9999) ==========
   MSG_HEARTBEAT = 9001,
@@ -79,6 +87,8 @@ enum ErrorCode : ushort {
   ERR_INVALID_ACTION = 400,
   ERR_TARGET_NOT_FOUND = 401,
   ERR_TARGET_OUT_OF_RANGE = 402,
+  ERR_NO_PARTY = 410,
+  ERR_TARGET_REFUSED = 411,
   ERR_INSUFFICIENT_MP = 500,
   ERR_KICK_HEARTBEAT_TIMEOUT = 9001,
   ERR_KICK_DUPLICATE_LOGIN = 9002,

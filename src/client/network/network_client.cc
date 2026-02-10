@@ -13,6 +13,7 @@
 #include "network/network_client.h"
 
 #include <chrono>
+#include <cstring>
 
 #include "common/enums.h"
 #include "common/types/constants.h"
@@ -399,10 +400,16 @@ void NetworkClient::do_read_header() {
                 return;
             }
 
-            protocol_version_ = mir2::common::DetectProtocolVersion(header_buffer_.data());
-            const size_t header_size = protocol_version_ == ProtocolVersion::kV2
-                                           ? PacketHeaderV2::kSize
-                                           : PacketHeader::kSize;
+            uint32_t magic = 0;
+            std::memcpy(&magic, header_buffer_.data(), sizeof(magic));
+            if (magic != PacketHeaderV2::kMagic) {
+                last_error_ = ErrorCode::INVALID_PACKET;
+                handle_disconnect(asio::error::invalid_argument);
+                return;
+            }
+
+            protocol_version_ = ProtocolVersion::kV2;
+            const size_t header_size = PacketHeaderV2::kSize;
             const size_t remaining_size = header_size - sizeof(uint32_t);
             do_read_remaining_header(remaining_size);
         });
@@ -701,6 +708,9 @@ void NetworkClient::handle_packet(const NetworkPacket& packet) {
 
     {
         std::lock_guard<std::mutex> lock(receive_mutex_);
+        if (receive_queue_.size() >= MAX_RECEIVE_QUEUE_SIZE) {
+            return;
+        }
         receive_queue_.push(packet);
     }
 }

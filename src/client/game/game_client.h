@@ -19,7 +19,6 @@
 
 #include "render/i_renderer.h"
 #include "game/map/map_renderer.h"
-#include "render/animation.h"
 #include "client/render/effect_player.h"
 #include "ui/ui_renderer.h"
 #include "audio/audio_engine.h"
@@ -99,11 +98,8 @@ using mir2::scene::LoginFlowState;
 using mir2::render::IRenderer;
 using mir2::render::Camera;
 using mir2::render::Texture;
-using mir2::render::AnimationManager;
 using mir2::render::ActorRenderer;
 using mir2::render::Actor;
-using mir2::render::AnimatedEntity;
-using mir2::render::CharacterAnimator;
 using mir2::render::EffectPlayer;
 using mir2::ui::UIRenderer;
 using mir2::ui::UIManager;
@@ -120,6 +116,7 @@ using mir2::client::ResourceManager;
 using mir2::client::INetworkManager;
 
 class MovementController;
+class GameClientInput;
 
 // =============================================================================
 // 游戏状态 (Game State)
@@ -348,7 +345,6 @@ private:
     
     // Rendering subsystems
     std::unique_ptr<MapRenderer> map_renderer_;
-    std::unique_ptr<AnimationManager> animation_manager_;
     std::unique_ptr<EffectPlayer> effect_player_;
     std::unique_ptr<UIRenderer> ui_renderer_;
     std::unique_ptr<AudioManager> audio_manager_;
@@ -377,8 +373,6 @@ private:
 
     // Player
     std::unique_ptr<ClientCharacter> player_;
-    std::unique_ptr<AnimatedEntity> player_entity_;
-    std::unique_ptr<CharacterAnimator> character_animator_;
     Actor player_actor_;  // 玩家角色渲染数据
     Position last_player_pos_ = {-1, -1};
     legend2::PositionInterpolator player_interpolator_;
@@ -395,6 +389,9 @@ private:
 
     // Event dispatcher
     EventDispatcher event_dispatcher_;
+
+    // Input module
+    std::unique_ptr<GameClientInput> input_handler_;
     
     // Timing
     FrameTimer frame_timer_;
@@ -496,10 +493,9 @@ private:
     /// Send skill request to server
     void send_skill_request(uint32_t skill_id, uint64_t target_id);
 
-    /// Validate skill target existence and range.
-    bool validate_skill_target(uint64_t target_id) const;
+    /// Validate skill target (type, range, friendly/hostile).
+    bool validate_skill_target(uint32_t skill_id, uint64_t target_id) const;
 
-    void process_skill_hotkeys();
     void update_skill_system(float delta_time);
     void render_skill_ui();
 

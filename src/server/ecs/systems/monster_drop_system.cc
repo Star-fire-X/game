@@ -8,8 +8,8 @@
 #include "ecs/components/monster_component.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/party_component.h"
+#include "ecs/events/combat_events.h"
 #include "ecs/events/inventory_events.h"
-#include "ecs/events/skill_events.h"
 #include "ecs/event_bus.h"
 
 #include <algorithm>
@@ -158,13 +158,17 @@ void MonsterDropSystem::OnMonsterDeath(entt::entity monster, entt::entity killer
         return;
     }
 
+    const auto* ai = registry_->try_get<MonsterAIComponent>(monster);
+    const bool is_boss = ai && ai->ai_type == MonsterAIType::kBossCowKing;
+
     auto it = drop_tables_.find(identity->monster_template_id);
     if (it == drop_tables_.end()) {
         return;
     }
 
     cached_loot_map_id_ = state->map_id;
-    const auto drops = SelectDropItems(it->second);
+    const auto drops = is_boss ? SelectDropItemsForBoss(it->second)
+                               : SelectDropItems(it->second);
     if (drops.empty()) {
         return;
     }
@@ -173,7 +177,6 @@ void MonsterDropSystem::OnMonsterDeath(entt::entity monster, entt::entity killer
     const int32_t y = state->position.y;
 
     // 确定掉落归属
-    entt::entity primary_looter = killer;
     LootMode loot_mode = LootMode::FREE_FOR_ALL;
     int32_t loot_range = 15;
 
@@ -216,6 +219,65 @@ std::vector<game::entity::DropItem> MonsterDropSystem::SelectDropItems(
             result.push_back(item);
         }
     }
+    return result;
+}
+
+std::vector<game::entity::DropItem> MonsterDropSystem::SelectDropItemsForBoss(
+    const game::entity::MonsterDropTable& table) {
+
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+
+    std::vector<game::entity::DropItem> result;
+    if (table.items.empty()) {
+        return result;
+    }
+
+    std::vector<float> adjusted_rates;
+    adjusted_rates.reserve(table.items.size());
+
+    for (const auto& item : table.items) {
+        float rate = item.drop_rate;
+        if (item.boss_bonus != 0.0f) {
+            rate *= (1.0f + item.boss_bonus);
+        }
+        if (item.rarity >= 3) {
+            rate += 0.2f;
+        }
+        rate = std::clamp(rate, 0.0f, 1.0f);
+        adjusted_rates.push_back(rate);
+
+        if (dis(gen) < rate) {
+            result.push_back(item);
+        }
+    }
+
+    if (result.empty()) {
+        float total_weight = 0.0f;
+        for (float rate : adjusted_rates) {
+            total_weight += rate;
+        }
+
+        size_t index = 0;
+        if (total_weight > 0.0f) {
+            std::uniform_real_distribution<float> pick_dis(0.0f, total_weight);
+            const float pick = pick_dis(gen);
+            float accumulated = 0.0f;
+            for (size_t i = 0; i < adjusted_rates.size(); ++i) {
+                accumulated += adjusted_rates[i];
+                if (pick <= accumulated) {
+                    index = i;
+                    break;
+                }
+            }
+        } else {
+            std::uniform_int_distribution<size_t> index_dis(0, table.items.size() - 1);
+            index = index_dis(gen);
+        }
+        result.push_back(table.items[index]);
+    }
+
     return result;
 }
 

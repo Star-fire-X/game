@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 #include "common/types.h"  // 引入 legend2 命名空间的公共类型
+#include "common/types/constants.h"
 
 namespace mir2::scene {
 
@@ -27,14 +28,15 @@ public:
         float connect_timeout = 5.0f;  // 连接超时（秒）
         float auth_timeout = 10.0f;    // 认证超时（秒）
 
-        static constexpr size_t USERNAME_MIN_LENGTH = 3;
-        static constexpr size_t USERNAME_MAX_LENGTH = 32;
-        static constexpr size_t PASSWORD_MIN_LENGTH = 6;
-        static constexpr size_t PASSWORD_MAX_LENGTH = 64;
+        static constexpr size_t USERNAME_MIN_LENGTH = mir2::common::constants::LOGIN_USERNAME_MIN_LENGTH;
+        static constexpr size_t USERNAME_MAX_LENGTH = mir2::common::constants::LOGIN_USERNAME_MAX_LENGTH;
+        static constexpr size_t PASSWORD_MIN_LENGTH = mir2::common::constants::LOGIN_PASSWORD_MIN_LENGTH;
+        static constexpr size_t PASSWORD_MAX_LENGTH = mir2::common::constants::LOGIN_PASSWORD_MAX_LENGTH;
         static constexpr size_t MAX_ERROR_LENGTH = 256;
     };
 
-    explicit LoginFlowManager(const Config& config = Config{});
+    LoginFlowManager();
+    explicit LoginFlowManager(const Config& config);
 
     // --- 流程控制 ---
 

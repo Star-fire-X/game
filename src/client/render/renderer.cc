@@ -11,6 +11,7 @@
 #include "render/renderer.h"
 #include <iostream>
 #include <algorithm>
+#include <limits>
 #include <vector>
 
 #ifdef HAS_SDL2_TTF
@@ -19,9 +20,63 @@
 
 namespace mir2::render {
 
+using mir2::common::Color;
+using mir2::common::Rect;
+using mir2::common::Size;
+
+// =============================================================================
+// ArchiveRegistry 实现
+// =============================================================================
+
+ArchiveRegistry& ArchiveRegistry::instance() {
+    static ArchiveRegistry instance;
+    return instance;
+}
+
+uint16_t ArchiveRegistry::get_or_register(const std::string& archive_name) {
+    if (archive_name.empty()) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (id_to_name_.empty()) {
+        id_to_name_.push_back(std::string());
+    }
+
+    auto it = name_to_id_.find(archive_name);
+    if (it != name_to_id_.end()) {
+        return it->second;
+    }
+
+    if (id_to_name_.size() > std::numeric_limits<uint16_t>::max()) {
+        return 0;
+    }
+
+    const uint16_t id = static_cast<uint16_t>(id_to_name_.size());
+    name_to_id_[archive_name] = id;
+    id_to_name_.push_back(archive_name);
+    return id;
+}
+
+const std::string* ArchiveRegistry::get_name(uint16_t id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (id == 0 || id >= id_to_name_.size()) {
+        return nullptr;
+    }
+    return &id_to_name_[id];
+}
+
 // =============================================================================
 // SDLTextureCache 实现
 // =============================================================================
+
+size_t SDLTextureCache::CacheKeyHash::operator()(const SDLTextureCache::CacheKey& key) const noexcept {
+    if (key.kind == CacheKey::Kind::kTexture) {
+        size_t hash = TextureKeyHash{}(key.texture_key);
+        return hash ^ 0x9e3779b97f4a7c15ULL;
+    }
+    return std::hash<std::string>{}(key.string_key);
+}
 
 SDLTextureCache::SDLTextureCache(size_t max_bytes)
     : max_bytes_(max_bytes) {}
@@ -31,6 +86,7 @@ SDLTextureCache::SDLTextureCache(TextureFactory factory, size_t max_bytes)
     , max_bytes_(max_bytes) {}
 
 void SDLTextureCache::set_factory(TextureFactory factory) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     factory_ = std::move(factory);
 }
 
@@ -38,12 +94,13 @@ std::string SDLTextureCache::make_oriented_key(const std::string& key, bool flip
     return key + (flip_v ? ":vflip" : ":noflip");
 }
 
-void SDLTextureCache::touch(const std::string& key, Entry& entry) const {
+void SDLTextureCache::touch(Entry& entry) const {
+    // Caller must hold unique lock on mutex_.
     lru_.splice(lru_.begin(), lru_, entry.iter);
     entry.iter = lru_.begin();
 }
 
-void SDLTextureCache::evict_key(const std::string& key) {
+void SDLTextureCache::evict_key(const CacheKey& key) {
     auto it = cache_.find(key);
     if (it == cache_.end()) {
         return;
@@ -58,18 +115,75 @@ void SDLTextureCache::enforce_limits() {
         return;
     }
     while (!lru_.empty() && current_bytes_ > max_bytes_) {
-        const std::string& lru_key = lru_.back();
+        const CacheKey lru_key = lru_.back();
         evict_key(lru_key);
     }
 }
 
-std::shared_ptr<Texture> SDLTextureCache::get(const std::string& key, bool flip_v) const {
-    const std::string oriented_key = make_oriented_key(key, flip_v);
-    auto it = cache_.find(oriented_key);
+std::shared_ptr<Texture> SDLTextureCache::get(const TextureKey& key) const {
+    const CacheKey cache_key = CacheKey::FromTexture(key);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = cache_.find(cache_key);
     if (it == cache_.end()) {
         return nullptr;
     }
-    touch(oriented_key, it->second);
+    touch(it->second);
+    return it->second.texture;
+}
+
+std::shared_ptr<Texture> SDLTextureCache::get_or_create(const TextureKey& key,
+                                                        const Sprite& sprite) {
+    const CacheKey cache_key = CacheKey::FromTexture(key);
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        auto it = cache_.find(cache_key);
+        if (it != cache_.end()) {
+            touch(it->second);
+            return it->second.texture;
+        }
+    }
+
+    TextureFactory factory;
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        factory = factory_;
+    }
+    if (!factory) {
+        return nullptr;
+    }
+
+    auto texture = factory(sprite, key.flip_v);
+    if (!texture) {
+        return nullptr;
+    }
+
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = cache_.find(cache_key);
+    if (it != cache_.end()) {
+        touch(it->second);
+        return it->second.texture;
+    }
+
+    Entry entry;
+    entry.texture = texture;
+    entry.bytes = static_cast<size_t>(texture->width()) * static_cast<size_t>(texture->height()) * sizeof(uint32_t);
+    lru_.push_front(cache_key);
+    entry.iter = lru_.begin();
+    cache_[cache_key] = entry;
+    current_bytes_ += entry.bytes;
+    enforce_limits();
+    return texture;
+}
+
+std::shared_ptr<Texture> SDLTextureCache::get(const std::string& key, bool flip_v) const {
+    const std::string oriented_key = make_oriented_key(key, flip_v);
+    const CacheKey cache_key = CacheKey::FromString(oriented_key);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = cache_.find(cache_key);
+    if (it == cache_.end()) {
+        return nullptr;
+    }
+    touch(it->second);
     return it->second.texture;
 }
 
@@ -77,44 +191,68 @@ std::shared_ptr<Texture> SDLTextureCache::get_or_create(const std::string& key,
                                                         const Sprite& sprite,
                                                         bool flip_v) {
     const std::string oriented_key = make_oriented_key(key, flip_v);
-    auto it = cache_.find(oriented_key);
-    if (it != cache_.end()) {
-        touch(oriented_key, it->second);
-        return it->second.texture;
+    const CacheKey cache_key = CacheKey::FromString(oriented_key);
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        auto it = cache_.find(cache_key);
+        if (it != cache_.end()) {
+            touch(it->second);
+            return it->second.texture;
+        }
     }
 
-    if (!factory_) {
+    TextureFactory factory;
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        factory = factory_;
+    }
+    if (!factory) {
         return nullptr;
     }
 
-    auto texture = factory_(sprite, flip_v);
+    auto texture = factory(sprite, flip_v);
     if (!texture) {
         return nullptr;
+    }
+
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = cache_.find(cache_key);
+    if (it != cache_.end()) {
+        touch(it->second);
+        return it->second.texture;
     }
 
     Entry entry;
     entry.texture = texture;
     entry.bytes = static_cast<size_t>(texture->width()) * static_cast<size_t>(texture->height()) * sizeof(uint32_t);
-    lru_.push_front(oriented_key);
+    lru_.push_front(cache_key);
     entry.iter = lru_.begin();
-    cache_[oriented_key] = entry;
+    cache_[cache_key] = entry;
     current_bytes_ += entry.bytes;
     enforce_limits();
     return texture;
 }
 
+void SDLTextureCache::evict(const TextureKey& key) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    evict_key(CacheKey::FromTexture(key));
+}
+
 void SDLTextureCache::evict(const std::string& key) {
-    evict_key(make_oriented_key(key, true));
-    evict_key(make_oriented_key(key, false));
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    evict_key(CacheKey::FromString(make_oriented_key(key, true)));
+    evict_key(CacheKey::FromString(make_oriented_key(key, false)));
 }
 
 void SDLTextureCache::clear() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     cache_.clear();
     lru_.clear();
     current_bytes_ = 0;
 }
 
 size_t SDLTextureCache::size() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return cache_.size();
 }
 
@@ -190,6 +328,8 @@ bool SDLRenderer::initialize(int width, int height, const std::string& title) {
     
     // 设置默认混合模式
     SDL_SetRenderDrawBlendMode(renderer_.get(), SDL_BLENDMODE_BLEND);
+
+    batch_.set_renderer(renderer_.get());
     
 #ifdef HAS_SDL2_TTF
     // 初始化SDL_ttf字体库
@@ -215,6 +355,15 @@ bool SDLRenderer::initialize(int width, int height, const std::string& title) {
 void SDLRenderer::shutdown() {
     // 首先清除纹理缓存
     texture_cache_.clear();
+
+    if (batching_enabled_) {
+        batch_.end();
+        batching_enabled_ = false;
+        batch_depth_ = 0;
+    } else {
+        batch_.flush();
+    }
+    batch_.set_renderer(nullptr);
     
     renderer_.reset();
     window_.reset();
@@ -254,6 +403,14 @@ void SDLRenderer::end_frame() {
 
 /// 用指定颜色清除屏幕
 void SDLRenderer::clear(const Color& color) {
+    if (!renderer_) {
+        return;
+    }
+
+    if (batching_enabled_) {
+        batch_.flush();
+    }
+
     SDL_SetRenderDrawColor(renderer_.get(), color.r, color.g, color.b, color.a);
     SDL_RenderClear(renderer_.get());
 }
@@ -271,6 +428,32 @@ Size SDLRenderer::get_window_size() const {
 void SDLRenderer::set_logical_size(int width, int height) {
     if (renderer_) {
         SDL_RenderSetLogicalSize(renderer_.get(), width, height);
+    }
+}
+
+// =============================================================================
+// Sprite batch control
+// =============================================================================
+
+void SDLRenderer::begin_batch() {
+    if (!renderer_) {
+        return;
+    }
+    if (batch_depth_ == 0) {
+        batch_.begin();
+        batching_enabled_ = true;
+    }
+    batch_depth_++;
+}
+
+void SDLRenderer::end_batch() {
+    if (batch_depth_ == 0) {
+        return;
+    }
+    batch_depth_--;
+    if (batch_depth_ == 0) {
+        batch_.end();
+        batching_enabled_ = false;
     }
 }
 
@@ -347,6 +530,10 @@ std::shared_ptr<Texture> SDLRenderer::get_sprite_texture(const std::string& cach
     return texture_cache_.get_or_create(cache_key, sprite, flip_vertical);
 }
 
+std::shared_ptr<Texture> SDLRenderer::get_sprite_texture(const TextureKey& cache_key, const Sprite& sprite) {
+    return texture_cache_.get_or_create(cache_key, sprite);
+}
+
 /// 清除纹理缓存
 void SDLRenderer::clear_texture_cache() {
     texture_cache_.clear();
@@ -357,6 +544,10 @@ void SDLRenderer::remove_from_cache(const std::string& cache_key) {
     texture_cache_.evict(cache_key);
 }
 
+void SDLRenderer::remove_from_cache(const TextureKey& cache_key) {
+    texture_cache_.evict(cache_key);
+}
+
 // =============================================================================
 // 绘制函数 (Drawing Functions)
 // =============================================================================
@@ -364,7 +555,12 @@ void SDLRenderer::remove_from_cache(const std::string& cache_key) {
 /// 在屏幕位置绘制纹理
 void SDLRenderer::draw_texture(const Texture& texture, int x, int y) {
     if (!texture.valid() || !renderer_) return;
-    
+
+    if (batching_enabled_) {
+        batch_.draw(texture, x, y);
+        return;
+    }
+
     SDL_Rect dst = {x, y, texture.width(), texture.height()};
     SDL_RenderCopy(renderer_.get(), texture.get(), nullptr, &dst);
 }
@@ -372,9 +568,15 @@ void SDLRenderer::draw_texture(const Texture& texture, int x, int y) {
 /// 使用源矩形和目标矩形绘制纹理
 void SDLRenderer::draw_texture(const Texture& texture, const Rect& src, const Rect& dst) {
     if (!texture.valid() || !renderer_) return;
-    
+
     SDL_Rect src_rect = {src.x, src.y, src.width, src.height};
     SDL_Rect dst_rect = {dst.x, dst.y, dst.width, dst.height};
+
+    if (batching_enabled_) {
+        batch_.draw(texture.get(), src_rect, dst_rect);
+        return;
+    }
+
     SDL_RenderCopy(renderer_.get(), texture.get(), &src_rect, &dst_rect);
 }
 
@@ -382,7 +584,12 @@ void SDLRenderer::draw_texture(const Texture& texture, const Rect& src, const Re
 /// 精灵通常以底部中心或其他点为锚点
 void SDLRenderer::draw_sprite(const Texture& texture, int x, int y, int offset_x, int offset_y) {
     if (!texture.valid() || !renderer_) return;
-    
+
+    if (batching_enabled_) {
+        batch_.draw(texture, x, y, offset_x, offset_y);
+        return;
+    }
+
     // 应用精灵偏移
     SDL_Rect dst = {
         x - offset_x,
@@ -396,7 +603,11 @@ void SDLRenderer::draw_sprite(const Texture& texture, int x, int y, int offset_x
 /// 绘制填充矩形
 void SDLRenderer::draw_rect(const Rect& rect, const Color& color) {
     if (!renderer_) return;
-    
+
+    if (batching_enabled_) {
+        batch_.flush();
+    }
+
     SDL_SetRenderDrawColor(renderer_.get(), color.r, color.g, color.b, color.a);
     SDL_Rect sdl_rect = {rect.x, rect.y, rect.width, rect.height};
     SDL_RenderFillRect(renderer_.get(), &sdl_rect);
@@ -405,7 +616,11 @@ void SDLRenderer::draw_rect(const Rect& rect, const Color& color) {
 /// 绘制矩形边框
 void SDLRenderer::draw_rect_outline(const Rect& rect, const Color& color) {
     if (!renderer_) return;
-    
+
+    if (batching_enabled_) {
+        batch_.flush();
+    }
+
     SDL_SetRenderDrawColor(renderer_.get(), color.r, color.g, color.b, color.a);
     SDL_Rect sdl_rect = {rect.x, rect.y, rect.width, rect.height};
     SDL_RenderDrawRect(renderer_.get(), &sdl_rect);
@@ -414,7 +629,11 @@ void SDLRenderer::draw_rect_outline(const Rect& rect, const Color& color) {
 /// 绘制线条
 void SDLRenderer::draw_line(int x1, int y1, int x2, int y2, const Color& color) {
     if (!renderer_) return;
-    
+
+    if (batching_enabled_) {
+        batch_.flush();
+    }
+
     SDL_SetRenderDrawColor(renderer_.get(), color.r, color.g, color.b, color.a);
     SDL_RenderDrawLine(renderer_.get(), x1, y1, x2, y2);
 }
@@ -422,7 +641,11 @@ void SDLRenderer::draw_line(int x1, int y1, int x2, int y2, const Color& color) 
 /// 绘制点
 void SDLRenderer::draw_point(int x, int y, const Color& color) {
     if (!renderer_) return;
-    
+
+    if (batching_enabled_) {
+        batch_.flush();
+    }
+
     SDL_SetRenderDrawColor(renderer_.get(), color.r, color.g, color.b, color.a);
     SDL_RenderDrawPoint(renderer_.get(), x, y);
 }
@@ -430,6 +653,9 @@ void SDLRenderer::draw_point(int x, int y, const Color& color) {
 /// 设置绘制颜色
 void SDLRenderer::set_draw_color(const Color& color) {
     if (renderer_) {
+        if (batching_enabled_) {
+            batch_.flush();
+        }
         SDL_SetRenderDrawColor(renderer_.get(), color.r, color.g, color.b, color.a);
     }
 }
@@ -437,6 +663,9 @@ void SDLRenderer::set_draw_color(const Color& color) {
 /// 设置混合模式
 void SDLRenderer::set_blend_mode(SDL_BlendMode mode) {
     if (renderer_) {
+        if (batching_enabled_) {
+            batch_.flush();
+        }
         SDL_SetRenderDrawBlendMode(renderer_.get(), mode);
     }
 }

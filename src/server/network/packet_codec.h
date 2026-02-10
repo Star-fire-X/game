@@ -3,8 +3,8 @@
  * @brief 网络包编解码
  */
 
-#ifndef MIR2_NETWORK_PACKET_CODEC_H
-#define MIR2_NETWORK_PACKET_CODEC_H
+#ifndef MIR2_NETWORK_PACKET_CODEC_H_
+#define MIR2_NETWORK_PACKET_CODEC_H_
 
 #include "common/protocol/packet_codec.h"
 
@@ -52,4 +52,4 @@ class PacketCodec {
 
 }  // namespace mir2::network
 
-#endif  // MIR2_NETWORK_PACKET_CODEC_H
+#endif  // MIR2_NETWORK_PACKET_CODEC_H_

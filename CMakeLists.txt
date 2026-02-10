@@ -26,6 +26,9 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# EnTT configuration: enforce unsigned ID type for compatibility across versions.
+add_compile_definitions(ENTT_ID_TYPE=std::uint64_t)
+
 # =============================================================================
 # Dependencies (vcpkg recommended)
 # =============================================================================
@@ -395,8 +398,9 @@ add_subdirectory(src/common)
 # =============================================================================
 
 option(BUILD_SERVER "Build server" ON)
-option(BUILD_DB "Build DB server" ON)
+option(BUILD_DB "Build database support libraries" ON)
 option(LEGEND2_ENABLE_PROMETHEUS "Enable Prometheus metrics" OFF)
+option(LEGEND2_ENABLE_LEGACY "Enable legacy server modules" OFF)
 set(LEGEND2_BUILD_DB OFF)
 if(BUILD_SERVER)
     # Server dependencies (v2 architecture)
@@ -465,6 +469,58 @@ if(BUILD_SERVER)
         message(STATUS "spdlog found via vcpkg")
     endif()
 
+    set(LEGEND2_BREAKPAD_TARGET "")
+    find_package(unofficial-breakpad CONFIG QUIET)
+    if(TARGET unofficial::breakpad::libbreakpad_client)
+        set(LEGEND2_BREAKPAD_TARGET unofficial::breakpad::libbreakpad_client)
+    elseif(TARGET unofficial::breakpad::breakpad_client)
+        set(LEGEND2_BREAKPAD_TARGET unofficial::breakpad::breakpad_client)
+    elseif(TARGET unofficial::breakpad::breakpad)
+        set(LEGEND2_BREAKPAD_TARGET unofficial::breakpad::breakpad)
+    elseif(TARGET libbreakpad_client)
+        set(LEGEND2_BREAKPAD_TARGET libbreakpad_client)
+    endif()
+
+    if(NOT LEGEND2_BREAKPAD_TARGET)
+        find_package(breakpad CONFIG QUIET)
+        if(TARGET breakpad::libbreakpad_client)
+            set(LEGEND2_BREAKPAD_TARGET breakpad::libbreakpad_client)
+        elseif(TARGET breakpad::breakpad_client)
+            set(LEGEND2_BREAKPAD_TARGET breakpad::breakpad_client)
+        elseif(TARGET breakpad::breakpad)
+            set(LEGEND2_BREAKPAD_TARGET breakpad::breakpad)
+        elseif(TARGET libbreakpad_client)
+            set(LEGEND2_BREAKPAD_TARGET libbreakpad_client)
+        endif()
+    endif()
+
+    if(NOT LEGEND2_BREAKPAD_TARGET)
+        if(WIN32)
+            set(LEGEND2_BREAKPAD_HEADER client/windows/handler/exception_handler.h)
+        elseif(APPLE)
+            set(LEGEND2_BREAKPAD_HEADER client/mac/handler/exception_handler.h)
+        else()
+            set(LEGEND2_BREAKPAD_HEADER client/linux/handler/exception_handler.h)
+        endif()
+        find_path(BREAKPAD_INCLUDE_DIR
+            NAMES ${LEGEND2_BREAKPAD_HEADER})
+        find_library(BREAKPAD_CLIENT_LIB
+            NAMES breakpad_client libbreakpad_client)
+        if(BREAKPAD_INCLUDE_DIR AND BREAKPAD_CLIENT_LIB)
+            add_library(legend2_breakpad_client UNKNOWN IMPORTED)
+            set_target_properties(legend2_breakpad_client PROPERTIES
+                IMPORTED_LOCATION "${BREAKPAD_CLIENT_LIB}"
+                INTERFACE_INCLUDE_DIRECTORIES "${BREAKPAD_INCLUDE_DIR}")
+            set(LEGEND2_BREAKPAD_TARGET legend2_breakpad_client)
+        endif()
+    endif()
+
+    if(LEGEND2_BREAKPAD_TARGET)
+        message(STATUS "breakpad found: ${LEGEND2_BREAKPAD_TARGET}")
+    else()
+        message(FATAL_ERROR "breakpad not found. Install via vcpkg: vcpkg install breakpad")
+    endif()
+
     find_package(libpqxx CONFIG QUIET)
     find_package(hiredis CONFIG QUIET)
     if(LEGEND2_ENABLE_PROMETHEUS)
@@ -525,10 +581,7 @@ if(BUILD_CLIENT)
     list(APPEND INSTALL_TARGETS legend2_client)
 endif()
 if(BUILD_SERVER)
-    list(APPEND INSTALL_TARGETS mir2_gateway mir2_world mir2_game)
-    if(LEGEND2_BUILD_DB)
-        list(APPEND INSTALL_TARGETS mir2_db)
-    endif()
+    list(APPEND INSTALL_TARGETS mir2_gateway mir2_logic)
 endif()
 
 install(TARGETS ${INSTALL_TARGETS}

@@ -8,7 +8,7 @@
 #include "common/enums.h"
 #include "network/tcp_connection.h"
 #include "network/tcp_session.h"
-#include "tests/mocks/mock_socket.h"
+#include "mocks/mock_socket.h"
 
 #define private public
 #include "gateway/gateway_server.h"
@@ -85,18 +85,17 @@ TEST(GatewayPerformanceTest, MessageForwarding_ThroughputBaseline) {
   asio::io_context io_context;
   GatewayServer server;
 
-  auto game_client = CreateMockClient(io_context);
-  server.game_client_ = std::move(game_client.client);
+  auto logic_client = CreateMockClient(io_context);
+  server.logic_client_ = std::move(logic_client.client);
 
   constexpr int kMessages = 10000;
   const std::vector<uint8_t> payload{1, 2, 3, 4};
 
   const auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < kMessages; ++i) {
-    server.ForwardToService(common::ServiceType::kGame,
-                            static_cast<uint64_t>(i + 1),
-                            static_cast<uint16_t>(common::MsgId::kMoveReq),
-                            payload);
+    server.ForwardToLogic(static_cast<uint64_t>(i + 1),
+                          static_cast<uint16_t>(common::MsgId::kMoveReq),
+                          payload);
   }
   DrainIoContext(io_context);
   const auto elapsed = std::chrono::steady_clock::now() - start;

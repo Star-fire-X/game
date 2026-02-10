@@ -2,6 +2,7 @@
 
 #include <array>
 #include <filesystem>
+#include <mutex>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -55,6 +56,8 @@ const char* CategoryName(LogCategory category) {
 bool Logger::Initialize(const std::string& log_path, const std::string& level,
                         int max_size_mb, int max_files) {
   try {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::filesystem::create_directories(log_path);
 
     spdlog::level::level_enum log_level = spdlog::level::from_str(level);
@@ -93,24 +96,81 @@ bool Logger::Initialize(const std::string& log_path, const std::string& level,
 }
 
 void Logger::Shutdown() {
-  loggers_.clear();
-  spdlog::shutdown();
+  std::vector<std::shared_ptr<spdlog::logger>> loggers_to_flush;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    loggers_to_flush.reserve(loggers_.size());
+    for (const auto& [_, logger] : loggers_) {
+      if (logger) {
+        loggers_to_flush.push_back(logger);
+      }
+    }
+    loggers_.clear();
+  }
+
+  for (const auto& logger : loggers_to_flush) {
+    logger->flush();
+  }
+
+  for (const auto category : kAllCategories) {
+    const std::string logger_name = CategoryName(category);
+    if (spdlog::get(logger_name)) {
+      spdlog::drop(logger_name);
+    }
+  }
+  if (spdlog::get("fallback")) {
+    spdlog::drop("fallback");
+  }
 }
 
 std::shared_ptr<spdlog::logger> Logger::GetLogger(LogCategory category) {
-  auto it = loggers_.find(category);
-  if (it != loggers_.end()) {
-    return it->second;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = loggers_.find(category);
+    if (it != loggers_.end()) {
+      return it->second;
+    }
   }
-  auto fallback = spdlog::default_logger();
-  if (!fallback) {
-    fallback = spdlog::stdout_color_mt("fallback");
+
+  static std::mutex fallback_mutex;
+  static std::shared_ptr<spdlog::logger> local_fallback;
+
+  std::lock_guard<std::mutex> lock(fallback_mutex);
+
+  if (auto fallback = spdlog::default_logger()) {
+    return fallback;
   }
-  return fallback;
+  if (auto fallback = spdlog::get("fallback")) {
+    return fallback;
+  }
+  if (local_fallback) {
+    return local_fallback;
+  }
+
+  try {
+    local_fallback = spdlog::stdout_color_mt("fallback");
+  } catch (...) {
+    auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    local_fallback = std::make_shared<spdlog::logger>("fallback_unregistered", sink);
+  }
+
+  local_fallback->set_pattern(kLogPattern);
+  return local_fallback;
 }
 
 void Logger::Flush() {
-  for (auto& [_, logger] : loggers_) {
+  std::vector<std::shared_ptr<spdlog::logger>> loggers_to_flush;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    loggers_to_flush.reserve(loggers_.size());
+    for (const auto& [_, logger] : loggers_) {
+      if (logger) {
+        loggers_to_flush.push_back(logger);
+      }
+    }
+  }
+
+  for (const auto& logger : loggers_to_flush) {
     if (logger) {
       logger->flush();
     }

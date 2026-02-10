@@ -18,18 +18,19 @@
 #include <unordered_map>
 #include <functional>
 #include "common/types.h"
+#include "core/event_dispatcher.h"
 
 namespace mir2::ui {
 
 // 引入公共类型定义
-using namespace mir2::common;
+using mir2::common::Rect;
 
 // 前向声明
 class UIRenderer;
 
 /// UI组件基类
 /// 所有UI元素的基类，定义基本接口
-class UIWidget {
+class UIWidget : public mir2::core::IEventListener {
 public:
     virtual ~UIWidget() = default;
 
@@ -75,9 +76,34 @@ public:
 
     /// 处理事件
     /// @return true 如果事件被处理
-    virtual bool handle_event(const SDL_Event& event) { (void)event; return false; }
+    virtual bool handle_event(const SDL_Event& event) { return dispatch_event(event); }
 
 protected:
+    bool dispatch_event(const SDL_Event& event) {
+        switch (event.type) {
+            case SDL_MOUSEMOTION:
+                return on_mouse_move(event.motion.x, event.motion.y);
+            case SDL_MOUSEBUTTONDOWN:
+                return on_mouse_button_down(event.button.button, event.button.x, event.button.y);
+            case SDL_MOUSEBUTTONUP:
+                return on_mouse_button_up(event.button.button, event.button.x, event.button.y);
+            case SDL_MOUSEWHEEL:
+                return on_mouse_wheel(event.wheel.x, event.wheel.y);
+            case SDL_KEYDOWN:
+                return on_key_down(event.key.keysym.scancode,
+                                   event.key.keysym.sym,
+                                   event.key.repeat != 0);
+            case SDL_KEYUP:
+                return on_key_up(event.key.keysym.scancode, event.key.keysym.sym);
+            case SDL_TEXTINPUT:
+                return on_text_input(event.text.text);
+            case SDL_USEREVENT:
+                return on_user_event(event.user);
+            default:
+                return false;
+        }
+    }
+
     std::string id_;
     Rect bounds_ = {0, 0, 0, 0};
     bool visible_ = true;

@@ -120,11 +120,8 @@ TEST(gateway_integration_test, HeartbeatTimeoutKickCleansRoutes) {
     TestGatewayServer server;
 
     server.RegisterConnection(101, session_pair.session);
-    session_pair.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-    server.RegisterUser(42, session_pair.session);
 
-    EXPECT_EQ(server.GetConnectionRouteCount(), 1u);
-    EXPECT_EQ(server.GetUserRouteCount(), 1u);
+    EXPECT_EQ(server.GetConnectionCount(), 1u);
 
     auto work_guard = asio::make_work_guard(io_context);
     std::thread io_thread([&io_context]() { io_context.run(); });
@@ -138,10 +135,8 @@ TEST(gateway_integration_test, HeartbeatTimeoutKickCleansRoutes) {
                     "Heartbeat timeout");
 
     EXPECT_NE(session_pair.session->GetState(), network::TcpSession::SessionState::kActive);
-    EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
-    EXPECT_EQ(server.GetUserRouteCount(), 0u);
+    EXPECT_EQ(server.GetConnectionCount(), 0u);
     EXPECT_EQ(server.GetConnectionSession(101), nullptr);
-    EXPECT_EQ(server.GetUserSession(42), nullptr);
     EXPECT_EQ(session_pair.session->GetUserId(), 0u);
 
     work_guard.reset();
@@ -164,13 +159,8 @@ TEST(gateway_integration_test, MultipleTimeoutsKickAndCleanup) {
 
     server.RegisterConnection(201, pair_a.session);
     server.RegisterConnection(202, pair_b.session);
-    pair_a.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-    pair_b.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-    server.RegisterUser(71, pair_a.session);
-    server.RegisterUser(72, pair_b.session);
 
-    EXPECT_EQ(server.GetConnectionRouteCount(), 2u);
-    EXPECT_EQ(server.GetUserRouteCount(), 2u);
+    EXPECT_EQ(server.GetConnectionCount(), 2u);
 
     auto work_guard = asio::make_work_guard(io_context);
     std::thread io_thread([&io_context]() { io_context.run(); });
@@ -190,12 +180,9 @@ TEST(gateway_integration_test, MultipleTimeoutsKickAndCleanup) {
                     common::ErrorCode::kKickHeartbeatTimeout,
                     "Heartbeat timeout");
 
-    EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
-    EXPECT_EQ(server.GetUserRouteCount(), 0u);
+    EXPECT_EQ(server.GetConnectionCount(), 0u);
     EXPECT_EQ(server.GetConnectionSession(201), nullptr);
     EXPECT_EQ(server.GetConnectionSession(202), nullptr);
-    EXPECT_EQ(server.GetUserSession(71), nullptr);
-    EXPECT_EQ(server.GetUserSession(72), nullptr);
 
     work_guard.reset();
     io_context.stop();

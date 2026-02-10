@@ -2,13 +2,13 @@
 #define LEGEND2_CONNECTING_STATE_H
 
 #include "ui/states/login_state_interface.h"
-#include "ui/login_screen.h"
+#include "ui/states/login_state_context.h"
 
 namespace mir2::ui::screens {
 
 class ConnectingState : public ILoginState {
 public:
-    explicit ConnectingState(LoginStateContext& context);
+    explicit ConnectingState(IConnectingStateContext& context);
 
     void on_enter() override;
     void on_exit() override;
@@ -18,7 +18,7 @@ public:
     LoginScreenState get_state_type() const override { return LoginScreenState::CONNECTING; }
 
 private:
-    LoginStateContext& context_;
+    IConnectingStateContext& context_;
 
     void render_background();
 };

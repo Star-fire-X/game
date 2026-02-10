@@ -51,7 +51,6 @@ public:
     SkillUseResult try_use_skill(uint32_t skill_id, int current_mp, uint64_t target_id);
 
 private:
-    static int64_t now_ms();
     bool is_target_valid(const ClientSkillTemplate& skill, uint64_t target_id) const;
 
     SkillManager& manager_;

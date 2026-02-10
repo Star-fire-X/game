@@ -16,7 +16,7 @@ class SkillBar {
 public:
     static constexpr int SLOT_COUNT = 8;
 
-    explicit SkillBar(client::skill::SkillManager& skill_manager);
+    explicit SkillBar(client::skill::ISkillManager& skill_manager);
 
     // Update cooldown animations
     void update(int64_t now_ms);
@@ -36,7 +36,7 @@ public:
     bool is_dragging() const;
 
 private:
-    client::skill::SkillManager& skill_manager_;
+    client::skill::ISkillManager& skill_manager_;
     int dragging_slot_ = -1;
     int64_t last_update_ms_ = 0;
 

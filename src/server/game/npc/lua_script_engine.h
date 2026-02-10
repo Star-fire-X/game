@@ -3,8 +3,8 @@
  * @brief LuaJIT script engine definition.
  */
 
-#ifndef LEGEND2_GAME_NPC_LUA_SCRIPT_ENGINE_H
-#define LEGEND2_GAME_NPC_LUA_SCRIPT_ENGINE_H
+#ifndef MIR2_GAME_NPC_LUA_SCRIPT_ENGINE_H_
+#define MIR2_GAME_NPC_LUA_SCRIPT_ENGINE_H_
 
 #include <filesystem>
 #include <memory>
@@ -95,4 +95,4 @@ class LuaScriptEngine {
 
 }  // namespace mir2::game::npc
 
-#endif  // LEGEND2_GAME_NPC_LUA_SCRIPT_ENGINE_H
+#endif  // MIR2_GAME_NPC_LUA_SCRIPT_ENGINE_H_

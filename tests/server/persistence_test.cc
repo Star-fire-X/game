@@ -48,12 +48,11 @@ TEST_F(ComponentRegistryTest, RegisterComponent) {
         return data;
     };
 
-    auto deserialize = [](const std::vector<uint8_t>& data) {
-        TestComponentA c{};
+    auto deserialize = [](const std::vector<uint8_t>& data, TestComponentA& out) {
         if (data.size() >= sizeof(int32_t)) {
-            std::memcpy(&c.value, data.data(), sizeof(int32_t));
+            std::memcpy(&out.value, data.data(), sizeof(int32_t));
         }
-        return c;
+        return true;
     };
 
     EXPECT_TRUE(registry_.RegisterComponent<TestComponentA>(
@@ -70,12 +69,11 @@ TEST_F(ComponentRegistryTest, RegisterMultipleComponents) {
         return data;
     };
 
-    auto deserialize_a = [](const std::vector<uint8_t>& data) {
-        TestComponentA c{};
+    auto deserialize_a = [](const std::vector<uint8_t>& data, TestComponentA& out) {
         if (data.size() >= sizeof(int32_t)) {
-            std::memcpy(&c.value, data.data(), sizeof(int32_t));
+            std::memcpy(&out.value, data.data(), sizeof(int32_t));
         }
-        return c;
+        return true;
     };
 
     EXPECT_TRUE(registry_.RegisterComponent<TestComponentA>(
@@ -89,8 +87,9 @@ TEST_F(ComponentRegistryTest, GetRegisteredComponents) {
     auto serialize = [](const TestComponentA& c) {
         return std::vector<uint8_t>(sizeof(int32_t));
     };
-    auto deserialize = [](const std::vector<uint8_t>& data) {
-        return TestComponentA{42};
+    auto deserialize = [](const std::vector<uint8_t>& /*data*/, TestComponentA& out) {
+        out = TestComponentA{42};
+        return true;
     };
 
     registry_.RegisterComponent<TestComponentA>("component_a", serialize, deserialize);
@@ -183,6 +182,20 @@ class MockStorageBackend : public IStorageBackend {
 
     StorageResult<std::optional<SnapshotMetadata>> GetLatestSnapshot() noexcept override {
         return StorageResult<std::optional<SnapshotMetadata>>::Success(std::nullopt);
+    }
+
+    StorageResult<std::vector<SnapshotMetadata>> GetSnapshotHistory(int /*limit*/) noexcept override {
+        return StorageResult<std::vector<SnapshotMetadata>>::Success({});
+    }
+
+    StorageResult<std::map<uint64_t, std::tuple<std::string, std::vector<uint8_t>, uint32_t>>>
+    LoadAllEntitiesFromSnapshot(uint64_t /*snapshot_id*/) noexcept override {
+        std::map<uint64_t, std::tuple<std::string, std::vector<uint8_t>, uint32_t>> result;
+        return StorageResult<std::map<uint64_t, std::tuple<std::string, std::vector<uint8_t>, uint32_t>>>::Success(result);
+    }
+
+    StorageResult<> MarkSnapshotCorrupted(uint64_t /*snapshot_id*/, const std::string& /*reason*/) noexcept override {
+        return StorageResult<>::Success();
     }
 
     bool IsReady() noexcept override { return true; }

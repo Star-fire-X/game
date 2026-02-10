@@ -147,6 +147,7 @@ TEST(CharacterEntityManagerDirtyTest, UpdateUsesSaveIfDirty) {
     CharacterEntityManager manager(registry);
     manager.SetSaveIntervalSeconds(0.1f);
     auto entity = manager.GetOrCreate(20);
+    manager.OnLogin(20);
 
     auto& attributes = registry.get<CharacterAttributesComponent>(entity);
     attributes.hp = 77;

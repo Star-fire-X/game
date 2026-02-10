@@ -13,10 +13,14 @@ namespace mir2::ui::layout {
 
 using mir2::common::Rect;
 
+constexpr int DEFAULT_SCREEN_WIDTH = 800;
+constexpr int DEFAULT_SCREEN_HEIGHT = 600;
+constexpr int MAX_CHARACTER_PREVIEW_SLOTS = 6;
+
 // 登录界面布局常量（基于800x600设计分辨率）
 namespace login {
-constexpr int DESIGN_WIDTH = 800;
-constexpr int DESIGN_HEIGHT = 600;
+constexpr int DESIGN_WIDTH = DEFAULT_SCREEN_WIDTH;
+constexpr int DESIGN_HEIGHT = DEFAULT_SCREEN_HEIGHT;
 
 constexpr Rect USERNAME_FIELD = {349, 258, 139, 18};
 constexpr Rect PASSWORD_FIELD = {349, 290, 140, 18};
@@ -25,8 +29,8 @@ constexpr Rect CONFIRM_BUTTON = {392, 330, 136, 51};
 
 // 角色创建界面布局常量（基于800x600设计分辨率）
 namespace character_create {
-constexpr int DESIGN_WIDTH = 800;
-constexpr int DESIGN_HEIGHT = 600;
+constexpr int DESIGN_WIDTH = DEFAULT_SCREEN_WIDTH;
+constexpr int DESIGN_HEIGHT = DEFAULT_SCREEN_HEIGHT;
 
 constexpr Rect CREATE_BUTTON = {344, 484, 120, 21};
 constexpr Rect CLASS_PANEL = {428, 5, 300, 417};

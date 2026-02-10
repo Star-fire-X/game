@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/enums.h"
+#include "common/types/constants.h"
 #include "combat_generated.h"
 #include "game_generated.h"
 #include "login_generated.h"
@@ -40,8 +41,8 @@ constexpr uint16_t kAttackRequestMsgId = static_cast<uint16_t>(MsgId::kAttackReq
 constexpr uint16_t kAttackResponseMsgId = static_cast<uint16_t>(MsgId::kAttackRsp);
 constexpr uint16_t kSkillRequestMsgId = static_cast<uint16_t>(MsgId::kSkillReq);
 
-constexpr size_t kMaxLoginUsernameLength = 20;
-constexpr size_t kMaxLoginPasswordLength = 20;
+constexpr size_t kMaxLoginUsernameLength = constants::LOGIN_USERNAME_MAX_LENGTH;
+constexpr size_t kMaxLoginPasswordLength = constants::LOGIN_PASSWORD_MAX_LENGTH;
 constexpr size_t kMaxLoginVersionLength = 32;
 constexpr size_t kMaxCharacterNameLength = 12;
 

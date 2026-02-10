@@ -3,8 +3,8 @@
  * @brief TCP客户端
  */
 
-#ifndef MIR2_NETWORK_TCP_CLIENT_H
-#define MIR2_NETWORK_TCP_CLIENT_H
+#ifndef MIR2_NETWORK_TCP_CLIENT_H_
+#define MIR2_NETWORK_TCP_CLIENT_H_
 
 #include <atomic>
 #include <cstddef>
@@ -55,6 +55,9 @@ class TcpClient {
   void HandleDisconnect(uint64_t connection_id);
   void HandleBytes(const uint8_t* data, size_t size);
   bool CheckRecvSequence(uint16_t seq);
+  size_t BufferedBytes() const;
+  void ConsumeBytes(size_t bytes);
+  void CompactReadBufferIfNeeded();
 
   asio::io_context& io_context_;
   std::shared_ptr<TcpConnection> connection_;
@@ -62,6 +65,8 @@ class TcpClient {
   PacketHandler packet_handler_;
   DisconnectHandler disconnect_handler_;
   std::vector<uint8_t> read_buffer_;
+  size_t read_offset_ = 0;
+  Packet decode_packet_{};
   ProtocolVersion protocol_version_ = ProtocolVersion::kV1;
   bool protocol_version_detected_ = false;
   std::atomic<uint16_t> send_sequence_{0};
@@ -70,4 +75,4 @@ class TcpClient {
 
 }  // namespace mir2::network
 
-#endif  // MIR2_NETWORK_TCP_CLIENT_H
+#endif  // MIR2_NETWORK_TCP_CLIENT_H_

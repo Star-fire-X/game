@@ -12,6 +12,26 @@ table HeartbeatRsp {
   server_time: uint;
 }
 
+table KcpUpgradeRequest {
+  client_udp_port: ushort;
+}
+
+table KcpUpgradeResponse {
+  success: bool;
+  conv_id: uint;
+  server_udp_port: ushort;
+  session_token: string;
+  error_code: ushort;
+}
+
+table KcpHeartbeat {
+  timestamp: uint;
+}
+
+table KcpHeartbeatAck {
+  timestamp: uint;
+}
+
 table Kick {
   reason: ErrorCode;
   message: string;
@@ -22,4 +42,53 @@ table ServerNotice {
   level: ushort;
   message: string;
   timestamp: uint;
+}
+
+// ===== Gateway-LogicServer 内部协议 =====
+
+/// LogicServer -> Gateway: 请求连接上下文列表
+table ContextRestore {
+  request_id: uint;           // 请求ID，用于响应匹配
+  timestamp_ms: ulong;        // 请求时间戳
+}
+
+/// Gateway -> LogicServer: 连接上下文响应
+table ConnectionContext {
+  client_id: ulong;           // 客户端连接ID
+  player_id: uint;            // 玩家ID (0表示未登录)
+  account_id: uint;           // 账号ID
+  ip_address: string;         // 客户端IP
+  connected_at_ms: ulong;     // 连接建立时间
+  last_active_ms: ulong;      // 最后活跃时间
+}
+
+table ContextRestoreResponse {
+  request_id: uint;           // 对应请求ID
+  connections: [ConnectionContext];
+  total_count: uint;
+}
+
+/// LogicServer -> Gateway: Pre-warm完成，可开始转发
+table LogicReady {
+  timestamp_ms: ulong;
+  prewarm_count: uint;        // 预热的玩家数量
+  prewarm_duration_ms: uint;  // 预热耗时
+}
+
+/// Gateway -> Client: 重置KCP会话
+table KcpReset {
+  reason: ubyte;              // 0=LogicRestart, 1=Timeout, 2=Manual
+  timestamp_ms: ulong;
+}
+
+enum BackpressureAction : ubyte {
+  PAUSE_READ = 0,
+  RESUME_READ = 1
+}
+
+/// LogicServer -> Gateway: 对指定客户端施加/解除读背压
+table BackpressureControl {
+  client_id: ulong;           // 客户端连接ID
+  action: BackpressureAction; // 背压动作
+  duration_ms: uint;          // PAUSE_READ 持续时间，0 表示立即恢复
 }

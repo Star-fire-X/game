@@ -20,6 +20,8 @@ class TeleportSystemTest : public ::testing::Test {
     // 创建两个测试地图
     SceneManager::MapConfig map1_config{1, 100, 100};
     SceneManager::MapConfig map2_config{2, 200, 200};
+    map1_config.load_walkability = false;
+    map2_config.load_walkability = false;
 
     scene_manager_.CreateMap(map1_config);
     scene_manager_.CreateMap(map2_config);
@@ -110,6 +112,34 @@ TEST_F(TeleportSystemTest, SameMapTeleport) {
   auto& state = registry_.get<CharacterStateComponent>(entity);
   EXPECT_EQ(state.position.x, 30);
   EXPECT_EQ(state.position.y, 30);
+}
+
+// 测试同地图非法坐标传送：状态不应被污染
+TEST_F(TeleportSystemTest, SameMapTeleportInvalidPositionKeepsState) {
+  auto entity = registry_.create();
+  registry_.emplace<CharacterStateComponent>(
+      entity, uint32_t{1}, mir2::common::Position{10, 10});
+  scene_manager_.AddEntityToMap(1, entity, 10, 10);
+
+  // 地图1尺寸为 100x100，(150,150) 非法
+  TeleportCommand cmd{entity, 1, 150, 150};
+  teleport_system_->RequestTeleport(cmd);
+  teleport_system_->Update(registry_, 0.0f);
+
+  auto* map = scene_manager_.GetMapByEntity(entity);
+  ASSERT_NE(map, nullptr);
+  EXPECT_EQ(map->GetMapId(), 1);
+
+  int32_t x = 0;
+  int32_t y = 0;
+  ASSERT_TRUE(map->GetEntityPosition(entity, x, y));
+  EXPECT_EQ(x, 10);
+  EXPECT_EQ(y, 10);
+
+  const auto& state = registry_.get<CharacterStateComponent>(entity);
+  EXPECT_EQ(state.map_id, 1);
+  EXPECT_EQ(state.position.x, 10);
+  EXPECT_EQ(state.position.y, 10);
 }
 
 // 测试传送到不存在的地图

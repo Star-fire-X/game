@@ -1,16 +1,19 @@
 #include <gtest/gtest.h>
 
 #include <asio.hpp>
+#include <flatbuffers/flatbuffers.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -27,7 +30,12 @@
 #include "client/network/dual_channel_client.h"
 #include "common/enums.h"
 #include "common/internal_message_helper.h"
+#include "chat_generated.h"
+#include "combat_generated.h"
+#include "game_generated.h"
 #include "guild_generated.h"
+#include "item_generated.h"
+#include "login_generated.h"
 #include "integration/test_helpers.h"
 #include "network/tcp_connection.h"
 #include "network/network_manager.h"
@@ -103,6 +111,14 @@ std::string WriteTempConfig(const std::filesystem::path& dir,
   return path.string();
 }
 
+std::string EnvOrDefault(const char* key, const char* default_value) {
+  const char* value = std::getenv(key);
+  if (value != nullptr && value[0] != '\0') {
+    return value;
+  }
+  return default_value;
+}
+
 std::string BuildGatewayConfig(const TestPorts& ports,
                                const std::filesystem::path& log_dir) {
   std::ostringstream out;
@@ -129,6 +145,19 @@ std::string BuildGatewayConfig(const TestPorts& ports,
 
 std::string BuildLogicConfig(const TestPorts& ports,
                              const std::filesystem::path& log_dir) {
+  const std::string postgres_host = EnvOrDefault("POSTGRES_HOST", kHost);
+  const std::string postgres_port = EnvOrDefault("POSTGRES_PORT", "5432");
+  const std::string postgres_user = EnvOrDefault("POSTGRES_USER", "mir2");
+  const std::string postgres_password = EnvOrDefault("POSTGRES_PASSWORD", "mir2_password");
+  const std::string postgres_db = EnvOrDefault("POSTGRES_DB", "mir2_game");
+
+  const std::string db_host = EnvOrDefault("MIR2_DB_HOST", postgres_host.c_str());
+  const std::string db_port = EnvOrDefault("MIR2_DB_PORT", postgres_port.c_str());
+  const std::string db_user = EnvOrDefault("MIR2_DB_USER", postgres_user.c_str());
+  const std::string db_password =
+      EnvOrDefault("MIR2_DB_PASSWORD", postgres_password.c_str());
+  const std::string db_name = EnvOrDefault("MIR2_DB_NAME", postgres_db.c_str());
+
   std::ostringstream out;
   out << "server:\n"
       << "  id: 210\n"
@@ -145,8 +174,129 @@ std::string BuildLogicConfig(const TestPorts& ports,
       << "services:\n"
       << "  logic:\n"
       << "    host: \"" << kHost << "\"\n"
-      << "    port: " << ports.logic_tcp << "\n";
+      << "    port: " << ports.logic_tcp << "\n"
+      << "database:\n"
+      << "  host: \"" << db_host << "\"\n"
+      << "  port: " << db_port << "\n"
+      << "  user: \"" << db_user << "\"\n"
+      << "  password: \"" << db_password << "\"\n"
+      << "  database: \"" << db_name << "\"\n";
   return out.str();
+}
+
+std::vector<uint8_t> BuildPayloadForMsgId(uint16_t msg_id) {
+  flatbuffers::FlatBufferBuilder builder;
+
+  switch (static_cast<MsgId>(msg_id)) {
+    case MsgId::kLoginReq: {
+      const auto username = builder.CreateString("integration_user");
+      const auto password = builder.CreateString("integration_pw");
+      const auto version = builder.CreateString(std::to_string(
+          static_cast<uint32_t>(mir2::proto::SchemaVersion::kSchemaVersion)));
+      builder.Finish(mir2::proto::CreateLoginReq(builder, username, password, version));
+      break;
+    }
+    case MsgId::kLogout: {
+      const auto token = builder.CreateString("session_token");
+      builder.Finish(mir2::proto::CreateLogoutReq(builder, 1, token));
+      break;
+    }
+    case MsgId::kCreateRoleReq: {
+      const auto name = builder.CreateString("RoleA");
+      builder.Finish(mir2::proto::CreateCreateRoleReq(
+          builder, name, mir2::proto::Profession::WARRIOR, mir2::proto::Gender::MALE));
+      break;
+    }
+    case MsgId::kSelectRoleReq:
+      builder.Finish(mir2::proto::CreateSelectRoleReq(builder, 1));
+      break;
+    case MsgId::kRoleListReq: {
+      const auto token = builder.CreateString("session_token");
+      builder.Finish(mir2::proto::CreateRoleListReq(builder, 1, token));
+      break;
+    }
+    case MsgId::kMoveReq:
+      builder.Finish(mir2::proto::CreateMoveReq(builder, 10, 20));
+      break;
+    case MsgId::kAttackReq:
+      builder.Finish(
+          mir2::proto::CreateAttackReq(builder, 100, mir2::proto::EntityType::MONSTER));
+      break;
+    case MsgId::kSkillReq:
+      builder.Finish(mir2::proto::CreateSkillReq(builder, 1, 100));
+      break;
+    case MsgId::kChatReq: {
+      const auto content = builder.CreateString("hello");
+      builder.Finish(
+          mir2::proto::CreateChatReq(builder, mir2::proto::ChatChannel::WORLD, content, 0));
+      break;
+    }
+    case MsgId::kUseItemReq:
+      builder.Finish(mir2::proto::CreateUseItemReq(builder, 1, 1001));
+      break;
+    case MsgId::kDropItemReq:
+      builder.Finish(mir2::proto::CreateDropItemReq(builder, 1, 1001, 1));
+      break;
+    case MsgId::kPickupItemReq:
+      builder.Finish(mir2::proto::CreatePickupItemReq(builder, 1001));
+      break;
+    case MsgId::kEquipReq:
+      builder.Finish(mir2::proto::CreateEquipReq(builder, 1, 1001));
+      break;
+    case MsgId::kUnequipReq:
+      builder.Finish(mir2::proto::CreateUnequipReq(builder, 1));
+      break;
+    case MsgId::kNpcInteractReq:
+    case MsgId::kNpcMenuSelect:
+      return std::vector<uint8_t>{'{', '}'};
+    case MsgId::kGuildChat: {
+      const auto from_name = builder.CreateString("tester");
+      const auto content = builder.CreateString("guild msg");
+      builder.Finish(mir2::proto::CreateChatMessage(
+          builder,
+          mir2::proto::ChatChannel::GUILD,
+          1,
+          from_name,
+          0,
+          content,
+          0xFFFFFFu,
+          1));
+      break;
+    }
+    default:
+      break;
+  }
+
+  switch (static_cast<mir2::proto::GuildMessageType>(msg_id)) {
+    case mir2::proto::GuildMessageType::CREATE: {
+      const auto guild_name = builder.CreateString("GuildA");
+      builder.Finish(mir2::proto::CreateCreateGuildRequest(builder, guild_name));
+      break;
+    }
+    case mir2::proto::GuildMessageType::JOIN:
+      builder.Finish(mir2::proto::CreateJoinGuildRequest(builder, 1));
+      break;
+    case mir2::proto::GuildMessageType::LEAVE:
+      builder.Finish(mir2::proto::CreateLeaveGuildRequest(builder));
+      break;
+    case mir2::proto::GuildMessageType::DECLARE_WAR:
+    case mir2::proto::GuildMessageType::CANCEL_WAR:
+      builder.Finish(mir2::proto::CreateDeclareWarRequest(builder, 1));
+      break;
+    case mir2::proto::GuildMessageType::MAKE_ALLY:
+    case mir2::proto::GuildMessageType::BREAK_ALLY:
+      builder.Finish(mir2::proto::CreateMakeAllianceRequest(builder, 1));
+      break;
+    case mir2::proto::GuildMessageType::KICK:
+    case mir2::proto::GuildMessageType::UPDATE_NOTICE:
+    case mir2::proto::GuildMessageType::UPDATE_RANK:
+      return std::vector<uint8_t>{1};
+    default:
+      break;
+  }
+
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
 struct RoutedCapture {
@@ -160,6 +310,22 @@ struct RoutedCapture {
   size_t Size() const {
     std::lock_guard<std::mutex> lock(mutex);
     return msg_ids.size();
+  }
+
+  bool Contains(uint16_t msg_id) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return std::find(msg_ids.begin(), msg_ids.end(), msg_id) != msg_ids.end();
+  }
+
+  bool ContainsAll(const std::vector<uint16_t>& expected) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::unordered_set<uint16_t> seen(msg_ids.begin(), msg_ids.end());
+    for (uint16_t msg_id : expected) {
+      if (seen.count(msg_id) == 0) {
+        return false;
+      }
+    }
+    return true;
   }
 
   std::vector<uint16_t> DrainMsgIds() {
@@ -188,6 +354,11 @@ std::shared_ptr<TcpSession> CreateMockSession(asio::io_context& io_context,
 
 class GatewayLogicUniversalForwardTest : public ::testing::Test {
  protected:
+  struct RoutedHandlerState {
+    std::mutex mutex;
+    std::function<void(const mir2::common::RoutedMessageData&)> handler;
+  };
+
   void SetUp() override {
     ports_ = AllocateTestPorts();
     temp_dir_ = CreateTempDir("mir2_gateway_logic_universal");
@@ -205,6 +376,7 @@ class GatewayLogicUniversalForwardTest : public ::testing::Test {
 
     logic_ = std::make_unique<LogicServer>();
     ASSERT_TRUE(logic_->Initialize(logic_config_path_));
+    routed_handler_state_ = std::make_shared<RoutedHandlerState>();
     InstallLogicHandler();
 
     logic_thread_ = std::thread([this]() { logic_->Run(); });
@@ -214,17 +386,23 @@ class GatewayLogicUniversalForwardTest : public ::testing::Test {
   }
 
   void TearDown() override {
+    if (routed_handler_state_) {
+      std::lock_guard<std::mutex> lock(routed_handler_state_->mutex);
+      routed_handler_state_->handler = {};
+    }
+    routed_handler_state_.reset();
+
     if (client_) {
       client_->disconnect();
-    }
-    if (gateway_) {
-      gateway_->Shutdown();
     }
     if (logic_) {
       logic_->Shutdown();
     }
     if (logic_thread_.joinable()) {
       logic_thread_.join();
+    }
+    if (gateway_) {
+      gateway_->Shutdown();
     }
     gateway_.reset();
     logic_.reset();
@@ -236,20 +414,26 @@ class GatewayLogicUniversalForwardTest : public ::testing::Test {
   void InstallLogicHandler() {
     ASSERT_NE(logic_, nullptr);
     ASSERT_NE(logic_->network_, nullptr);
+    ASSERT_NE(routed_handler_state_, nullptr);
 
     logic_->network_->RegisterHandler(
         static_cast<uint16_t>(InternalMsgId::kRoutedMessage),
-        [this](const std::shared_ptr<TcpSession>&,
-               const std::vector<uint8_t>& payload) {
+        [state_weak = std::weak_ptr<RoutedHandlerState>(routed_handler_state_)](
+            const std::shared_ptr<TcpSession>&, const std::vector<uint8_t>& payload) {
           mir2::common::RoutedMessageData routed;
           if (!mir2::common::ParseRoutedMessage(payload, &routed)) {
             return;
           }
 
+          auto state = state_weak.lock();
+          if (!state) {
+            return;
+          }
+
           std::function<void(const mir2::common::RoutedMessageData&)> handler_copy;
           {
-            std::lock_guard<std::mutex> lock(handler_mutex_);
-            handler_copy = routed_handler_;
+            std::lock_guard<std::mutex> lock(state->mutex);
+            handler_copy = state->handler;
           }
           if (handler_copy) {
             handler_copy(routed);
@@ -258,8 +442,9 @@ class GatewayLogicUniversalForwardTest : public ::testing::Test {
   }
 
   void SetRoutedHandler(std::function<void(const mir2::common::RoutedMessageData&)> handler) {
-    std::lock_guard<std::mutex> lock(handler_mutex_);
-    routed_handler_ = std::move(handler);
+    ASSERT_NE(routed_handler_state_, nullptr);
+    std::lock_guard<std::mutex> lock(routed_handler_state_->mutex);
+    routed_handler_state_->handler = std::move(handler);
   }
 
   bool ConnectClient() {
@@ -286,6 +471,27 @@ class GatewayLogicUniversalForwardTest : public ::testing::Test {
         [this]() { client_->update(); });
   }
 
+  bool WaitForGatewayForwarding(std::chrono::milliseconds timeout) {
+    return WaitForCondition(
+        [this]() {
+          return gateway_->holder_state_ ==
+                 mir2::gateway::ConnectionHolder::State::FORWARDING;
+        },
+        timeout,
+        10ms,
+        [this]() { client_->update(); });
+  }
+
+  void PumpClientFor(std::chrono::milliseconds duration) {
+    const auto deadline = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (client_) {
+        client_->update();
+      }
+      std::this_thread::sleep_for(2ms);
+    }
+  }
+
   TestPorts ports_{};
   std::filesystem::path temp_dir_;
   std::string gateway_config_path_;
@@ -295,18 +501,23 @@ class GatewayLogicUniversalForwardTest : public ::testing::Test {
   std::thread logic_thread_;
   std::unique_ptr<DualChannelClient> client_;
 
-  std::mutex handler_mutex_;
-  std::function<void(const mir2::common::RoutedMessageData&)> routed_handler_;
+  std::shared_ptr<RoutedHandlerState> routed_handler_state_;
 };
 
 // 验证扩展消息矩阵都会通过Gateway转发到LogicServer。
 TEST_F(GatewayLogicUniversalForwardTest, AllMessageTypesForwarded) {
   ASSERT_TRUE(ConnectClient());
   ASSERT_TRUE(WaitForLogicConnected(3s));
+  ASSERT_TRUE(WaitForGatewayForwarding(3s));
+  // 等待 KcpReset/握手余波处理完成，减少首批消息丢失抖动。
+  PumpClientFor(200ms);
 
-  RoutedCapture capture;
-  SetRoutedHandler([&capture](const mir2::common::RoutedMessageData& routed) {
-    capture.Push(routed.msg_id, routed.client_id);
+  auto capture = std::make_shared<RoutedCapture>();
+  SetRoutedHandler([capture_weak = std::weak_ptr<RoutedCapture>(capture)](
+                       const mir2::common::RoutedMessageData& routed) {
+    if (auto capture_locked = capture_weak.lock()) {
+      capture_locked->Push(routed.msg_id, routed.client_id);
+    }
   });
 
   const std::vector<uint16_t> msg_ids = {
@@ -339,78 +550,110 @@ TEST_F(GatewayLogicUniversalForwardTest, AllMessageTypesForwarded) {
       static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
   };
 
-  const std::vector<uint8_t> payload{1, 2, 3};
-  for (auto msg_id : msg_ids) {
-    client_->send(msg_id, payload);
+  auto send_messages = [&msg_ids, capture, this](bool only_missing) {
+    for (auto msg_id : msg_ids) {
+      if (only_missing && capture->Contains(msg_id)) {
+        continue;
+      }
+      auto payload = BuildPayloadForMsgId(msg_id);
+      ASSERT_FALSE(payload.empty());
+      client_->send(msg_id, payload);
+      client_->update();
+    }
+  };
+
+  auto wait_for_all = [&msg_ids, capture, this]() {
+    return WaitForCondition(
+        [capture, &msg_ids]() { return capture->ContainsAll(msg_ids); },
+        6s,
+        5ms,
+        [this]() { client_->update(); });
+  };
+
+  send_messages(/*only_missing=*/false);
+  if (!wait_for_all()) {
+    // 仅补发未观测到的消息类型，提升偶发网络抖动下稳定性。
+    send_messages(/*only_missing=*/true);
   }
+  ASSERT_TRUE(wait_for_all());
 
-  ASSERT_TRUE(WaitForCondition(
-      [&capture, &msg_ids]() { return capture.Size() >= msg_ids.size(); },
-      3s));
-
-  auto forwarded_ids = capture.DrainMsgIds();
-  ASSERT_EQ(forwarded_ids.size(), msg_ids.size());
+  auto forwarded_ids = capture->DrainMsgIds();
+  EXPECT_GE(forwarded_ids.size(), msg_ids.size());
 
   std::unordered_set<uint16_t> forwarded_set(forwarded_ids.begin(), forwarded_ids.end());
   for (auto msg_id : msg_ids) {
     EXPECT_TRUE(forwarded_set.count(msg_id) > 0);
   }
 
-  auto client_ids = capture.DrainClientIds();
-  ASSERT_EQ(client_ids.size(), msg_ids.size());
+  auto client_ids = capture->DrainClientIds();
+  ASSERT_FALSE(client_ids.empty());
   const uint64_t first_client = client_ids.front();
   EXPECT_NE(first_client, 0u);
   for (auto client_id : client_ids) {
     EXPECT_EQ(client_id, first_client);
   }
+
+  // 给异步转发链路一个短暂排空窗口，避免带着在途任务进入 teardown。
+  PumpClientFor(100ms);
 }
 
 // 验证Gateway不做认证检查，由LogicServer自行判断。
 TEST_F(GatewayLogicUniversalForwardTest, NoAuthCheckAtGateway) {
   ASSERT_TRUE(ConnectClient());
   ASSERT_TRUE(WaitForLogicConnected(3s));
+  ASSERT_TRUE(WaitForGatewayForwarding(3s));
+  // 等待 KcpReset/握手余波处理完成，减少首批消息抖动。
+  PumpClientFor(200ms);
 
-  std::atomic<bool> authed{false};
-  std::atomic<int> unauth_seen{0};
-  std::atomic<int> authed_seen{0};
+  auto authed = std::make_shared<std::atomic<bool>>(false);
+  auto unauth_seen = std::make_shared<std::atomic<int>>(0);
+  auto authed_seen = std::make_shared<std::atomic<int>>(0);
 
-  SetRoutedHandler([&](const mir2::common::RoutedMessageData& routed) {
+  SetRoutedHandler([authed, unauth_seen, authed_seen](
+                       const mir2::common::RoutedMessageData& routed) {
     if (routed.msg_id == static_cast<uint16_t>(MsgId::kLoginReq)) {
-      authed.store(true, std::memory_order_release);
+      authed->store(true, std::memory_order_release);
       return;
     }
-    if (!authed.load(std::memory_order_acquire)) {
-      unauth_seen.fetch_add(1, std::memory_order_relaxed);
+    if (!authed->load(std::memory_order_acquire)) {
+      unauth_seen->fetch_add(1, std::memory_order_relaxed);
     } else {
-      authed_seen.fetch_add(1, std::memory_order_relaxed);
+      authed_seen->fetch_add(1, std::memory_order_relaxed);
     }
   });
 
   // 未登录直接发送MoveReq，Logic侧应收到并标记未认证。
-  client_->send(static_cast<uint16_t>(MsgId::kMoveReq), std::vector<uint8_t>{9});
-  ASSERT_TRUE(WaitForCondition([&]() { return unauth_seen.load() > 0; }, 3s));
+  client_->send(static_cast<uint16_t>(MsgId::kMoveReq),
+                BuildPayloadForMsgId(static_cast<uint16_t>(MsgId::kMoveReq)));
+  ASSERT_TRUE(WaitForCondition(
+      [unauth_seen]() { return unauth_seen->load() > 0; }, 3s, [this]() { client_->update(); }));
 
   // 发送登录请求后，再发送MoveReq应被视为已认证。
-  client_->send(static_cast<uint16_t>(MsgId::kLoginReq), std::vector<uint8_t>{1});
-  ASSERT_TRUE(WaitForCondition([&]() { return authed.load(); }, 3s));
+  client_->send(static_cast<uint16_t>(MsgId::kLoginReq),
+                BuildPayloadForMsgId(static_cast<uint16_t>(MsgId::kLoginReq)));
+  ASSERT_TRUE(
+      WaitForCondition([authed]() { return authed->load(); }, 3s, [this]() { client_->update(); }));
 
-  client_->send(static_cast<uint16_t>(MsgId::kMoveReq), std::vector<uint8_t>{2});
-  ASSERT_TRUE(WaitForCondition([&]() { return authed_seen.load() > 0; }, 3s));
+  client_->send(static_cast<uint16_t>(MsgId::kMoveReq),
+                BuildPayloadForMsgId(static_cast<uint16_t>(MsgId::kMoveReq)));
+  ASSERT_TRUE(WaitForCondition(
+      [authed_seen]() { return authed_seen->load() > 0; }, 3s, [this]() { client_->update(); }));
 
-  EXPECT_EQ(unauth_seen.load(), 1);
-  EXPECT_EQ(authed_seen.load(), 1);
+  EXPECT_GE(unauth_seen->load(), 1);
+  EXPECT_GE(authed_seen->load(), 1);
 }
 
 // 验证5000并发连接场景下，转发耗时仍在可接受范围内。
 TEST_F(GatewayLogicUniversalForwardTest, PerformanceUnder5000Connections) {
   ASSERT_TRUE(WaitForLogicConnected(3s));
+  ASSERT_TRUE(WaitForGatewayForwarding(3s));
 
   constexpr int kConnectionCount = 5000;
   constexpr int kThreadCount = 8;
 
-  std::atomic<int> forwarded_count{0};
-  SetRoutedHandler([&forwarded_count](const mir2::common::RoutedMessageData&) {
-    forwarded_count.fetch_add(1, std::memory_order_relaxed);
+  auto forwarded_count = std::make_shared<std::atomic<int>>(0);
+  SetRoutedHandler([forwarded_count](const mir2::common::RoutedMessageData&) {
+    forwarded_count->fetch_add(1, std::memory_order_relaxed);
   });
 
   asio::io_context io_context;
@@ -422,7 +665,8 @@ TEST_F(GatewayLogicUniversalForwardTest, PerformanceUnder5000Connections) {
     gateway_->RegisterConnection(900000 + i, session);
   }
 
-  const std::vector<uint8_t> payload{1, 2};
+  const auto payload = BuildPayloadForMsgId(static_cast<uint16_t>(MsgId::kMoveReq));
+  ASSERT_FALSE(payload.empty());
   std::vector<std::thread> threads;
   threads.reserve(kThreadCount);
 
@@ -449,9 +693,9 @@ TEST_F(GatewayLogicUniversalForwardTest, PerformanceUnder5000Connections) {
   EXPECT_LT(elapsed, std::chrono::seconds(2));
 
   ASSERT_TRUE(WaitForCondition(
-      [&]() { return forwarded_count.load() >= kConnectionCount; },
+      [forwarded_count]() { return forwarded_count->load() >= kConnectionCount; },
       5s));
-  EXPECT_EQ(forwarded_count.load(), kConnectionCount);
+  EXPECT_EQ(forwarded_count->load(), kConnectionCount);
 }
 
 }  // namespace

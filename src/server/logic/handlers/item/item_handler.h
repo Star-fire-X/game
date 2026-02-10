@@ -1,85 +1,91 @@
 /**
  * @file item_handler.h
- * @brief 物品相关处理
+ * @brief Item handler for logic layer.
  */
 
-#ifndef LEGEND2_SERVER_HANDLERS_ITEM_HANDLER_H
-#define LEGEND2_SERVER_HANDLERS_ITEM_HANDLER_H
+#ifndef MIR2_LOGIC_HANDLERS_ITEM_ITEM_HANDLER_H_
+#define MIR2_LOGIC_HANDLERS_ITEM_ITEM_HANDLER_H_
 
-#include "handlers/base_handler.h"
+#include <cstddef>
+#include <cstdint>
 
-namespace legend2::handlers {
+#include "logic/handler_context.h"
+#include "logic/task.h"
+#include "server/common/error_codes.h"
+
+namespace mir2::proto {
+class PickupItemReq;
+class UseItemReq;
+class DropItemReq;
+}  // namespace mir2::proto
+
+namespace mir2::logic {
+
+class CoroutineExecutor;
+class ResponseSender;
 
 /**
- * @brief 使用物品结果
+ * @brief Use item result
  */
 struct ItemUseResult {
-    mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
-    uint16_t slot = 0;
-    uint32_t item_id = 0;
-    uint32_t remaining = 0;
+  mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
+  uint16_t slot = 0;
+  uint32_t item_id = 0;
+  uint32_t remaining = 0;
 };
 
 /**
- * @brief 丢弃物品结果
+ * @brief Drop item result
  */
 struct ItemDropResult {
-    mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
-    uint32_t item_id = 0;
-    uint32_t count = 0;
+  mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
+  uint32_t item_id = 0;
+  uint32_t count = 0;
 };
 
 /**
- * @brief 拾取物品结果
+ * @brief Pickup item result
  */
 struct ItemPickupResult {
-    mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
-    uint32_t item_id = 0;
+  mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
+  uint32_t item_id = 0;
 };
 
 /**
- * @brief 背包服务接口
+ * @brief Inventory service interface
  */
 class InventoryService {
-public:
-    virtual ~InventoryService() = default;
-    virtual ItemPickupResult PickupItem(uint64_t character_id, uint32_t item_id) = 0;
-    virtual ItemUseResult UseItem(uint64_t character_id, uint16_t slot, uint32_t item_id) = 0;
-    virtual ItemDropResult DropItem(uint64_t character_id, uint16_t slot, uint32_t item_id, uint32_t count) = 0;
+ public:
+  virtual ~InventoryService() = default;
+  virtual ItemPickupResult PickupItem(uint64_t character_id, uint32_t item_id) = 0;
+  virtual ItemUseResult UseItem(uint64_t character_id, uint16_t slot, uint32_t item_id) = 0;
+  virtual ItemDropResult DropItem(uint64_t character_id,
+                                  uint16_t slot,
+                                  uint32_t item_id,
+                                  uint32_t count) = 0;
 };
 
-/**
- * @brief 物品Handler
- */
-class ItemHandler : public BaseHandler {
-public:
-    explicit ItemHandler(InventoryService& service);
+class ItemHandler {
+ public:
+  ItemHandler(CoroutineExecutor& executor,
+              ResponseSender& response_sender,
+              InventoryService& service);
 
-protected:
-    void DoHandle(const HandlerContext& context,
-                  uint16_t msg_id,
-                  const std::vector<uint8_t>& payload,
-                  ResponseCallback callback) override;
+  Task<void> HandleMessage(HandlerContext ctx, const uint8_t* payload, size_t payload_size);
 
-    void OnError(const HandlerContext& context,
-                 uint16_t msg_id,
-                 mir2::common::ErrorCode error_code,
-                 ResponseCallback callback) override;
+ private:
+  Task<void> HandlePickup(HandlerContext ctx, const mir2::proto::PickupItemReq* req);
+  Task<void> HandleUse(HandlerContext ctx, const mir2::proto::UseItemReq* req);
+  Task<void> HandleDrop(HandlerContext ctx, const mir2::proto::DropItemReq* req);
+  Task<void> SendPickupError(HandlerContext ctx, mir2::common::ErrorCode code);
+  Task<void> SendUseError(HandlerContext ctx, mir2::common::ErrorCode code);
+  Task<void> SendDropError(HandlerContext ctx, mir2::common::ErrorCode code);
 
-private:
-    void HandlePickup(const HandlerContext& context,
-                      const std::vector<uint8_t>& payload,
-                      ResponseCallback callback);
-    void HandleUse(const HandlerContext& context,
-                   const std::vector<uint8_t>& payload,
-                   ResponseCallback callback);
-    void HandleDrop(const HandlerContext& context,
-                    const std::vector<uint8_t>& payload,
-                    ResponseCallback callback);
-
-    InventoryService& service_;
+  CoroutineExecutor& executor_;
+  ResponseSender& response_sender_;
+  InventoryService& service_;
 };
 
-}  // namespace legend2::handlers
+}  // namespace mir2::logic
 
-#endif  // LEGEND2_SERVER_HANDLERS_ITEM_HANDLER_H
+#endif  // MIR2_LOGIC_HANDLERS_ITEM_ITEM_HANDLER_H_

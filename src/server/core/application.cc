@@ -67,9 +67,7 @@ void Application::Shutdown() {
 
   running_.store(false);
 
-  if (work_guard_) {
-    work_guard_.reset();
-  }
+  ReleaseWorkGuard();
 
   io_context_->stop();
 
@@ -82,6 +80,12 @@ void Application::Shutdown() {
   io_threads_.clear();
   io_context_.reset();
   tick_timer_.reset();
+}
+
+void Application::ReleaseWorkGuard() {
+  if (work_guard_) {
+    work_guard_.reset();
+  }
 }
 
 asio::io_context& Application::GetIoContext() {

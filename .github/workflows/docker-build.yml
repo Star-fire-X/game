@@ -32,6 +32,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate legacy source gating
+        shell: bash
+        run: scripts/check_build_sources.sh
+
+      - name: Enforce migration guardrails
+        shell: bash
+        run: |
+          scripts/check_no_legacy_refs.sh
+          scripts/check_no_old_handlers_refs.sh
+          scripts/check_no_empty_dirs.sh
+          scripts/check_link_targets.sh
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -80,6 +92,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Validate legacy source gating
+        shell: bash
+        run: scripts/check_build_sources.sh
+
+      - name: Enforce migration guardrails
+        shell: bash
+        run: |
+          scripts/check_no_legacy_refs.sh
+          scripts/check_no_old_handlers_refs.sh
+          scripts/check_no_empty_dirs.sh
+          scripts/check_link_targets.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

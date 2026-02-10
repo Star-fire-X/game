@@ -28,6 +28,8 @@ enum class ErrorCode : uint16_t {
     kInvalidAction = 400,
     kTargetNotFound = 401,
     kTargetOutOfRange = 402,
+    kNoParty = 410,
+    kTargetRefused = 411,
     kInvalidPath = 403,
     kSpeedViolation = 404,
     kPathBlocked = 405,
@@ -51,6 +53,8 @@ enum class ErrorCode : uint16_t {
     INVALID_CHARACTER_NAME = 2006,
     INVALID_CHARACTER_CLASS = 2007,
     MAX_CHARACTERS_REACHED = 2008,
+    ACCOUNT_BANNED = 2009,
+    RATE_LIMITED = 2010,
 
     // 游戏逻辑错误 (3xxx)
     INVALID_POSITION = 3001,
@@ -90,6 +94,8 @@ inline const char* error_code_to_string(ErrorCode code) {
         case ErrorCode::kInvalidAction: return "Invalid action";
         case ErrorCode::kTargetNotFound: return "Target not found";
         case ErrorCode::kTargetOutOfRange: return "Target out of range";
+        case ErrorCode::kNoParty: return "No party";
+        case ErrorCode::kTargetRefused: return "Target refused";
         case ErrorCode::kInvalidPath: return "Invalid path";
         case ErrorCode::kSpeedViolation: return "Speed violation";
         case ErrorCode::kPathBlocked: return "Path blocked";
@@ -109,6 +115,8 @@ inline const char* error_code_to_string(ErrorCode code) {
         case ErrorCode::INVALID_CHARACTER_NAME: return "Invalid character name";
         case ErrorCode::INVALID_CHARACTER_CLASS: return "Invalid character class";
         case ErrorCode::MAX_CHARACTERS_REACHED: return "Maximum characters reached";
+        case ErrorCode::ACCOUNT_BANNED: return "Account banned";
+        case ErrorCode::RATE_LIMITED: return "Too many login attempts";
         case ErrorCode::INVALID_POSITION: return "Invalid position";
         case ErrorCode::POSITION_NOT_WALKABLE: return "Position not walkable";
         case ErrorCode::TARGET_OUT_OF_RANGE: return "Target out of range";

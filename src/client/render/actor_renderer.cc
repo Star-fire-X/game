@@ -13,7 +13,6 @@
 #include "render/actor_renderer.h"
 #include "core/path_utils.h"
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cctype>
 #include <iostream>
@@ -28,6 +27,12 @@ namespace mir2::render {
 // 地图格子尺寸
 constexpr int TILE_W = 48;
 constexpr int TILE_H = 32;
+
+// 动画/特效时间常量 (毫秒)
+constexpr uint64_t GEN_ANI_UPDATE_INTERVAL_MS = 120ULL;  // 通用动画计数更新间隔
+constexpr uint64_t WP_EFFECT_UPDATE_INTERVAL_MS = 120ULL;  // 武器特效更新间隔
+constexpr uint64_t WAR_MODE_TIMEOUT_MS = 4000ULL;  // 战斗姿态超时时间
+constexpr uint64_t DEF_FRAME_UPDATE_INTERVAL_MS = 500ULL;  // 默认帧更新间隔
 
 // 状态位掩码 (与原版保持一致)
 constexpr uint32_t STATE_INVISIBLE    = 0x00800000;  // 隐身
@@ -89,12 +94,37 @@ bool uses_magic2_for_effect(int effect_number) {
     }
 }
 
+void resolve_color_effect(ColorEffect effect, uint8_t& r, uint8_t& g, uint8_t& b) {
+    switch (effect) {
+        case ColorEffect::GREEN:     r = 120; g = 255; b = 120; return;
+        case ColorEffect::RED:       r = 255; g = 120; b = 120; return;
+        case ColorEffect::BLUE:      r = 140; g = 140; b = 255; return;
+        case ColorEffect::YELLOW:    r = 255; g = 255; b = 120; return;
+        case ColorEffect::FUCHSIA:   r = 255; g = 120; b = 255; return;
+        case ColorEffect::GRAYSCALE: r = g = b = 160; return;
+        case ColorEffect::NONE:
+        case ColorEffect::BRIGHT:
+        default:                     r = g = b = 255; return;
+    }
+}
+
 uint64_t get_ticks_ms() {
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     return SDL_GetTicks64();
 #else
     return static_cast<uint64_t>(SDL_GetTicks());
 #endif
+}
+
+uint64_t get_surface_key(const Actor& actor) {
+    uint64_t key = 0;
+    key |= static_cast<uint64_t>(static_cast<uint16_t>(actor.data.race));
+    key |= (static_cast<uint64_t>(actor.data.appearance) << 16);
+    key |= (static_cast<uint64_t>(actor.data.dress) << 32);
+    key |= (static_cast<uint64_t>(actor.data.hair) << 40);
+    key |= (static_cast<uint64_t>(actor.data.weapon) << 48);
+    key |= (static_cast<uint64_t>(actor.data.sex) << 56);
+    return key;
 }
 
 }  // namespace
@@ -112,7 +142,6 @@ const char* get_magic_archive_for_hit(int hit_effect_number) {
 
 struct ActionMapping {
     ActorAction action;
-    ActionConfig HumanActionConfig::*config_ptr;
     ActionInfo HumanAction::*fallback_ptr;
     bool sets_war_mode;
     bool use_magic;
@@ -120,22 +149,22 @@ struct ActionMapping {
 };
 
 const ActionMapping kHumanActionMappings[] = {
-    {ActorAction::STAND, &HumanActionConfig::stand, &HumanAction::act_stand, false, false, 0},
-    {ActorAction::WALK, &HumanActionConfig::walk, &HumanAction::act_walk, false, false, 0},
-    {ActorAction::BACKSTEP, &HumanActionConfig::walk, &HumanAction::act_walk, false, false, 0},
-    {ActorAction::RUN, &HumanActionConfig::run, &HumanAction::act_run, false, false, 0},
-    {ActorAction::HIT, &HumanActionConfig::hit, &HumanAction::act_hit, true, false, 0},
-    {ActorAction::POWER_HIT, &HumanActionConfig::hit, &HumanAction::act_hit, true, false, 1},
-    {ActorAction::LONG_HIT, &HumanActionConfig::hit, &HumanAction::act_hit, true, false, 2},
-    {ActorAction::WIDE_HIT, &HumanActionConfig::hit, &HumanAction::act_hit, true, false, 3},
-    {ActorAction::FIRE_HIT, &HumanActionConfig::hit, &HumanAction::act_hit, true, false, 4},
-    {ActorAction::CROSS_HIT, &HumanActionConfig::hit, &HumanAction::act_hit, true, false, 6},
-    {ActorAction::HEAVY_HIT, &HumanActionConfig::heavy_hit, &HumanAction::act_heavy_hit, true, false, 0},
-    {ActorAction::BIG_HIT, &HumanActionConfig::big_hit, &HumanAction::act_big_hit, true, false, 0},
-    {ActorAction::SPELL, &HumanActionConfig::spell, &HumanAction::act_spell, true, true, 0},
-    {ActorAction::STRUCK, &HumanActionConfig::struck, &HumanAction::act_struck, false, false, 0},
-    {ActorAction::DIE, &HumanActionConfig::die, &HumanAction::act_die, false, false, 0},
-    {ActorAction::SITDOWN, &HumanActionConfig::sitdown, &HumanAction::act_sitdown, false, false, 0},
+    {ActorAction::STAND,     &HumanAction::act_stand,     false, false, 0},
+    {ActorAction::WALK,      &HumanAction::act_walk,      false, false, 0},
+    {ActorAction::BACKSTEP,  &HumanAction::act_walk,      false, false, 0},
+    {ActorAction::RUN,       &HumanAction::act_run,       false, false, 0},
+    {ActorAction::HIT,       &HumanAction::act_hit,       true,  false, 0},
+    {ActorAction::POWER_HIT, &HumanAction::act_hit,       true,  false, 1},
+    {ActorAction::LONG_HIT,  &HumanAction::act_hit,       true,  false, 2},
+    {ActorAction::WIDE_HIT,  &HumanAction::act_hit,       true,  false, 3},
+    {ActorAction::FIRE_HIT,  &HumanAction::act_hit,       true,  false, 4},
+    {ActorAction::CROSS_HIT, &HumanAction::act_hit,       true,  false, 6},
+    {ActorAction::HEAVY_HIT, &HumanAction::act_heavy_hit, true,  false, 0},
+    {ActorAction::BIG_HIT,   &HumanAction::act_big_hit,   true,  false, 0},
+    {ActorAction::SPELL,     &HumanAction::act_spell,     true,  true,  0},
+    {ActorAction::STRUCK,    &HumanAction::act_struck,    false, false, 0},
+    {ActorAction::DIE,       &HumanAction::act_die,       false, false, 0},
+    {ActorAction::SITDOWN,   &HumanAction::act_sitdown,   false, false, 0},
 };
 
 const ActionMapping* find_human_action_mapping(ActorAction action) {
@@ -155,15 +184,7 @@ ActorRenderer::ActorRenderer(SDLRenderer& renderer, ResourceManager& resource_ma
     : renderer_(renderer)
     , resource_manager_(resource_manager)
     , texture_cache_(texture_cache)
-    , config_loader_("Data/animations/")
 {
-    int loaded = config_loader_.load_all_configs();
-    if (loaded == 0) {
-        std::cerr << "[ActorRenderer] No animation configs loaded, using hardcoded values\n";
-        use_config_system_ = false;
-    } else {
-        std::cout << "[ActorRenderer] Loaded " << loaded << " animation configs\n";
-    }
 }
 
 ActorRenderer::~ActorRenderer() {
@@ -185,7 +206,6 @@ void ActorRenderer::calc_actor_frame(Actor& actor) {
 void ActorRenderer::calc_human_frame(Actor& actor) {
     auto& anim = actor.anim;
     int dir = actor.data.direction;
-    const HumanActionConfig* config = nullptr;
 
     // 确保方向在有效范围内
     if (dir < 0 || dir > 7) {
@@ -193,55 +213,16 @@ void ActorRenderer::calc_human_frame(Actor& actor) {
         actor.data.direction = 0;
     }
 
-    if (use_config_system_) {
-        const Gender gender = (actor.data.sex == 0) ? Gender::MALE : Gender::FEMALE;
-        CharacterClass character_class = CharacterClass::WARRIOR;
-        switch (actor.data.job) {
-            case 1:
-                character_class = CharacterClass::MAGE;
-                break;
-            case 2:
-                character_class = CharacterClass::TAOIST;
-                break;
-            default:
-                character_class = CharacterClass::WARRIOR;
-                break;
-        }
-        config = config_loader_.get_human_config(gender, character_class);
-        if (!config) {
-            static std::array<std::array<bool, 3>, 2> logged_missing{};
-            const size_t gender_index = (gender == Gender::FEMALE) ? 1U : 0U;
-            const size_t class_index = static_cast<size_t>(character_class);
-            if (gender_index < logged_missing.size() &&
-                class_index < logged_missing[gender_index].size() &&
-                !logged_missing[gender_index][class_index]) {
-                std::cerr << "[ActorRenderer] Missing human config (gender="
-                          << (gender == Gender::MALE ? "male" : "female")
-                          << ", class=" << static_cast<int>(character_class)
-                          << "), using hardcoded values\n";
-                logged_missing[gender_index][class_index] = true;
-            }
-        }
-    }
+    anim.def_frame_count = HA.act_stand.frame;
 
-    anim.def_frame_count = config ? config->stand.frame : HA.act_stand.frame;
-
-    auto apply_action = [&](const ActionConfig* action_config, const ActionInfo* fallback_action) {
-        if (action_config) {
-            anim.start_frame = action_config->get_frame_index(dir, 0);
-            anim.end_frame = anim.start_frame + action_config->frame - 1;
-            anim.frame_time = action_config->ftime;
-        } else {
-            anim.start_frame = fallback_action->get_frame_index(dir, 0);
-            anim.end_frame = anim.start_frame + fallback_action->frame - 1;
-            anim.frame_time = fallback_action->ftime;
-        }
+    auto apply_action = [&](const ActionInfo* action) {
+        anim.start_frame = action->get_frame_index(dir, 0);
+        anim.end_frame = anim.start_frame + action->frame - 1;
+        anim.frame_time = action->ftime;
     };
 
     auto apply_mapping = [&](const ActionMapping& mapping) {
-        const ActionConfig* action_config = config ? &(config->*mapping.config_ptr) : nullptr;
-        const ActionInfo* fallback_action = &(HA.*mapping.fallback_ptr);
-        apply_action(action_config, fallback_action);
+        apply_action(&(HA.*mapping.fallback_ptr));
 
         if (mapping.sets_war_mode) {
             actor.data.war_mode = true;
@@ -263,15 +244,9 @@ void ActorRenderer::calc_human_frame(Actor& actor) {
     if (anim.current_action == ActorAction::RUSH) {
         // 冲刺动作交替使用左右动作
         const bool use_left = (anim.rush_dir == 0);
-        ActionConfig HumanActionConfig::*rush_config =
-            use_left ? &HumanActionConfig::rush_left : &HumanActionConfig::rush_right;
-        ActionInfo HumanAction::*rush_fallback =
+        ActionInfo HumanAction::*rush_action =
             use_left ? &HumanAction::act_rush_left : &HumanAction::act_rush_right;
-
-        const ActionConfig* action_config = config ? &(config->*rush_config) : nullptr;
-        const ActionInfo* fallback_action = &(HA.*rush_fallback);
-        apply_action(action_config, fallback_action);
-
+        apply_action(&(HA.*rush_action));
         anim.rush_dir = use_left ? 1 : 0;
     } else {
         const ActionMapping* mapping = find_human_action_mapping(anim.current_action);
@@ -281,7 +256,7 @@ void ActorRenderer::calc_human_frame(Actor& actor) {
         if (mapping) {
             apply_mapping(*mapping);
         } else {
-            apply_action(nullptr, &HA.act_stand);
+            apply_action(&HA.act_stand);
         }
     }
 
@@ -292,7 +267,6 @@ void ActorRenderer::calc_human_frame(Actor& actor) {
 void ActorRenderer::calc_monster_frame(Actor& actor) {
     auto& anim = actor.anim;
     int dir = actor.data.direction;
-    const MonsterActionConfig* config = nullptr;
 
     // 获取怪物动作配置
     const MonsterAction* ma = get_monster_action(actor.data.race, actor.data.appearance);
@@ -300,111 +274,48 @@ void ActorRenderer::calc_monster_frame(Actor& actor) {
         // 使用默认配置
                 ma = &MA14;  // 默认骷髅类
     }
-    if (use_config_system_) {
-        const int monster_id = static_cast<int>(actor.data.race);
-        config = config_loader_.get_monster_config(monster_id);
-        if (!config) {
-            static std::array<bool, 256> logged_missing{};
-            if (monster_id >= 0 && monster_id < static_cast<int>(logged_missing.size()) &&
-                !logged_missing[static_cast<size_t>(monster_id)]) {
-                std::cerr << "[ActorRenderer] Missing monster config (id="
-                          << monster_id << "), using hardcoded values\n";
-                logged_missing[static_cast<size_t>(monster_id)] = true;
-            }
-        }
-    }
 
     if (dir < 0 || dir > 7) {
         dir = 0;
         actor.data.direction = 0;
     }
 
-    anim.def_frame_count = config ? config->stand.frame : ma->act_stand.frame;
+    anim.def_frame_count = ma->act_stand.frame;
+
+    auto apply_action = [&](const ActionInfo* action) {
+        anim.start_frame = action->get_frame_index(dir, 0);
+        anim.end_frame = anim.start_frame + action->frame - 1;
+        anim.frame_time = action->ftime;
+    };
 
     switch (anim.current_action) {
         case ActorAction::STAND:
-            if (config) {
-                anim.start_frame = config->stand.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + config->stand.frame - 1;
-                anim.frame_time = config->stand.ftime;
-            } else {
-                anim.start_frame = ma->act_stand.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + ma->act_stand.frame - 1;
-                anim.frame_time = ma->act_stand.ftime;
-            }
+            apply_action(&ma->act_stand);
             break;
 
         case ActorAction::WALK:
-            if (config) {
-                anim.start_frame = config->walk.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + config->walk.frame - 1;
-                anim.frame_time = config->walk.ftime;
-            } else {
-                anim.start_frame = ma->act_walk.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + ma->act_walk.frame - 1;
-                anim.frame_time = ma->act_walk.ftime;
-            }
+            apply_action(&ma->act_walk);
             break;
 
         case ActorAction::HIT:
-            if (config) {
-                anim.start_frame = config->attack.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + config->attack.frame - 1;
-                anim.frame_time = config->attack.ftime;
-            } else {
-                anim.start_frame = ma->act_attack.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + ma->act_attack.frame - 1;
-                anim.frame_time = ma->act_attack.ftime;
-            }
+            apply_action(&ma->act_attack);
             break;
 
         case ActorAction::STRUCK:
-            if (config) {
-                anim.start_frame = config->struck.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + config->struck.frame - 1;
-                anim.frame_time = config->struck.ftime;
-            } else {
-                anim.start_frame = ma->act_struck.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + ma->act_struck.frame - 1;
-                anim.frame_time = ma->act_struck.ftime;
-            }
+            apply_action(&ma->act_struck);
             break;
 
         case ActorAction::DIE:
-            if (config) {
-                anim.start_frame = config->die.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + config->die.frame - 1;
-                anim.frame_time = config->die.ftime;
-            } else {
-                anim.start_frame = ma->act_die.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + ma->act_die.frame - 1;
-                anim.frame_time = ma->act_die.ftime;
-            }
+            apply_action(&ma->act_die);
             break;
 
         case ActorAction::DEATH:
-            if (config) {
-                anim.start_frame = config->death.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + config->death.frame - 1;
-                anim.frame_time = config->death.ftime;
-            } else {
-                anim.start_frame = ma->act_death.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + ma->act_death.frame - 1;
-                anim.frame_time = ma->act_death.ftime;
-            }
+            apply_action(&ma->act_death);
             anim.lock_end_frame = true;
             break;
 
         default:
-            if (config) {
-                anim.start_frame = config->stand.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + config->stand.frame - 1;
-                anim.frame_time = config->stand.ftime;
-            } else {
-                anim.start_frame = ma->act_stand.get_frame_index(dir, 0);
-                anim.end_frame = anim.start_frame + ma->act_stand.frame - 1;
-                anim.frame_time = ma->act_stand.ftime;
-            }
+            apply_action(&ma->act_stand);
             break;
     }
 
@@ -528,7 +439,7 @@ void ActorRenderer::update(Actor& actor, uint32_t delta_ms) {
     }
 
     // 更新通用动画计数
-    if (current_tick - anim.gen_ani_time > 120ULL) {
+    if (current_tick - anim.gen_ani_time > GEN_ANI_UPDATE_INTERVAL_MS) {
         anim.gen_ani_count++;
         if (anim.gen_ani_count > 100000) anim.gen_ani_count = 0;
         anim.gen_ani_time = current_tick;
@@ -536,7 +447,7 @@ void ActorRenderer::update(Actor& actor, uint32_t delta_ms) {
 
     // 更新武器特效
     if (anim.weapon_effect) {
-        if (current_tick - anim.wp_effect_time > 120ULL) {
+        if (current_tick - anim.wp_effect_time > WP_EFFECT_UPDATE_INTERVAL_MS) {
             anim.wp_effect_time = current_tick;
             anim.cur_wp_effect++;
             if (anim.cur_wp_effect >= MAX_WP_EFFECT_FRAME) {
@@ -552,7 +463,7 @@ void ActorRenderer::update(Actor& actor, uint32_t delta_ms) {
 
     if (actor.data.war_mode && anim.war_mode_time > 0 &&
         (anim.current_action == ActorAction::NONE || anim.current_action == ActorAction::STAND)) {
-        if (current_tick - anim.war_mode_time > 4000ULL) {
+        if (current_tick - anim.war_mode_time > WAR_MODE_TIMEOUT_MS) {
             actor.data.war_mode = false;
         }
     }
@@ -615,7 +526,7 @@ void ActorRenderer::update(Actor& actor, uint32_t delta_ms) {
     // 非动作状态，更新默认帧
     if (anim.current_action == ActorAction::NONE ||
         anim.current_action == ActorAction::STAND) {
-        if (current_tick - anim.def_frame_time > 500ULL) {
+        if (current_tick - anim.def_frame_time > DEF_FRAME_UPDATE_INTERVAL_MS) {
             anim.def_frame++;
             if (anim.def_frame >= anim.def_frame_count) {
                 anim.def_frame = 0;
@@ -672,6 +583,13 @@ bool ActorRenderer::is_action_finished(const Actor& actor) const {
 
 void ActorRenderer::draw_actor(Actor& actor, const Camera& camera, bool is_focused) {
     if (!actor.data.is_visible) return;
+
+    if (actor.surfaces_loaded) {
+        const uint64_t surface_key = get_surface_key(actor);
+        if (actor.surfaces_key != surface_key) {
+            actor.surfaces_loaded = false;
+        }
+    }
 
     int screen_x, screen_y;
     calc_screen_pos(actor, camera, screen_x, screen_y);
@@ -837,6 +755,7 @@ void ActorRenderer::draw_shadow(const Actor& actor, int screen_x, int screen_y) 
     // 简单阴影实现: 绘制半透明圆形
     // 后续可扩展为使用阴影纹理
 
+    renderer_.get_batch().flush();
     SDL_Renderer* sdl_renderer = renderer_.get_renderer();
     if (!sdl_renderer) return;
 
@@ -894,12 +813,14 @@ void ActorRenderer::draw_actors(std::vector<Actor*>& actors, const Camera& camer
     sort_actors_by_z_order(actors);
 
     // 按顺序绘制
+    renderer_.begin_batch();
     for (Actor* actor : actors) {
         if (actor) {
             bool is_focused = (actor == focus_actor);
             draw_actor(*actor, camera, is_focused);
         }
     }
+    renderer_.end_batch();
 }
 
 // =============================================================================
@@ -1035,6 +956,10 @@ void ActorRenderer::draw_shield_effect(const Actor& actor, int screen_x, int scr
 // =============================================================================
 
 void ActorRenderer::load_actor_surfaces(Actor& actor) {
+    if (actor.surfaces_loaded) {
+        return;
+    }
+
     if (actor.data.race == ActorRace::HUMAN) {
         try_load_archive("Hum");
         try_load_archive("Hair");
@@ -1054,6 +979,8 @@ void ActorRenderer::load_actor_surfaces(Actor& actor) {
         }
 
         actor.weapon_offset = HUMAN_FRAME * actor.data.weapon;
+        actor.surfaces_loaded = true;
+        actor.surfaces_key = get_surface_key(actor);
         return;
     }
 
@@ -1079,11 +1006,13 @@ void ActorRenderer::load_actor_surfaces(Actor& actor) {
 
     actor.hair_offset = -1;
     actor.weapon_offset = 0;
+    actor.surfaces_loaded = true;
+    actor.surfaces_key = get_surface_key(actor);
 }
 
 void ActorRenderer::clear_texture_cache() {
     texture_cache_.clear();
-    offset_cache_.clear();
+    frame_cache_.clear();
 }
 
 bool ActorRenderer::load_archives() {
@@ -1151,56 +1080,21 @@ void ActorRenderer::apply_color_effect(SDL_Texture* texture, ColorEffect effect)
 void ActorRenderer::draw_effect_surface(SDL_Texture* texture, int x, int y,
                                         bool blend, ColorEffect effect) {
     if (!texture) return;
-    SDL_Renderer* sdl_renderer = renderer_.get_renderer();
-    if (!sdl_renderer) return;
 
-    uint8_t prev_r = 255, prev_g = 255, prev_b = 255, prev_a = 255;
-    SDL_BlendMode prev_blend = SDL_BLENDMODE_NONE;
-    SDL_GetTextureColorMod(texture, &prev_r, &prev_g, &prev_b);
-    SDL_GetTextureAlphaMod(texture, &prev_a);
-    SDL_GetTextureBlendMode(texture, &prev_blend);
+    uint8_t r, g, b;
+    resolve_color_effect(effect, r, g, b);
+    uint8_t alpha = blend ? 160 : 255;
 
-    apply_color_effect(texture, effect);
-
-    if (blend) {
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureAlphaMod(texture, 160);
-    } else {
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureAlphaMod(texture, 255);
-    }
-
-    int w = 0, h = 0;
-    SDL_QueryTexture(texture, nullptr, nullptr, &w, &h);
-    SDL_Rect dst = {x, y, w, h};
-    SDL_RenderCopy(sdl_renderer, texture, nullptr, &dst);
-
-    SDL_SetTextureColorMod(texture, prev_r, prev_g, prev_b);
-    SDL_SetTextureAlphaMod(texture, prev_a);
-    SDL_SetTextureBlendMode(texture, prev_blend);
+    renderer_.get_batch().draw(texture, x, y, r, g, b, alpha);
 }
 
 void ActorRenderer::draw_blend(SDL_Texture* texture, int x, int y, float alpha) {
     if (!texture) return;
-    SDL_Renderer* sdl_renderer = renderer_.get_renderer();
-    if (!sdl_renderer) return;
-
-    SDL_BlendMode prev_blend = SDL_BLENDMODE_NONE;
-    uint8_t prev_alpha = 255;
-    SDL_GetTextureBlendMode(texture, &prev_blend);
-    SDL_GetTextureAlphaMod(texture, &prev_alpha);
 
     float clamped = std::clamp(alpha, 0.0f, 1.0f);
-    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-    SDL_SetTextureAlphaMod(texture, static_cast<uint8_t>(clamped * 255.0f));
+    uint8_t a = static_cast<uint8_t>(clamped * 255.0f);
 
-    int w = 0, h = 0;
-    SDL_QueryTexture(texture, nullptr, nullptr, &w, &h);
-    SDL_Rect dst = {x, y, w, h};
-    SDL_RenderCopy(sdl_renderer, texture, nullptr, &dst);
-
-    SDL_SetTextureAlphaMod(texture, prev_alpha);
-    SDL_SetTextureBlendMode(texture, prev_blend);
+    renderer_.get_batch().draw(texture, x, y, 255, 255, 255, a);
 }
 
 SDL_Texture* ActorRenderer::get_frame_texture(const std::string& archive, int frame_index,
@@ -1215,30 +1109,46 @@ SDL_Texture* ActorRenderer::get_frame_texture(const std::string& archive, int fr
         }
     }
 
-    const std::string cache_key = archive + ":" + std::to_string(frame_index);
-    auto offset_it = offset_cache_.find(cache_key);
-    if (offset_it != offset_cache_.end()) {
-        out_offset_x = offset_it->second.offset_x;
-        out_offset_y = offset_it->second.offset_y;
-    }
-
-    if (auto cached = texture_cache_.get(cache_key, true)) {
-        if (offset_it != offset_cache_.end()) {
-            return cached->get();
-        }
-    }
-
-    auto sprite_opt = resource_manager_.get_sprite(archive, frame_index);
-    if (!sprite_opt) {
+    const uint16_t archive_id = ArchiveRegistry::instance().get_or_register(archive);
+    if (archive_id == 0) {
         return nullptr;
     }
+    const TextureKey key{archive_id, static_cast<uint32_t>(frame_index), true};
+
+    // Single cache lookup for both texture and offsets
+    auto it = frame_cache_.find(key);
+    if (it != frame_cache_.end()) {
+        if (auto tex = it->second.texture.lock()) {
+            out_offset_x = it->second.offset_x;
+            out_offset_y = it->second.offset_y;
+            return tex->get();
+        }
+        // Texture evicted from LRU, re-create it but keep cached offsets
+        out_offset_x = it->second.offset_x;
+        out_offset_y = it->second.offset_y;
+
+        auto sprite_opt = resource_manager_.get_sprite(archive, frame_index);
+        if (!sprite_opt) return nullptr;
+
+        auto texture = texture_cache_.get_or_create(key, *sprite_opt);
+        if (!texture) return nullptr;
+
+        it->second.texture = texture;
+        return texture->get();
+    }
+
+    // Full miss -- load sprite, create texture, populate cache
+    auto sprite_opt = resource_manager_.get_sprite(archive, frame_index);
+    if (!sprite_opt) return nullptr;
 
     out_offset_x = sprite_opt->offset_x;
     out_offset_y = sprite_opt->offset_y;
-    offset_cache_[cache_key] = {out_offset_x, out_offset_y};
 
-    auto texture = texture_cache_.get_or_create(cache_key, *sprite_opt, true);
-    return texture ? texture->get() : nullptr;
+    auto texture = texture_cache_.get_or_create(key, *sprite_opt);
+    if (!texture) return nullptr;
+
+    frame_cache_[key] = {texture, out_offset_x, out_offset_y};
+    return texture->get();
 }
 
 void ActorRenderer::calc_screen_pos(const Actor& actor, const Camera& camera,
@@ -1317,28 +1227,13 @@ std::string ActorRenderer::get_monster_archive_name(int monster_id) const {
         return "Npc";
     }
     const int group = monster_id / 10;
-    switch (group) {
-        case 0:  return "Mon1";
-        case 1:  return "Mon2";
-        case 2:  return "Mon3";
-        case 3:  return "Mon4";
-        case 4:  return "Mon5";
-        case 5:  return "Mon6";
-        case 6:  return "Mon7";
-        case 7:  return "Mon8";
-        case 8:  return "Mon9";
-        case 9:  return "Mon10";
-        case 10: return "Mon11";
-        case 11: return "Mon12";
-        case 12: return "Mon13";
-        case 13: return "Mon14";
-        case 14: return "Mon15";
-        case 15: return "Mon16";
-        case 16: return "Mon17";
-        case 17: return "Mon18";
-        case 90: return "Effect";
-        default: return "Mon1";
+    if (group == 90) {
+        return "Effect";
     }
+    if (group >= 0 && group <= 17) {
+        return "Mon" + std::to_string(group + 1);
+    }
+    return "Mon1";
 }
 
 // =============================================================================

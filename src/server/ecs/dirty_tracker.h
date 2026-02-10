@@ -3,8 +3,8 @@
  * @brief 角色脏标记辅助函数
  */
 
-#ifndef LEGEND2_SERVER_ECS_DIRTY_TRACKER_H
-#define LEGEND2_SERVER_ECS_DIRTY_TRACKER_H
+#ifndef MIR2_SERVER_ECS_DIRTY_TRACKER_H_
+#define MIR2_SERVER_ECS_DIRTY_TRACKER_H_
 
 #include "ecs/components/character_components.h"
 
@@ -80,4 +80,4 @@ inline void clear_dirty(entt::registry& registry, entt::entity entity) {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_DIRTY_TRACKER_H
+#endif  // MIR2_SERVER_ECS_DIRTY_TRACKER_H_

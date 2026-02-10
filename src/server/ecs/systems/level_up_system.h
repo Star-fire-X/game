@@ -3,8 +3,8 @@
  * @brief ECS 升级逻辑系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_LEVEL_UP_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_LEVEL_UP_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_LEVEL_UP_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_LEVEL_UP_SYSTEM_H_
 
 #include "ecs/components/character_components.h"
 #include "ecs/world.h"
@@ -14,6 +14,9 @@
 namespace mir2::ecs {
 
 class EventBus;
+namespace events {
+struct EntityDeathEvent;
+}  // namespace events
 
 /**
  * @brief 角色升级逻辑系统
@@ -21,6 +24,7 @@ class EventBus;
 class LevelUpSystem : public System {
  public:
     LevelUpSystem();
+    explicit LevelUpSystem(entt::registry& registry, EventBus& event_bus);
 
     void Update(entt::registry& registry, float delta_time) override;
 
@@ -53,6 +57,11 @@ class LevelUpSystem : public System {
                                       int total_exp, EventBus* event_bus = nullptr);
 
  private:
+    void OnEntityDeath(events::EntityDeathEvent& event);
+
+    entt::registry* registry_ = nullptr;
+    EventBus* event_bus_ = nullptr;
+
     static void ApplyLevelUpStats(mir2::common::CharacterClass char_class,
                                   CharacterAttributesComponent& attributes);
 
@@ -63,4 +72,4 @@ class LevelUpSystem : public System {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_LEVEL_UP_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_LEVEL_UP_SYSTEM_H_

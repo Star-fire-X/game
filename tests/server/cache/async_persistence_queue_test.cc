@@ -1,3 +1,4 @@
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -15,7 +16,7 @@ public:
     MOCK_METHOD(bool, SaveEntity, (const std::string&, const VersionedData&, uint64_t),
                 (override));
     MOCK_METHOD(uint32_t, BatchSaveEntities,
-                (const std::vector<std::pair<std::string, VersionedData>>&), (override));
+                ((const std::vector<std::pair<std::string, VersionedData>>&)), (override));
     MOCK_METHOD(std::optional<VersionedData>, LoadEntity, (const std::string&),
                 (override));
     MOCK_METHOD(bool, IsHealthy, (), (const, override));

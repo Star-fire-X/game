@@ -1,6 +1,9 @@
 #include "ecs/systems/character_utils.h"
 
 #include <algorithm>
+#include <limits>
+
+#include "ecs/dirty_tracker.h"
 
 namespace mir2::ecs {
 namespace CharacterUtils {
@@ -15,7 +18,13 @@ void AddGold(entt::registry& registry, entt::entity entity, int amount) {
         return;
     }
 
-    attributes->gold += amount;
+    const int64_t current = static_cast<int64_t>(attributes->gold);
+    const int64_t added = static_cast<int64_t>(amount);
+    const int64_t capped =
+        std::min(current + added,
+                 static_cast<int64_t>(std::numeric_limits<int>::max()));
+    attributes->gold = static_cast<int>(capped);
+    dirty_tracker::mark_attributes_dirty(registry, entity);
 }
 
 bool SpendGold(entt::registry& registry, entt::entity entity, int amount) {
@@ -34,6 +43,7 @@ bool SpendGold(entt::registry& registry, entt::entity entity, int amount) {
     }
 
     attributes->gold -= amount;
+    dirty_tracker::mark_attributes_dirty(registry, entity);
     return true;
 }
 
@@ -64,6 +74,7 @@ void AddStats(entt::registry& registry, entt::entity entity,
     // 确保当前HP/MP不超过新的最大值
     attributes->hp = std::min(attributes->hp, attributes->max_hp);
     attributes->mp = std::min(attributes->mp, attributes->max_mp);
+    dirty_tracker::mark_attributes_dirty(registry, entity);
 }
 
 void RemoveStats(entt::registry& registry, entt::entity entity,
@@ -87,6 +98,7 @@ void RemoveStats(entt::registry& registry, entt::entity entity,
     // 确保当前HP/MP不超过新的最大值
     attributes->hp = std::min(attributes->hp, attributes->max_hp);
     attributes->mp = std::min(attributes->mp, attributes->max_mp);
+    dirty_tracker::mark_attributes_dirty(registry, entity);
 }
 
 }  // namespace CharacterUtils

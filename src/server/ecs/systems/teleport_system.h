@@ -11,6 +11,7 @@
 #include "game/map/teleport_command.h"
 
 #include <entt/entt.hpp>
+#include <mutex>
 #include <queue>
 
 namespace mir2::ecs {
@@ -41,6 +42,7 @@ class TeleportSystem : public System {
  private:
   game::map::SceneManager& scene_manager_;
   EventBus* event_bus_ = nullptr;
+  std::mutex teleport_queue_mutex_;
   std::queue<game::map::TeleportCommand> teleport_queue_;
 };
 

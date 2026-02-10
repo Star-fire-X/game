@@ -3,8 +3,8 @@
  * @brief 地图配置加载器
  */
 
-#ifndef LEGEND2_SERVER_MAP_CONFIG_LOADER_H
-#define LEGEND2_SERVER_MAP_CONFIG_LOADER_H
+#ifndef MIR2_SERVER_MAP_CONFIG_LOADER_H_
+#define MIR2_SERVER_MAP_CONFIG_LOADER_H_
 
 #include <cstdint>
 #include <optional>
@@ -32,4 +32,4 @@ public:
 
 }  // namespace mir2::config
 
-#endif  // LEGEND2_SERVER_MAP_CONFIG_LOADER_H
+#endif  // MIR2_SERVER_MAP_CONFIG_LOADER_H_

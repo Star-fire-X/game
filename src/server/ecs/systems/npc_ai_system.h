@@ -3,8 +3,8 @@
  * @brief ECS NPC AI logic system
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H_
 
 #include "ecs/components/npc_component.h"
 #include "ecs/components/transform_component.h"
@@ -88,4 +88,4 @@ class NpcAISystem {
 
 }  // namespace mir2::game::npc
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H_

@@ -25,6 +25,10 @@
 #include <list>
 #include <functional>
 #include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <shared_mutex>
+#include <vector>
 #include "common/types.h"
 #include "client/resource/resource_loader.h"
 #include "core/sdl_resource.h"
@@ -32,11 +36,11 @@
 #include "render/i_renderer.h"
 #include "render/i_texture_cache.h"
 #include "render/texture.h"
+#include "render/sprite_batch.h"
 
 namespace mir2::render {
 
 // 引入公共类型定义
-using namespace mir2::common;
 using mir2::client::Sprite;
 
 // Camera 类已移至 render/camera.h
@@ -48,6 +52,25 @@ using mir2::client::Sprite;
 
 constexpr size_t kDefaultTextureCacheBytes = 256 * 1024 * 1024;  // 256MB
 
+/// 档案名称注册表
+/// 将资源档案名称映射为整数ID，避免频繁字符串哈希
+class ArchiveRegistry {
+public:
+    static ArchiveRegistry& instance();
+
+    uint16_t get_or_register(const std::string& archive_name);
+    const std::string* get_name(uint16_t id) const;
+
+private:
+    ArchiveRegistry() = default;
+    ArchiveRegistry(const ArchiveRegistry&) = delete;
+    ArchiveRegistry& operator=(const ArchiveRegistry&) = delete;
+
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, uint16_t> name_to_id_;
+    std::vector<std::string> id_to_name_;
+};
+
 /// SDL2纹理缓存（LRU）
 class SDLTextureCache : public ITextureCache {
 public:
@@ -57,6 +80,11 @@ public:
     SDLTextureCache(TextureFactory factory, size_t max_bytes = kDefaultTextureCacheBytes);
 
     void set_factory(TextureFactory factory);
+
+    std::shared_ptr<Texture> get_or_create(const TextureKey& key,
+                                           const Sprite& sprite) override;
+    std::shared_ptr<Texture> get(const TextureKey& key) const override;
+    void evict(const TextureKey& key) override;
 
     std::shared_ptr<Texture> get_or_create(const std::string& key,
                                            const Sprite& sprite,
@@ -70,22 +98,64 @@ public:
     size_t current_bytes() const { return current_bytes_; }
 
 private:
+    struct CacheKey {
+        enum class Kind : uint8_t { kTexture, kString };
+
+        Kind kind = Kind::kTexture;
+        TextureKey texture_key{};
+        std::string string_key;
+
+        static CacheKey FromTexture(const TextureKey& key) {
+            CacheKey out;
+            out.kind = Kind::kTexture;
+            out.texture_key = key;
+            return out;
+        }
+
+        static CacheKey FromString(std::string key) {
+            CacheKey out;
+            out.kind = Kind::kString;
+            out.string_key = std::move(key);
+            return out;
+        }
+
+        bool operator==(const CacheKey& other) const noexcept {
+            if (kind != other.kind) {
+                return false;
+            }
+            return (kind == Kind::kTexture)
+                ? (texture_key == other.texture_key)
+                : (string_key == other.string_key);
+        }
+    };
+
+    struct CacheKeyHash {
+        size_t operator()(const CacheKey& key) const noexcept;
+    };
+
+    struct CacheKeyEq {
+        bool operator()(const CacheKey& lhs, const CacheKey& rhs) const noexcept {
+            return lhs == rhs;
+        }
+    };
+
     struct Entry {
         std::shared_ptr<Texture> texture;
         size_t bytes = 0;
-        std::list<std::string>::iterator iter;
+        std::list<CacheKey>::iterator iter;
     };
 
     std::string make_oriented_key(const std::string& key, bool flip_v) const;
-    void touch(const std::string& key, Entry& entry) const;
+    void touch(Entry& entry) const;
     void enforce_limits();
-    void evict_key(const std::string& key);
+    void evict_key(const CacheKey& key);
 
     TextureFactory factory_;
     size_t max_bytes_ = kDefaultTextureCacheBytes;
     size_t current_bytes_ = 0;
-    mutable std::unordered_map<std::string, Entry> cache_;
-    mutable std::list<std::string> lru_;  // front = most recent
+    mutable std::shared_mutex mutex_;
+    mutable std::unordered_map<CacheKey, Entry, CacheKeyHash, CacheKeyEq> cache_;
+    mutable std::list<CacheKey> lru_;  // front = most recent
 };
 
 // =============================================================================
@@ -105,8 +175,8 @@ public:
     bool is_initialized() const override { return window_ != nullptr && renderer_ != nullptr; }
     void begin_frame() override;
     void end_frame() override;
-    void clear(const Color& color = Color::black()) override;
-    Size get_window_size() const override;
+    void clear(const mir2::common::Color& color = mir2::common::Color::black()) override;
+    mir2::common::Size get_window_size() const override;
     void set_logical_size(int width, int height) override;
     
     // --- 纹理管理 (Texture Management) ---
@@ -130,6 +200,9 @@ public:
     /// @param flip_vertical 是否进行垂直翻转（WIL为自底向上，需要翻转）
     /// @return 纹理指针
     std::shared_ptr<Texture> get_sprite_texture(const std::string& cache_key, const Sprite& sprite, bool flip_vertical);
+
+    /// 获取或创建缓存的精灵纹理（整数 key）
+    std::shared_ptr<Texture> get_sprite_texture(const TextureKey& cache_key, const Sprite& sprite);
     
     /// 清除纹理缓存
     void clear_texture_cache();
@@ -137,9 +210,20 @@ public:
     /// 从缓存中移除纹理
     void remove_from_cache(const std::string& cache_key);
 
+    /// 从缓存中移除纹理（整数 key）
+    void remove_from_cache(const TextureKey& cache_key);
+
     /// 获取纹理缓存接口
     ITextureCache& get_texture_cache() { return texture_cache_; }
     const ITextureCache& get_texture_cache() const { return texture_cache_; }
+
+    // --- Sprite batch ---
+
+    void begin_batch();
+    void end_batch();
+    SpriteBatch& get_batch() { return batch_; }
+    const SpriteBatch& get_batch() const { return batch_; }
+    bool is_batching_enabled() const { return batching_enabled_; }
     
     // --- 绘制函数 (Drawing Functions) ---
     
@@ -147,25 +231,33 @@ public:
     void draw_texture(const Texture& texture, int x, int y) override;
     
     /// 使用源矩形和目标矩形绘制纹理
-    void draw_texture(const Texture& texture, const Rect& src, const Rect& dst) override;
+    void draw_texture(const Texture& texture,
+                      const mir2::common::Rect& src,
+                      const mir2::common::Rect& dst) override;
     
     /// 绘制带偏移的精灵纹理
     void draw_sprite(const Texture& texture, int x, int y, int offset_x, int offset_y) override;
     
     /// 绘制填充矩形
-    void draw_rect(const Rect& rect, const Color& color) override;
+    void draw_rect(const mir2::common::Rect& rect,
+                   const mir2::common::Color& color) override;
     
     /// 绘制矩形边框
-    void draw_rect_outline(const Rect& rect, const Color& color) override;
+    void draw_rect_outline(const mir2::common::Rect& rect,
+                           const mir2::common::Color& color) override;
     
     /// 绘制线条
-    void draw_line(int x1, int y1, int x2, int y2, const Color& color) override;
+    void draw_line(int x1,
+                   int y1,
+                   int x2,
+                   int y2,
+                   const mir2::common::Color& color) override;
     
     /// 绘制点
-    void draw_point(int x, int y, const Color& color) override;
+    void draw_point(int x, int y, const mir2::common::Color& color) override;
     
     /// 设置绘制颜色
-    void set_draw_color(const Color& color) override;
+    void set_draw_color(const mir2::common::Color& color) override;
     
     /// 设置混合模式
     void set_blend_mode(SDL_BlendMode mode) override;
@@ -187,6 +279,11 @@ private:
     
     // 纹理缓存(LRU)
     SDLTextureCache texture_cache_;
+
+    // Sprite batch
+    SpriteBatch batch_{nullptr};
+    bool batching_enabled_ = false;
+    int batch_depth_ = 0;
     
     // 帧计时
     uint32_t frame_count_ = 0;      // 总帧数

@@ -3,8 +3,8 @@
  * @brief ECS世界封装
  */
 
-#ifndef MIR2_ECS_WORLD_H
-#define MIR2_ECS_WORLD_H
+#ifndef MIR2_ECS_WORLD_H_
+#define MIR2_ECS_WORLD_H_
 
 #include <entt/entt.hpp>
 
@@ -116,4 +116,4 @@ class World {
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_WORLD_H
+#endif  // MIR2_ECS_WORLD_H_

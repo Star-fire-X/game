@@ -3,8 +3,8 @@
  * @brief 全局事件管理器定义
  */
 
-#ifndef LEGEND2_SERVER_GAME_EVENT_GLOBAL_EVENT_MANAGER_H
-#define LEGEND2_SERVER_GAME_EVENT_GLOBAL_EVENT_MANAGER_H
+#ifndef MIR2_SERVER_GAME_EVENT_GLOBAL_EVENT_MANAGER_H_
+#define MIR2_SERVER_GAME_EVENT_GLOBAL_EVENT_MANAGER_H_
 
 #include <cstdint>
 #include <mutex>
@@ -91,4 +91,4 @@ class GlobalEventManager : public mir2::core::Singleton<GlobalEventManager> {
 
 }  // namespace legend2::game::event
 
-#endif  // LEGEND2_SERVER_GAME_EVENT_GLOBAL_EVENT_MANAGER_H
+#endif  // MIR2_SERVER_GAME_EVENT_GLOBAL_EVENT_MANAGER_H_

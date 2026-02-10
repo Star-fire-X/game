@@ -1,6 +1,7 @@
 #include "network/tcp_session.h"
 
 #include <chrono>
+#include <cstring>
 
 #include <asio/post.hpp>
 #include <flatbuffers/flatbuffers.h>
@@ -18,7 +19,9 @@ namespace {
 constexpr int64_t kRateWindowMs = 1000;
 constexpr uint32_t kMaxMessagesPerSec = 50;
 constexpr uint32_t kMaxBytesPerSec = 64 * 1024;
-constexpr size_t kMaxReadBufferSize = 64 * 1024;
+// Must be large enough to hold the largest legal frame.
+constexpr size_t kMaxReadBufferSize =
+    mir2::common::kMaxPayloadSize + PacketHeaderV2::kSize;
 constexpr uint16_t kSequenceWindow = 256;
 
 }  // namespace
@@ -71,7 +74,7 @@ void TcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
   } else {
     buffer = PacketCodec::Encode(msg_id, payload.data(), payload.size());
   }
-  connection_->SendRaw(buffer);
+  connection_->SendRaw(std::move(buffer));
   monitor::Metrics::Instance().IncrementMessagesSent();
 }
 
@@ -95,6 +98,14 @@ uint64_t TcpSession::GetUserId() const {
 
 void TcpSession::SetUserId(uint64_t user_id) {
   user_id_.store(user_id);
+}
+
+uint64_t TcpSession::GetAccountId() const {
+  return account_id_.load();
+}
+
+void TcpSession::SetAccountId(uint64_t account_id) {
+  account_id_.store(account_id);
 }
 
 void TcpSession::Kick(mir2::common::ErrorCode reason, const std::string& text) {
@@ -124,6 +135,8 @@ void TcpSession::MarkHeartbeat() {
 
 void TcpSession::SetProtocolVersion(ProtocolVersion version) {
   protocol_version_ = version;
+  protocol_version_detected_.store(true, std::memory_order_relaxed);
+  kcp_upgrade_allowed_.store(version == ProtocolVersion::kV2, std::memory_order_relaxed);
 }
 
 ProtocolVersion TcpSession::GetProtocolVersion() const {
@@ -153,6 +166,27 @@ bool TcpSession::CheckRecvSequence(uint16_t seq) {
   return false;
 }
 
+void TcpSession::PauseRead() {
+  if (!connection_) {
+    return;
+  }
+  connection_->PauseRead();
+}
+
+void TcpSession::ResumeRead() {
+  if (!connection_) {
+    return;
+  }
+  connection_->ResumeRead();
+}
+
+bool TcpSession::IsReadPaused() const {
+  if (!connection_) {
+    return false;
+  }
+  return connection_->IsReadPaused();
+}
+
 void TcpSession::HandlePacket(uint64_t connection_id, const Packet& packet) {
   if (connection_id != connection_id_) {
     return;
@@ -165,7 +199,8 @@ void TcpSession::HandlePacket(uint64_t connection_id, const Packet& packet) {
   MarkHeartbeat();
   monitor::Metrics::Instance().IncrementMessagesReceived();
 
-  if (!CheckRateLimit(packet.payload.size())) {
+  if (!bypass_rate_limit_.load(std::memory_order_relaxed) &&
+      !CheckRateLimit(packet.payload.size())) {
     Close();
     return;
   }
@@ -190,6 +225,47 @@ void TcpSession::HandleDisconnect(uint64_t connection_id) {
   }
 }
 
+size_t TcpSession::BufferedBytes() const {
+  if (read_buffer_.size() <= read_offset_) {
+    return 0;
+  }
+  return read_buffer_.size() - read_offset_;
+}
+
+void TcpSession::ConsumeBytes(size_t bytes) {
+  read_offset_ += bytes;
+  if (read_offset_ >= read_buffer_.size()) {
+    read_buffer_.clear();
+    read_offset_ = 0;
+    return;
+  }
+  CompactReadBufferIfNeeded();
+}
+
+void TcpSession::CompactReadBufferIfNeeded(size_t incoming_bytes) {
+  if (read_offset_ == 0) {
+    return;
+  }
+
+  const size_t buffered = BufferedBytes();
+  if (buffered == 0) {
+    read_buffer_.clear();
+    read_offset_ = 0;
+    return;
+  }
+
+  if (read_offset_ < read_buffer_.size() / 2 &&
+      read_buffer_.size() + incoming_bytes <= kMaxReadBufferSize) {
+    return;
+  }
+
+  std::memmove(read_buffer_.data(),
+               read_buffer_.data() + read_offset_,
+               buffered);
+  read_buffer_.resize(buffered);
+  read_offset_ = 0;
+}
+
 void TcpSession::HandleBytes(const uint8_t* data, size_t size) {
   if (!data || size == 0) {
     return;
@@ -198,11 +274,14 @@ void TcpSession::HandleBytes(const uint8_t* data, size_t size) {
     return;
   }
 
+  CompactReadBufferIfNeeded(size);
+  const size_t buffered_before_append = BufferedBytes();
+
   // Prevent unbounded buffer growth from slow or malicious peers.
-  if (read_buffer_.size() >= kMaxReadBufferSize ||
-      size > kMaxReadBufferSize - read_buffer_.size()) {
+  if (buffered_before_append >= kMaxReadBufferSize ||
+      size > kMaxReadBufferSize - buffered_before_append) {
     SYSLOG_WARN("Read buffer overflow (current={}, incoming={}), closing session {}",
-                read_buffer_.size(), size, GetSessionId());
+                buffered_before_append, size, GetSessionId());
     Close();
     return;
   }
@@ -210,41 +289,73 @@ void TcpSession::HandleBytes(const uint8_t* data, size_t size) {
   read_buffer_.insert(read_buffer_.end(), data, data + size);
 
   while (true) {
-    if (read_buffer_.size() < sizeof(uint32_t)) {
+    const size_t buffered = BufferedBytes();
+    if (buffered < sizeof(uint32_t)) {
       return;
     }
+    const uint8_t* frame = read_buffer_.data() + read_offset_;
 
-    if (!protocol_version_detected_) {
-      protocol_version_ = mir2::common::DetectProtocolVersion(read_buffer_.data());
-      protocol_version_detected_ = true;
+    if (!protocol_version_detected_.load(std::memory_order_relaxed)) {
+      protocol_version_ = mir2::common::DetectProtocolVersion(frame);
+      protocol_version_detected_.store(true, std::memory_order_relaxed);
+      kcp_upgrade_allowed_.store(protocol_version_ == ProtocolVersion::kV2,
+                                 std::memory_order_relaxed);
     }
 
-    const size_t header_size = protocol_version_ == ProtocolVersion::kV2
-                                   ? PacketHeaderV2::kSize
-                                   : PacketHeader::kSize;
-    if (read_buffer_.size() < header_size) {
+    if (protocol_version_ == ProtocolVersion::kV1) {
+      const size_t header_size = PacketHeader::kSize;
+      if (buffered < header_size) {
+        return;
+      }
+
+      PacketHeader header{};
+      if (!PacketHeader::FromBytes(frame, header_size, &header)) {
+        monitor::Metrics::Instance().IncrementError("decode_header_v1");
+        Close();
+        return;
+      }
+
+      if (header.payload_size > mir2::common::kMaxPayloadSize) {
+        monitor::Metrics::Instance().IncrementError("decode_body_v1");
+        Close();
+        return;
+      }
+
+      const size_t packet_size = header_size + header.payload_size;
+      if (buffered < packet_size) {
+        return;
+      }
+
+      const auto status = PacketCodec::Decode(frame, packet_size, &decode_packet_);
+      if (status != DecodeStatus::kOk) {
+        monitor::Metrics::Instance().IncrementError("decode_body_v1");
+        Close();
+        return;
+      }
+
+      HandlePacket(connection_id_, decode_packet_);
+      if (state_.load() != SessionState::kActive) {
+        return;
+      }
+
+      ConsumeBytes(packet_size);
+      continue;
+    }
+
+    const size_t header_size = PacketHeaderV2::kSize;
+    if (buffered < header_size) {
       return;
     }
 
     size_t payload_size = 0;
-    if (protocol_version_ == ProtocolVersion::kV2) {
-      PacketHeaderV2 header{};
-      if (!PacketHeaderV2::FromBytes(read_buffer_.data(), header_size, &header) ||
-          header.version != PacketHeaderV2::kVersion) {
-        monitor::Metrics::Instance().IncrementError("decode_header");
-        Close();
-        return;
-      }
-      payload_size = header.payload_size;
-    } else {
-      PacketHeader header{};
-      if (!PacketHeader::FromBytes(read_buffer_.data(), header_size, &header)) {
-        monitor::Metrics::Instance().IncrementError("decode_header");
-        Close();
-        return;
-      }
-      payload_size = header.payload_size;
+    PacketHeaderV2 header{};
+    if (!PacketHeaderV2::FromBytes(frame, header_size, &header) ||
+        header.version != PacketHeaderV2::kVersion) {
+      monitor::Metrics::Instance().IncrementError("decode_header");
+      Close();
+      return;
     }
+    payload_size = header.payload_size;
 
     if (payload_size > mir2::common::kMaxPayloadSize) {
       monitor::Metrics::Instance().IncrementError("decode_body");
@@ -253,40 +364,39 @@ void TcpSession::HandleBytes(const uint8_t* data, size_t size) {
     }
 
     const size_t packet_size = header_size + payload_size;
-    if (read_buffer_.size() < packet_size) {
+    if (buffered < packet_size) {
       return;
     }
 
-    Packet packet{};
-    if (protocol_version_ == ProtocolVersion::kV2) {
-      uint16_t sequence = 0;
-      const auto status =
-          PacketCodec::DecodeV2(read_buffer_.data(), packet_size, &packet, &sequence);
-      if (status != DecodeStatus::kOk) {
-        monitor::Metrics::Instance().IncrementError("decode_body");
-        Close();
-        return;
-      }
-      if (!CheckRecvSequence(sequence)) {
-        monitor::Metrics::Instance().IncrementError("sequence");
-        Close();
-        return;
-      }
-    } else {
-      const auto status = PacketCodec::Decode(read_buffer_.data(), packet_size, &packet);
-      if (status != DecodeStatus::kOk) {
-        monitor::Metrics::Instance().IncrementError("decode_body");
-        Close();
-        return;
-      }
+    if (!mir2::common::ValidateChannelFlag(
+            header.flags, mir2::common::ChannelType::kTcp)) {
+      SYSLOG_WARN("Channel flag mismatch: TCP received KCP-flagged packet from session {} ({}:{})",
+                  GetSessionId(), remote_address_, remote_port_);
+      monitor::Metrics::Instance().IncrementError("channel_flag_mismatch_tcp");
+      ConsumeBytes(packet_size);
+      continue;
     }
 
-    HandlePacket(connection_id_, packet);
+    uint16_t sequence = 0;
+    const auto status =
+        PacketCodec::DecodeV2(frame, packet_size, &decode_packet_, &sequence);
+    if (status != DecodeStatus::kOk) {
+      monitor::Metrics::Instance().IncrementError("decode_body");
+      Close();
+      return;
+    }
+    if (!CheckRecvSequence(sequence)) {
+      monitor::Metrics::Instance().IncrementError("sequence");
+      Close();
+      return;
+    }
+
+    HandlePacket(connection_id_, decode_packet_);
     if (state_.load() != SessionState::kActive) {
       return;
     }
 
-    read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + packet_size);
+    ConsumeBytes(packet_size);
   }
 }
 

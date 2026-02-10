@@ -1,8 +1,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "db/character_repository.h"
-#include "db/redis_manager.h"
+#include "storage_engine/backends/repository/character_repository.h"
+#include "storage_engine/backends/redis/redis_manager.h"
 #include "server/config/config_manager.h"
 #include "server/db/redis_test_utils.h"
 

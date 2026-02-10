@@ -1,5 +1,7 @@
 #include "network/tcp_client.h"
 
+#include <cstring>
+
 #include <asio/connect.hpp>
 #include <asio/ip/tcp.hpp>
 
@@ -8,6 +10,7 @@ namespace mir2::network {
 namespace {
 
 constexpr uint16_t kSequenceWindow = 256;
+constexpr size_t kServiceWriteQueueSize = 8192;
 
 }  // namespace
 
@@ -34,12 +37,14 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
 
   connection_ = std::make_shared<TcpConnection>(
       std::make_unique<AsioSocketAdapter>(std::move(socket)),
-      1);
+      1,
+      kServiceWriteQueueSize);
   protocol_version_ = ProtocolVersion::kV1;
   protocol_version_detected_ = false;
   send_sequence_.store(0, std::memory_order_relaxed);
   recv_sequence_.store(0, std::memory_order_relaxed);
   read_buffer_.clear();
+  read_offset_ = 0;
   connection_->SetReadHandler([this](const uint8_t* data, size_t size) {
     HandleBytes(data, size);
   });
@@ -60,7 +65,7 @@ void TcpClient::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
   } else {
     buffer = PacketCodec::Encode(msg_id, payload.data(), payload.size());
   }
-  connection_->SendRaw(buffer);
+  connection_->SendRaw(std::move(buffer));
 }
 
 void TcpClient::Close() {
@@ -77,34 +82,77 @@ void TcpClient::HandleDisconnect(uint64_t /*connection_id*/) {
   }
 }
 
+size_t TcpClient::BufferedBytes() const {
+  if (read_buffer_.size() <= read_offset_) {
+    return 0;
+  }
+  return read_buffer_.size() - read_offset_;
+}
+
+void TcpClient::ConsumeBytes(size_t bytes) {
+  read_offset_ += bytes;
+  if (read_offset_ >= read_buffer_.size()) {
+    read_buffer_.clear();
+    read_offset_ = 0;
+    return;
+  }
+  CompactReadBufferIfNeeded();
+}
+
+void TcpClient::CompactReadBufferIfNeeded() {
+  if (read_offset_ == 0) {
+    return;
+  }
+
+  const size_t buffered = BufferedBytes();
+  if (buffered == 0) {
+    read_buffer_.clear();
+    read_offset_ = 0;
+    return;
+  }
+
+  if (read_offset_ < read_buffer_.size() / 2) {
+    return;
+  }
+
+  std::memmove(read_buffer_.data(),
+               read_buffer_.data() + read_offset_,
+               buffered);
+  read_buffer_.resize(buffered);
+  read_offset_ = 0;
+}
+
 void TcpClient::HandleBytes(const uint8_t* data, size_t size) {
   if (!data || size == 0) {
     return;
   }
 
+  CompactReadBufferIfNeeded();
   read_buffer_.insert(read_buffer_.end(), data, data + size);
 
   while (true) {
-    if (read_buffer_.size() < sizeof(uint32_t)) {
+    const size_t buffered = BufferedBytes();
+    if (buffered < sizeof(uint32_t)) {
       return;
     }
+    const uint8_t* frame = read_buffer_.data() + read_offset_;
 
     if (!protocol_version_detected_) {
-      protocol_version_ = mir2::common::DetectProtocolVersion(read_buffer_.data());
+      protocol_version_ = mir2::common::DetectProtocolVersion(frame);
       protocol_version_detected_ = true;
     }
 
     const size_t header_size = protocol_version_ == ProtocolVersion::kV2
                                    ? PacketHeaderV2::kSize
                                    : PacketHeader::kSize;
-    if (read_buffer_.size() < header_size) {
+    if (buffered < header_size) {
       return;
     }
 
     size_t payload_size = 0;
     if (protocol_version_ == ProtocolVersion::kV2) {
       PacketHeaderV2 header{};
-      if (!PacketHeaderV2::FromBytes(read_buffer_.data(), header_size, &header) ||
+      if (!PacketHeaderV2::FromBytes(frame, header_size, &header) ||
           header.version != PacketHeaderV2::kVersion) {
         Close();
         return;
@@ -112,7 +160,7 @@ void TcpClient::HandleBytes(const uint8_t* data, size_t size) {
       payload_size = header.payload_size;
     } else {
       PacketHeader header{};
-      if (!PacketHeader::FromBytes(read_buffer_.data(), header_size, &header)) {
+      if (!PacketHeader::FromBytes(frame, header_size, &header)) {
         Close();
         return;
       }
@@ -125,21 +173,20 @@ void TcpClient::HandleBytes(const uint8_t* data, size_t size) {
     }
 
     const size_t packet_size = header_size + payload_size;
-    if (read_buffer_.size() < packet_size) {
+    if (buffered < packet_size) {
       return;
     }
 
-    Packet packet{};
     if (protocol_version_ == ProtocolVersion::kV2) {
       uint16_t sequence = 0;
       const auto status =
-          PacketCodec::DecodeV2(read_buffer_.data(), packet_size, &packet, &sequence);
+          PacketCodec::DecodeV2(frame, packet_size, &decode_packet_, &sequence);
       if (status != DecodeStatus::kOk || !CheckRecvSequence(sequence)) {
         Close();
         return;
       }
     } else {
-      const auto status = PacketCodec::Decode(read_buffer_.data(), packet_size, &packet);
+      const auto status = PacketCodec::Decode(frame, packet_size, &decode_packet_);
       if (status != DecodeStatus::kOk) {
         Close();
         return;
@@ -147,10 +194,10 @@ void TcpClient::HandleBytes(const uint8_t* data, size_t size) {
     }
 
     if (packet_handler_) {
-      packet_handler_(packet);
+      packet_handler_(decode_packet_);
     }
 
-    read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + packet_size);
+    ConsumeBytes(packet_size);
   }
 }
 

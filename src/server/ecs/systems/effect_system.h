@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_EFFECT_SYSTEM_H
-#define LEGEND2_SERVER_ECS_EFFECT_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_EFFECT_SYSTEM_H_
+#define MIR2_SERVER_ECS_EFFECT_SYSTEM_H_
 
 #include "ecs/components/effect_component.h"
 #include <entt/entt.hpp>

@@ -1,6 +1,6 @@
 #include "ecs/systems/damage_calculator.h"
 
-#include "server/combat/combat_core.h"
+#include "server/ecs/systems/combat_core.h"
 
 #include <algorithm>
 #include <cmath>

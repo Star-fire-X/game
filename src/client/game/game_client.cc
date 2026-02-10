@@ -11,6 +11,7 @@
  */
 
 #include "game/game_client.h"
+#include "game/game_client_input.h"
 #include "client/handlers/login_handler.h"
 #include "client/handlers/character_handler.h"
 #include "client/handlers/combat_handler.h"
@@ -31,13 +32,14 @@
 #include "common/enums.h"
 #include "common/protocol/message_codec.h"
 #include "common/protocol/npc_message_codec.h"
+#include "common/time_utils.h"
 
 #include <flatbuffers/flatbuffers.h>
 #include "login_generated.h"
 #include "game_generated.h"
 #include "combat_generated.h"
+#include "system_generated.h"
 #include <algorithm>
-#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <thread>
@@ -102,11 +104,43 @@ std::vector<uint8_t> build_payload(flatbuffers::FlatBufferBuilder& builder) {
     return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
-int64_t now_ms() {
-    using clock = std::chrono::steady_clock;
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               clock::now().time_since_epoch())
-        .count();
+bool is_aoe_target_type(mir2::common::SkillTarget target_type) {
+    switch (target_type) {
+        case mir2::common::SkillTarget::AOE_ENEMY:
+        case mir2::common::SkillTarget::AOE_ALLY:
+        case mir2::common::SkillTarget::AOE_ALL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_self_centered_aoe(const mir2::client::skill::ClientSkillTemplate& skill) {
+    return is_aoe_target_type(skill.target_type) && skill.range <= 0.0f;
+}
+
+bool is_friendly_target(const Entity& target, uint64_t self_id) {
+    return target.type == EntityType::Player && target.id != self_id;
+}
+
+bool contains_resurrection_keyword(const std::string& text) {
+    if (text.empty()) {
+        return false;
+    }
+    return text.find("复活") != std::string::npos ||
+           text.find("还魂") != std::string::npos ||
+           text.find("复生") != std::string::npos ||
+           text.find("revive") != std::string::npos ||
+           text.find("Revive") != std::string::npos ||
+           text.find("resurrect") != std::string::npos ||
+           text.find("Resurrect") != std::string::npos ||
+           text.find("rebirth") != std::string::npos ||
+           text.find("Rebirth") != std::string::npos;
+}
+
+bool is_resurrection_skill(const mir2::client::skill::ClientSkillTemplate& skill) {
+    return contains_resurrection_keyword(skill.name) ||
+           contains_resurrection_keyword(skill.description);
 }
 
 class NpcDialogWidget final : public mir2::ui::UIWidget {
@@ -238,7 +272,6 @@ bool GameClient::initialize(const ClientConfig& config) {
     // 创建渲染子系统
     map_renderer_ = std::make_unique<MapRenderer>(*sdl_renderer, *resource_manager_,
                                                   texture_cache, async_loader_.get());      // 地图渲染
-    animation_manager_ = std::make_unique<AnimationManager>(*sdl_renderer, *resource_manager_);  // 动画管理
     effect_player_ = std::make_unique<mir2::render::EffectPlayer>(*sdl_renderer, *resource_manager_);
     ui_renderer_ = std::make_unique<UIRenderer>(*sdl_renderer);                            // UI渲染
     ui_renderer_->set_ui_scale(config_.ui_scale);
@@ -300,6 +333,61 @@ bool GameClient::initialize(const ClientConfig& config) {
                                                                     player_interpolator_);
     }
     std::cout << "  Game systems created" << std::endl;
+
+    GameClientInput::Dependencies input_deps;
+    input_deps.input = &input_;
+    input_deps.player = &player_;
+    input_deps.player_actor = &player_actor_;
+    input_deps.focused_actor = &focused_actor_;
+    input_deps.map_renderer = map_renderer_.get();
+    input_deps.npc_dialog_ui = npc_dialog_ui_.get();
+    input_deps.entity_manager = &entity_manager_;
+    input_deps.movement_controller = &movement_controller_;
+    input_deps.player_interpolator = &player_interpolator_;
+    input_deps.camera = &camera_;
+    input_deps.skill_executor = &skill_executor_;
+    input_deps.skill_book = &skill_book_;
+
+    GameClientInput::Callbacks input_callbacks;
+    input_callbacks.request_shutdown = [this]() { running_ = false; };
+    input_callbacks.on_window_resized = [this](int width, int height) {
+        camera_.viewport_width = width;
+        camera_.viewport_height = height;
+        config_.window_width = width;
+        config_.window_height = height;
+        if (login_screen_) {
+            login_screen_->set_dimensions(width, height);
+        }
+        if (npc_dialog_ui_) {
+            npc_dialog_ui_->set_dimensions(width, height);
+        }
+        if (ui_manager_) {
+            if (auto* screen = ui_manager_->get_screen("gameplay")) {
+                screen->set_bounds({0, 0, width, height});
+            }
+        }
+    };
+    input_callbacks.dispatch_event = [this](const SDL_Event& event) {
+        event_dispatcher_.dispatch(event);
+    };
+    input_callbacks.handle_escape = [this]() {
+        if (state_ == GameState::PLAYING) {
+            // TODO: 显示游戏菜单
+        } else if (state_ == GameState::LOGIN) {
+            running_ = false;  // 在登录界面按ESC退出游戏
+        }
+    };
+    input_callbacks.process_state_input = [this]() { state_machine_.process_input(); };
+    input_callbacks.screen_to_world = [this](int screen_x, int screen_y) {
+        return screen_to_world(screen_x, screen_y);
+    };
+    input_callbacks.interact_with_npc = [this](uint64_t npc_id) { InteractWithNpc(npc_id); };
+    input_callbacks.is_connected = [this]() { return is_connected(); };
+    input_callbacks.send_move_request = [this](const Position& target) { send_move_request(target); };
+    input_callbacks.find_actor = [this](int32_t actor_id) { return find_actor(actor_id); };
+    input_callbacks.set_focused_actor = [this](Actor* actor) { set_focused_actor(actor); };
+
+    input_handler_ = std::make_unique<GameClientInput>(input_deps, input_callbacks);
     
     // 加载地图渲染所需的资源档案
     map_renderer_->load_archives();
@@ -400,14 +488,14 @@ void GameClient::shutdown() {
     std::cout << "Shutting down..." << std::endl;
     running_ = false;
     set_state(GameState::EXITING);
+
+    input_handler_.reset();
     
     // 断开服务器连接
     disconnect_from_server();
     
     // 按创建的逆序释放资源
-    player_entity_.reset();
     player_.reset();
-    character_animator_.reset();
 
     movement_controller_.reset();
     async_loader_.reset();
@@ -428,7 +516,6 @@ void GameClient::shutdown() {
     ui_manager_.reset();
     login_screen_.reset();
     ui_renderer_.reset();
-    animation_manager_.reset();
     map_renderer_.reset();
     
     network_manager_.reset();
@@ -457,97 +544,14 @@ void GameClient::shutdown() {
  * - SDL_WINDOWEVENT: 窗口事件（如调整大小）
  */
 void GameClient::process_events() {
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_QUIT) {
-            // 窗口关闭请求
-            running_ = false;
-            continue;
-        }
-
-        if (event.type == SDL_WINDOWEVENT) {
-            // 窗口事件
-            if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                // 窗口大小改变，更新摄像机视口
-                camera_.viewport_width = event.window.data1;
-                camera_.viewport_height = event.window.data2;
-                config_.window_width = event.window.data1;
-                config_.window_height = event.window.data2;
-                // 更新登录界面尺寸
-                if (login_screen_) {
-                    login_screen_->set_dimensions(event.window.data1, event.window.data2);
-                }
-                if (npc_dialog_ui_) {
-                    npc_dialog_ui_->set_dimensions(event.window.data1, event.window.data2);
-                }
-                if (ui_manager_) {
-                    if (auto* screen = ui_manager_->get_screen("gameplay")) {
-                        screen->set_bounds({0, 0, event.window.data1, event.window.data2});
-                    }
-                }
-            }
-            continue;
-        }
-
-        event_dispatcher_.dispatch(event);
-
-        // 全局快捷键处理
-        if (event.type == SDL_KEYDOWN) {
-            if (event.key.keysym.sym == SDLK_ESCAPE) {
-                if (state_ == GameState::PLAYING) {
-                    // TODO: 显示游戏菜单
-                } else if (state_ == GameState::LOGIN) {
-                    running_ = false;  // 在登录界面按ESC退出游戏
-                }
-            }
-        }
-
-        update_input_state(event);
+    if (input_handler_) {
+        input_handler_->ProcessEvents();
     }
 }
 
 void GameClient::update_input_state(const SDL_Event& event) {
-    switch (event.type) {
-        case SDL_KEYDOWN:
-            if (event.key.keysym.scancode < SDL_NUM_SCANCODES) {
-                // 记录按键按下状态（仅首次按下时触发 pressed）
-                if (!input_.keys[event.key.keysym.scancode]) {
-                    input_.keys_pressed[event.key.keysym.scancode] = true;
-                }
-                input_.keys[event.key.keysym.scancode] = true;
-            }
-            break;
-        case SDL_KEYUP:
-            if (event.key.keysym.scancode < SDL_NUM_SCANCODES) {
-                input_.keys[event.key.keysym.scancode] = false;
-            }
-            break;
-        case SDL_MOUSEMOTION:
-            input_.mouse_x = event.motion.x;
-            input_.mouse_y = event.motion.y;
-            break;
-        case SDL_MOUSEBUTTONDOWN:
-            if (event.button.button == SDL_BUTTON_LEFT) {
-                input_.mouse_left = true;
-                input_.mouse_left_clicked = true;  // 单帧点击标记
-            } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                input_.mouse_right = true;
-                input_.mouse_right_clicked = true;
-            } else if (event.button.button == SDL_BUTTON_MIDDLE) {
-                input_.mouse_middle = true;
-            }
-            break;
-        case SDL_MOUSEBUTTONUP:
-            if (event.button.button == SDL_BUTTON_LEFT) {
-                input_.mouse_left = false;
-            } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                input_.mouse_right = false;
-            } else if (event.button.button == SDL_BUTTON_MIDDLE) {
-                input_.mouse_middle = false;
-            }
-            break;
-        default:
-            break;
+    if (input_handler_) {
+        input_handler_->UpdateInputState(event);
     }
 }
 
@@ -556,7 +560,11 @@ void GameClient::update_input_state(const SDL_Event& event) {
  * 根据当前游戏状态分发到对应的输入处理函数
  */
 void GameClient::process_input() {
-    state_machine_.process_input();
+    if (input_handler_) {
+        input_handler_->ProcessInput();
+    } else {
+        state_machine_.process_input();
+    }
 }
 
 /**
@@ -793,11 +801,6 @@ void GameClient::setup_network_handlers() {
         player_ = std::make_unique<ClientCharacter>(data);
         camera_.center_on(player_->get_position());
 
-        player_entity_ = std::make_unique<AnimatedEntity>();
-        character_animator_ = std::make_unique<CharacterAnimator>(*animation_manager_);
-        character_animator_->setup_character(*player_entity_, player_->get_class(), player_->get_gender());
-        player_entity_->set_position(player_->get_position());
-
         awaiting_enter_game_ = false;
         enter_game();
     };
@@ -823,9 +826,6 @@ void GameClient::setup_network_handlers() {
         entity_manager_.update_entity_position(player_->get_id(), pos, player_actor_.data.direction);
         if (movement_controller_) {
             movement_controller_->on_move_response(pos);
-        }
-        if (player_entity_) {
-            player_entity_->set_position(pos);
         }
     };
     movement_callbacks.on_move_failed = [this](const std::string& error) {
@@ -1008,6 +1008,34 @@ void GameClient::setup_network_handlers() {
 
     system_handler_ = std::make_unique<handlers::SystemHandler>(std::move(system_callbacks));
 
+    const auto kcp_reset_msg_id = static_cast<mir2::common::MsgId>(
+        static_cast<uint16_t>(mir2::common::InternalMsgId::kKcpReset));
+    network_manager_->register_handler(kcp_reset_msg_id,
+                                       [this](const NetworkPacket& packet) {
+        if (packet.payload.empty()) {
+            return;
+        }
+
+        flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+        if (!verifier.VerifyBuffer<mir2::proto::KcpReset>(nullptr)) {
+            std::cerr << "KcpReset verify failed" << std::endl;
+            return;
+        }
+
+        const auto* reset = flatbuffers::GetRoot<mir2::proto::KcpReset>(packet.payload.data());
+        if (!reset) {
+            return;
+        }
+
+        std::cout << "KCP reset requested (reason=" << static_cast<int>(reset->reason())
+                  << ", ts=" << reset->timestamp_ms() << ")" << std::endl;
+
+        auto* manager = dynamic_cast<mir2::client::NetworkManager*>(network_manager_.get());
+        if (!manager || !manager->reset_kcp_session()) {
+            std::cout << "KCP reset skipped (dual-channel client not available)" << std::endl;
+        }
+    });
+
     handlers::NpcHandler::Callbacks npc_callbacks;
     npc_callbacks.event_dispatcher = &event_dispatcher_;
     npc_handler_ = std::make_unique<handlers::NpcHandler>(std::move(npc_callbacks));
@@ -1089,7 +1117,8 @@ void GameClient::setup_skill_handlers() {
         if (!skill_manager_ || skill_id == 0) {
             return;
         }
-        skill_manager_->start_cooldown(skill_id, static_cast<int64_t>(cooldown_ms), now_ms());
+        skill_manager_->start_cooldown(skill_id, static_cast<int64_t>(cooldown_ms),
+                                        mir2::common::now_ms());
     };
     skill_callbacks.on_cast_start = [this](uint64_t caster_id,
                                            uint32_t skill_id,
@@ -1102,7 +1131,7 @@ void GameClient::setup_skill_handlers() {
             return;
         }
 
-        const int64_t start_ms = now_ms();
+        const int64_t start_ms = mir2::common::now_ms();
         const int64_t end_ms = start_ms + static_cast<int64_t>(cast_time_ms);
         const auto* tmpl = skill_manager_->get_template(skill_id);
         const std::string skill_name = tmpl ? tmpl->name : std::string();
@@ -1301,7 +1330,7 @@ void GameClient::load_login_background() {
     login_screen_->set_background_texture(texture);
     
     // 加载登录动画帧（ChrSel 23帧到32帧，跳过22帧因为它与背景相同）
-    std::vector<LoginScreen::AnimationFrame> animation_frames;
+    std::vector<mir2::ui::screens::AnimationFrame> animation_frames;
     const int anim_start = 23;
     const int anim_end = 32;
     
@@ -1326,7 +1355,7 @@ void GameClient::load_login_background() {
         
         auto anim_texture = renderer_->create_texture_from_sprite(anim_sprite, true);
         if (anim_texture) {
-            LoginScreen::AnimationFrame frame;
+            mir2::ui::screens::AnimationFrame frame;
             frame.texture = anim_texture;
             // The login animation frames are center crops of the background; positioning is handled in LoginScreen.
             frame.offset_x = 0;
@@ -1766,12 +1795,6 @@ void GameClient::start_offline_play() {
     player_->set_position({100, 100});
     camera_.center_on(player_->get_position());
 
-    // 设置玩家动画
-    player_entity_ = std::make_unique<AnimatedEntity>();
-    character_animator_ = std::make_unique<CharacterAnimator>(*animation_manager_);
-    character_animator_->setup_character(*player_entity_, player_->get_class(), player_->get_gender());
-    player_entity_->set_position(player_->get_position());
-
     enter_game();
 }
 
@@ -1784,7 +1807,9 @@ void GameClient::start_offline_play() {
  * 输入由LoginScreen通过事件转发处理
  */
 void GameClient::process_input_login() {
-    // Input is handled by LoginScreen via event forwarding
+    if (input_handler_) {
+        input_handler_->ProcessInputLogin();
+    }
 }
 
 /**
@@ -1792,7 +1817,9 @@ void GameClient::process_input_login() {
  * 输入由LoginScreen通过事件转发处理
  */
 void GameClient::process_input_character_select() {
-    // Input is handled by LoginScreen via event forwarding
+    if (input_handler_) {
+        input_handler_->ProcessInputCharacterSelect();
+    }
 }
 
 /**
@@ -1800,7 +1827,9 @@ void GameClient::process_input_character_select() {
  * 输入由LoginScreen通过事件转发处理
  */
 void GameClient::process_input_character_create() {
-    // Input is handled by LoginScreen via event forwarding
+    if (input_handler_) {
+        input_handler_->ProcessInputCharacterCreate();
+    }
 }
 
 /**
@@ -1811,120 +1840,8 @@ void GameClient::process_input_character_create() {
  * - 鼠标点击移动
  */
 void GameClient::process_input_playing() {
-    if (!player_) return;
-    
-    // 调试快捷键
-    if (input_.key_pressed(SDL_SCANCODE_G) && map_renderer_) {
-        // G键切换网格显示
-        map_renderer_->set_debug_grid(!map_renderer_->is_debug_grid_enabled());
-    }
-    if (input_.key_pressed(SDL_SCANCODE_W) && map_renderer_) {
-        // W键切换可行走区域显示
-        map_renderer_->set_debug_walkability(!map_renderer_->is_debug_walkability_enabled());
-    }
-
-    process_skill_hotkeys();
-
-    // NPC对话打开时屏蔽场景点击
-    if (npc_dialog_ui_ && npc_dialog_ui_->is_visible()) {
-        return;
-    }
-    
-    // 鼠标左键点击移动
-    if (input_.mouse_left_clicked) {
-        // 将屏幕坐标转换为世界坐标
-        Position target = screen_to_world(input_.mouse_x, input_.mouse_y);
-        if (target.x >= 0 && target.y >= 0) {
-            const Entity* target_entity = nullptr;
-            const auto entities_at_target = entity_manager_.query_at(target);
-            for (const auto* entity : entities_at_target) {
-                if (!entity) {
-                    continue;
-                }
-                if (player_ && entity->id == player_->get_id()) {
-                    continue;
-                }
-                if (entity->type == EntityType::NPC) {
-                    target_entity = entity;
-                    break;
-                }
-                if (!target_entity) {
-                    target_entity = entity;
-                }
-            }
-
-            if (target_entity) {
-                Actor* actor = find_actor(static_cast<int32_t>(target_entity->id));
-                if (actor) {
-                    set_focused_actor(actor);
-                } else {
-                    set_focused_actor(nullptr);
-                }
-
-                if (target_entity->type == EntityType::NPC) {
-                    InteractWithNpc(target_entity->id);
-                    return;
-                }
-            } else {
-                set_focused_actor(nullptr);
-            }
-
-            input_.target_position = target;
-            input_.has_move_target = true;
-            
-            // 离线模式直接移动，在线模式发送移动请求
-            if (!is_connected()) {
-                player_->set_position(target);
-                player_entity_->set_position(target);
-                entity_manager_.update_entity_position(player_->get_id(), target, player_actor_.data.direction);
-                player_interpolator_.set_immediate(target);
-                camera_.center_on(target);
-            } else {
-                bool accepted = false;
-                if (movement_controller_) {
-                    accepted = movement_controller_->request_move(player_->get_position(), target);
-                } else {
-                    send_move_request(target);
-                    accepted = true;
-                }
-                if (!accepted) {
-                    input_.has_move_target = false;
-                }
-            }
-        }
-    }
-    
-}
-
-void GameClient::process_skill_hotkeys() {
-    if (!player_ || !skill_executor_) {
-        return;
-    }
-
-    static constexpr SDL_Scancode kHotkeys[] = {
-        SDL_SCANCODE_F1, SDL_SCANCODE_F2, SDL_SCANCODE_F3, SDL_SCANCODE_F4,
-        SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F7, SDL_SCANCODE_F8
-    };
-
-    const int current_mp = player_->get_data().stats.mp;
-    uint64_t target_id = 0;
-    if (focused_actor_) {
-        target_id = static_cast<uint64_t>(focused_actor_->data.id);
-    } else {
-        target_id = static_cast<uint64_t>(player_->get_id());
-    }
-
-    const size_t hotkey_count = sizeof(kHotkeys) / sizeof(kHotkeys[0]);
-    for (size_t i = 0; i < hotkey_count; ++i) {
-        if (!input_.key_pressed(kHotkeys[i])) {
-            continue;
-        }
-        const uint8_t slot = static_cast<uint8_t>(i + 1);
-        skill_executor_->try_use_skill_by_hotkey(slot, current_mp, target_id);
-    }
-
-    if (input_.key_pressed(SDL_SCANCODE_K) && skill_book_) {
-        skill_book_->toggle();
+    if (input_handler_) {
+        input_handler_->ProcessInputPlaying();
     }
 }
 
@@ -2025,9 +1942,6 @@ void GameClient::update_playing(float delta_time) {
 
             player_actor_.data.map_x = static_cast<uint16_t>(current_pos.x);
             player_actor_.data.map_y = static_cast<uint16_t>(current_pos.y);
-            if (player_entity_) {
-                player_entity_->set_position(current_pos);
-            }
             last_player_pos_ = current_pos;
 
             actor_renderer_->update(player_actor_, delta_ms);
@@ -2045,11 +1959,6 @@ void GameClient::update_playing(float delta_time) {
             }
             actor_renderer_->update(actor, delta_ms);
         }
-    }
-
-    // 更新旧的玩家实体动画（兼容）
-    if (player_entity_) {
-        player_entity_->update(delta_time);
     }
 
     // 更新伤害数字动画
@@ -2079,7 +1988,7 @@ void GameClient::update_playing(float delta_time) {
 void GameClient::update_skill_system(float delta_time) {
     (void)delta_time;
 
-    const int64_t current_ms = now_ms();
+    const int64_t current_ms = mir2::common::now_ms();
     if (skill_manager_) {
         skill_manager_->update(current_ms);
     }
@@ -2280,26 +2189,139 @@ void GameClient::send_attack_request(uint32_t target_id) {
     network_manager_->send_message(mir2::common::MsgId::kAttackReq, payload);
 }
 
-bool GameClient::validate_skill_target(uint64_t target_id) const {
+bool GameClient::validate_skill_target(uint32_t skill_id, uint64_t target_id) const {
     if (!player_) {
         return false;
     }
+    if (!skill_manager_) {
+        std::cerr << "Skill manager not initialized" << std::endl;
+        return false;
+    }
+
+    const auto* skill = skill_manager_->get_template(skill_id);
+    if (!skill) {
+        std::cerr << "Skill template not found: " << skill_id << std::endl;
+        return false;
+    }
+
+    const uint64_t self_id = player_->get_id();
+    const bool is_self_target = target_id == self_id;
+    const bool self_centered_aoe = is_self_centered_aoe(*skill);
+
+    if (skill->target_type == mir2::common::SkillTarget::SELF) {
+        if (!is_self_target) {
+            std::cerr << "Skill target must be self: " << target_id << std::endl;
+            return false;
+        }
+        if (player_->get_data().stats.hp <= 0 && !is_resurrection_skill(*skill)) {
+            std::cerr << "Skill target is dead: " << target_id << std::endl;
+            return false;
+        }
+        return true;
+    }
+
     if (target_id == 0) {
+        if (self_centered_aoe) {
+            if (player_->get_data().stats.hp <= 0 && !is_resurrection_skill(*skill)) {
+                std::cerr << "Skill target is dead: " << target_id << std::endl;
+                return false;
+            }
+            return true;
+        }
         std::cerr << "Skill target is missing" << std::endl;
         return false;
     }
 
     const Entity* target = entity_manager_.get_entity(target_id);
+    Entity self_fallback{};
+    if (!target && is_self_target) {
+        self_fallback.id = self_id;
+        self_fallback.type = EntityType::Player;
+        self_fallback.position = player_->get_position();
+        self_fallback.stats.hp = player_->get_data().stats.hp;
+        self_fallback.stats.max_hp = player_->get_data().stats.max_hp;
+        self_fallback.stats.mp = player_->get_data().stats.mp;
+        self_fallback.stats.max_mp = player_->get_data().stats.max_mp;
+        self_fallback.stats.level = static_cast<uint16_t>(player_->get_data().stats.level);
+        target = &self_fallback;
+    }
+
     if (!target) {
         std::cerr << "Skill target not found: " << target_id << std::endl;
         return false;
     }
 
-    constexpr int kMaxSkillRange = 20;
-    const int distance_sq = player_->get_position().distance_squared(target->position);
-    if (distance_sq > kMaxSkillRange * kMaxSkillRange) {
-        std::cerr << "Skill target out of range: " << target_id << std::endl;
+    const bool is_target_dead = target->stats.max_hp > 0 && target->stats.hp <= 0;
+    if (is_target_dead && !is_resurrection_skill(*skill)) {
+        std::cerr << "Skill target is dead: " << target_id << std::endl;
         return false;
+    }
+
+    const bool friendly_target = is_friendly_target(*target, self_id);
+    switch (skill->target_type) {
+        case mir2::common::SkillTarget::SINGLE_ENEMY:
+            if (is_self_target || friendly_target || target->type != EntityType::Monster) {
+                std::cerr << "Skill target must be an enemy: " << target_id << std::endl;
+                return false;
+            }
+            break;
+        case mir2::common::SkillTarget::SINGLE_ALLY:
+            if (target->type != EntityType::Player) {
+                std::cerr << "Skill target must be an ally: " << target_id << std::endl;
+                return false;
+            }
+            break;
+        case mir2::common::SkillTarget::AOE_ENEMY:
+            if (self_centered_aoe) {
+                if (!is_self_target) {
+                    std::cerr << "AOE enemy skill must be cast on self: " << target_id << std::endl;
+                    return false;
+                }
+            } else if (is_self_target || friendly_target || target->type != EntityType::Monster) {
+                std::cerr << "AOE enemy skill target must be an enemy: " << target_id << std::endl;
+                return false;
+            }
+            break;
+        case mir2::common::SkillTarget::AOE_ALLY:
+            if (self_centered_aoe) {
+                if (!is_self_target) {
+                    std::cerr << "AOE ally skill must be cast on self: " << target_id << std::endl;
+                    return false;
+                }
+            } else if (target->type != EntityType::Player) {
+                std::cerr << "AOE ally skill target must be an ally: " << target_id << std::endl;
+                return false;
+            }
+            break;
+        case mir2::common::SkillTarget::AOE_ALL:
+            if (self_centered_aoe) {
+                if (!is_self_target) {
+                    std::cerr << "AOE skill must be cast on self: " << target_id << std::endl;
+                    return false;
+                }
+            } else if (target->type == EntityType::NPC || target->type == EntityType::GroundItem) {
+                std::cerr << "AOE skill target type invalid: " << target_id << std::endl;
+                return false;
+            }
+            break;
+        default:
+            std::cerr << "Unknown skill target type: " << static_cast<int>(skill->target_type) << std::endl;
+            return false;
+    }
+
+    constexpr float kDefaultSkillRange = 20.0f;
+    float max_range = skill->range;
+    if (max_range <= 0.0f && !self_centered_aoe) {
+        max_range = kDefaultSkillRange;
+    }
+
+    if (max_range > 0.0f) {
+        const int distance_sq = player_->get_position().distance_squared(target->position);
+        const float max_range_sq = max_range * max_range;
+        if (static_cast<float>(distance_sq) > max_range_sq) {
+            std::cerr << "Skill target out of range: " << target_id << std::endl;
+            return false;
+        }
     }
 
     return true;
@@ -2309,7 +2331,7 @@ void GameClient::send_skill_request(uint32_t skill_id, uint64_t target_id) {
     if (!is_connected() || !network_manager_) {
         return;
     }
-    if (!validate_skill_target(target_id)) {
+    if (!validate_skill_target(skill_id, target_id)) {
         return;
     }
 

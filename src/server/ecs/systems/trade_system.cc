@@ -10,6 +10,8 @@
 #include "ecs/dirty_tracker.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/trade_events.h"
+#include "ecs/registry_manager.h"
+#include "log/logger.h"
 
 namespace mir2::ecs {
 
@@ -111,6 +113,32 @@ void append_freed_slots(std::vector<int>& free_slots,
     std::sort(free_slots.begin(), free_slots.end());
     free_slots.erase(std::unique(free_slots.begin(), free_slots.end()),
                      free_slots.end());
+}
+
+void PersistCriticalCharacter(entt::registry& registry,
+                              entt::entity character,
+                              const char* context) {
+    if (!registry.valid(character)) {
+        return;
+    }
+
+    const auto* identity = registry.try_get<CharacterIdentityComponent>(character);
+    if (!identity || identity->id == 0) {
+        return;
+    }
+
+    auto& character_manager = RegistryManager::Instance().GetCharacterManager();
+    auto save_result = character_manager.SaveCritical(identity->id);
+    if (save_result == CharacterEntityManager::SaveResult::kEntityNotFound) {
+        character_manager.RebuildIndex();
+        save_result = character_manager.SaveCritical(identity->id);
+    }
+    if (save_result != CharacterEntityManager::SaveResult::kSuccess) {
+        SYSLOG_WARN("TradeSystem {} SaveCritical failed character_id={} result={}",
+                    context,
+                    identity->id,
+                    static_cast<int>(save_result));
+    }
 }
 
 }  // namespace
@@ -510,6 +538,9 @@ bool TradeSystem::ExecuteTrade(entt::registry& registry,
 
     reset_trade_component(*trade_a);
     reset_trade_component(*trade_b);
+
+    PersistCriticalCharacter(registry, trader_a, "ExecuteTrade");
+    PersistCriticalCharacter(registry, trader_b, "ExecuteTrade");
 
     if (event_bus) {
         events::TradeCompletedEvent event;

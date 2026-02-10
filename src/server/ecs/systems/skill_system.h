@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_SKILL_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SKILL_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SKILL_SYSTEM_H_
+#define MIR2_SERVER_ECS_SKILL_SYSTEM_H_
 
 #include "ecs/systems/skill_result.h"
 #include "ecs/skill_registry.h"

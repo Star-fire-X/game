@@ -2,8 +2,8 @@
 
 #include <unordered_set>
 
-#include "db/redis_cache.h"
-#include "db/redis_manager.h"
+#include "storage_engine/backends/redis/redis_cache.h"
+#include "storage_engine/backends/redis/redis_manager.h"
 #include "server/config/config_manager.h"
 #include "server/db/redis_test_utils.h"
 

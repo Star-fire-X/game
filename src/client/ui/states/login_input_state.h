@@ -2,13 +2,13 @@
 #define LEGEND2_LOGIN_INPUT_STATE_H
 
 #include "ui/states/login_state_interface.h"
-#include "ui/login_screen.h"
+#include "ui/states/login_state_context.h"
 
 namespace mir2::ui::screens {
 
 class LoginInputState : public ILoginState {
 public:
-    explicit LoginInputState(LoginStateContext& context);
+    explicit LoginInputState(ILoginInputStateContext& context);
 
     void on_enter() override;
     void on_exit() override;
@@ -18,7 +18,7 @@ public:
     LoginScreenState get_state_type() const override { return LoginScreenState::LOGIN; }
 
 private:
-    LoginStateContext& context_;
+    ILoginInputStateContext& context_;
 
     void layout();
     void start_login();

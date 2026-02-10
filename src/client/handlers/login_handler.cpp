@@ -1,23 +1,35 @@
 #include "client/handlers/login_handler.h"
 
 #include "common/protocol/message_codec.h"
+#include "common/types/error_codes.h"
 
 namespace mir2::game::handlers {
 
 namespace {
 const char* proto_error_to_string(mir2::proto::ErrorCode code) {
+    const auto raw_code = static_cast<uint16_t>(code);
+    if (raw_code == static_cast<uint16_t>(mir2::common::ErrorCode::ACCOUNT_BANNED)) {
+        return "账号已被封禁";
+    }
+    if (raw_code == static_cast<uint16_t>(mir2::common::ErrorCode::RATE_LIMITED)) {
+        return "登录过于频繁，请稍后重试";
+    }
+
     switch (code) {
-        case mir2::proto::ErrorCode::ERR_OK: return "OK";
-        case mir2::proto::ErrorCode::ERR_ACCOUNT_NOT_FOUND: return "Account not found";
-        case mir2::proto::ErrorCode::ERR_PASSWORD_WRONG: return "Password incorrect";
-        case mir2::proto::ErrorCode::ERR_NAME_EXISTS: return "Name already exists";
-        case mir2::proto::ErrorCode::ERR_TARGET_DEAD: return "Target dead";
-        case mir2::proto::ErrorCode::ERR_SKILL_COOLDOWN: return "Skill cooldown";
-        case mir2::proto::ErrorCode::ERR_INVALID_ACTION: return "Invalid action";
-        case mir2::proto::ErrorCode::ERR_TARGET_NOT_FOUND: return "Target not found";
-        case mir2::proto::ErrorCode::ERR_TARGET_OUT_OF_RANGE: return "Target out of range";
-        case mir2::proto::ErrorCode::ERR_INSUFFICIENT_MP: return "Insufficient MP";
-        default: return "Unknown error";
+        case mir2::proto::ErrorCode::ERR_OK: return "成功";
+        case mir2::proto::ErrorCode::ERR_ACCOUNT_NOT_FOUND: return "账号不存在";
+        case mir2::proto::ErrorCode::ERR_PASSWORD_WRONG: return "密码错误";
+        case mir2::proto::ErrorCode::ERR_NAME_EXISTS: return "名称已存在";
+        case mir2::proto::ErrorCode::ERR_TARGET_DEAD: return "目标已死亡";
+        case mir2::proto::ErrorCode::ERR_SKILL_COOLDOWN: return "技能冷却中";
+        case mir2::proto::ErrorCode::ERR_INVALID_ACTION: return "非法操作";
+        case mir2::proto::ErrorCode::ERR_TARGET_NOT_FOUND: return "目标不存在";
+        case mir2::proto::ErrorCode::ERR_TARGET_OUT_OF_RANGE: return "目标超出范围";
+        case mir2::proto::ErrorCode::ERR_INSUFFICIENT_MP: return "魔法值不足";
+        case mir2::proto::ErrorCode::ERR_KICK_ADMIN_MANUAL: return "账号已被封禁";
+        case mir2::proto::ErrorCode::ERR_KICK_DUPLICATE_LOGIN: return "账号已在其他设备登录";
+        case mir2::proto::ErrorCode::ERR_KICK_HEARTBEAT_TIMEOUT: return "连接已超时";
+        default: return "未知错误";
     }
 }
 
@@ -25,13 +37,13 @@ const char* login_decode_error(mir2::common::MessageCodecStatus status) {
     switch (status) {
         case mir2::common::MessageCodecStatus::kInvalidMsgId:
         case mir2::common::MessageCodecStatus::kInvalidPayload:
-            return "Invalid login response";
+            return "登录响应无效";
         case mir2::common::MessageCodecStatus::kMissingField:
         case mir2::common::MessageCodecStatus::kStringTooLong:
         case mir2::common::MessageCodecStatus::kValueOutOfRange:
-            return "Login response parse failed";
+            return "登录响应解析失败";
         default:
-            return "Invalid login response";
+            return "登录响应无效";
     }
 }
 
@@ -67,7 +79,7 @@ void LoginHandler::RegisterHandlers(mir2::client::INetworkManager& manager) {
 void LoginHandler::HandleLoginResponse(const NetworkPacket& packet) {
     if (packet.payload.empty()) {
         if (callbacks_.on_login_failure) {
-            callbacks_.on_login_failure("Empty login response");
+            callbacks_.on_login_failure("登录响应为空");
         }
         return;
     }

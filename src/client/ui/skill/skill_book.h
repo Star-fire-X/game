@@ -14,7 +14,7 @@ namespace mir2::ui::skill {
 
 class SkillBook {
 public:
-    explicit SkillBook(client::skill::SkillManager& skill_manager);
+    explicit SkillBook(client::skill::ISkillManager& skill_manager);
 
     void open();
     void close();
@@ -31,7 +31,7 @@ public:
     const client::skill::ClientSkillTemplate* get_hovered_skill() const;
 
 private:
-    client::skill::SkillManager& skill_manager_;
+    client::skill::ISkillManager& skill_manager_;
     bool open_ = false;
     int scroll_offset_ = 0;
     uint32_t hovered_skill_id_ = 0;

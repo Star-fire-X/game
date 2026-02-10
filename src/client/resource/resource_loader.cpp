@@ -184,7 +184,7 @@ bool WilArchive::load_wix(const std::string& wix_path) {
         (void)data_offset;
         
         // Check if image count is reasonable
-        if (index_count < 0 || index_count > 500000) {
+        if (index_count < 0 || index_count > MAX_IMAGE_COUNT) {
             std::cerr << "Invalid INDX index count: " << index_count << std::endl;
             return false;
         }
@@ -225,7 +225,7 @@ bool WilArchive::load_wix(const std::string& wix_path) {
     }
     
     // Check if image count is reasonable
-    if (header.index_count < 0 || header.index_count > 500000) {
+    if (header.index_count < 0 || header.index_count > MAX_IMAGE_COUNT) {
         // Attempt recovery using file size to infer count (some WIX headers are malformed)
         std::error_code ec;
         auto file_size = std::filesystem::file_size(wix_path, ec);
@@ -235,7 +235,7 @@ bool WilArchive::load_wix(const std::string& wix_path) {
                 : static_cast<std::uintmax_t>(WIX_TITLE_SIZE + 2 * sizeof(int32_t)); // legacy includes ver_flag
             if (file_size > header_size) {
                 int fallback_count = static_cast<int>((file_size - header_size) / sizeof(int32_t));
-                if (fallback_count > 0 && fallback_count <= 500000) {
+                if (fallback_count > 0 && fallback_count <= MAX_IMAGE_COUNT) {
                     std::cerr << "Invalid WIX index count: " << header.index_count
                               << ", using fallback " << fallback_count << std::endl;
                     header.index_count = fallback_count;
@@ -243,7 +243,7 @@ bool WilArchive::load_wix(const std::string& wix_path) {
             }
         }
 
-        if (header.index_count < 0 || header.index_count > 500000) {
+        if (header.index_count < 0 || header.index_count > MAX_IMAGE_COUNT) {
             std::cerr << "Invalid WIX index count: " << header.index_count << std::endl;
             return false;
         }
@@ -472,7 +472,10 @@ std::optional<Sprite> WilArchive::get_sprite(int index) {
     sprite.offset_x = offset_x;
     sprite.offset_y = offset_y;
     
-    int pixel_count = sprite.width * sprite.height;
+    size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (pixel_count > MAX_SPRITE_AREA || pixel_count == 0) {
+        return std::nullopt;
+    }
     sprite.pixels.resize(pixel_count);
     
     // Calculate data size based on bit depth
@@ -501,7 +504,7 @@ std::optional<Sprite> WilArchive::get_sprite(int index) {
         }
         case 16: {
             // 16-bit RGB565
-            for (int i = 0; i < pixel_count; ++i) {
+            for (size_t i = 0; i < pixel_count; ++i) {
                 uint16_t pixel = raw_data[i * 2] | (raw_data[i * 2 + 1] << 8);
                 // RGB565 to RGBA8888
                 uint8_t r = ((pixel >> 11) & 0x1F) << 3;
@@ -514,7 +517,7 @@ std::optional<Sprite> WilArchive::get_sprite(int index) {
         }
         case 24: {
             // 24-bit RGB
-            for (int i = 0; i < pixel_count; ++i) {
+            for (size_t i = 0; i < pixel_count; ++i) {
                 uint8_t b = raw_data[i * 3 + 0];
                 uint8_t g = raw_data[i * 3 + 1];
                 uint8_t r = raw_data[i * 3 + 2];
@@ -525,7 +528,7 @@ std::optional<Sprite> WilArchive::get_sprite(int index) {
         }
         case 32: {
             // 32-bit BGRA
-            for (int i = 0; i < pixel_count; ++i) {
+            for (size_t i = 0; i < pixel_count; ++i) {
                 uint8_t b = raw_data[i * 4 + 0];
                 uint8_t g = raw_data[i * 4 + 1];
                 uint8_t r = raw_data[i * 4 + 2];
@@ -1132,7 +1135,7 @@ bool ResourceManager::remove_map_from_cache(const std::string& map_path) {
  * @param index 精灵索引
  * @return true 如果在缓存中
  */
-bool ResourceManager::is_sprite_cached(const std::string& archive_name, int index) const {
+bool ResourceManager::is_sprite_cached(const std::string& archive_name, int index) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string cache_key = make_sprite_key(archive_name, index);
     return sprite_cache_.contains(cache_key);
@@ -1143,7 +1146,7 @@ bool ResourceManager::is_sprite_cached(const std::string& archive_name, int inde
  * @param map_path 地图路径
  * @return true 如果在缓存中
  */
-bool ResourceManager::is_map_cached(const std::string& map_path) const {
+bool ResourceManager::is_map_cached(const std::string& map_path) {
     std::lock_guard<std::mutex> lock(mutex_);
     return map_cache_.contains(map_path);
 }
@@ -1162,7 +1165,7 @@ bool ResourceManager::is_archive_loaded(const std::string& archive_name) const {
  * @brief 估算缓存内存使用量
  * @return 估算的字节数
  */
-size_t ResourceManager::get_estimated_cache_memory() const {
+size_t ResourceManager::get_estimated_cache_memory() {
     std::lock_guard<std::mutex> lock(mutex_);
     // Rough estimate: each sprite pixel is 4 bytes (RGBA)
     // This is a simplified estimate - actual memory usage may vary

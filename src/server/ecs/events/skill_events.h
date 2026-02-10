@@ -1,7 +1,8 @@
-#ifndef LEGEND2_SERVER_ECS_SKILL_EVENTS_H
-#define LEGEND2_SERVER_ECS_SKILL_EVENTS_H
+#ifndef MIR2_SERVER_ECS_SKILL_EVENTS_H_
+#define MIR2_SERVER_ECS_SKILL_EVENTS_H_
 
 #include "ecs/components/effect_component.h"
+#include "ecs/events/combat_events.h"
 #include "ecs/systems/skill_result.h"
 #include <cstdint>
 #include <entt/entt.hpp>
@@ -35,25 +36,11 @@ struct EffectExpiredEvent {
     uint32_t skill_id;
 };
 
-struct DamageDealtEvent {
-    entt::entity source;
-    entt::entity target;
-    uint32_t skill_id;
-    int damage;
-    bool is_critical;
-};
-
 struct HealingDoneEvent {
     entt::entity source;
     entt::entity target;
     uint32_t skill_id;
     int healing;
-};
-
-struct EntityDeathEvent {
-    entt::entity entity;
-    entt::entity killer;
-    uint32_t killing_skill_id;
 };
 
 struct BuffAppliedEvent {

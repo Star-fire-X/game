@@ -3,11 +3,15 @@ server:
   name: "Mir2-Gateway"
   bind_ip: "0.0.0.0"
   port: 7000
+  udp_port: 7001
   metrics_port: 9090
   io_threads: 4
   max_connections: 5000
   tick_interval_ms: 50
   heartbeat_timeout_ms: 30000
+  # 登录请求按客户端 IP 做令牌桶限流（capacity + 每秒 refill_rate）
+  login_ip_rate_limit_capacity: 5
+  login_ip_rate_limit_refill_rate: 1
 
 database:
   host: "127.0.0.1"
@@ -30,84 +34,72 @@ log:
   max_files: 10
 
 services:
-  world:
+  logic:
     host: "127.0.0.1"
-    port: 7001
-  game:
-    host: "127.0.0.1"
-    port: 7003
-  db:
-    host: "127.0.0.1"
-    port: 7002
+    port: 8002
 
-# 消息路由表：msg_id -> 目标服务
+# 消息路由表：msg_id -> 目标服务（双进程架构：所有消息路由到logic服务）
 # require_auth: 是否需要认证后才能转发
 message_routes:
-  # ========== DB 服务（数据库代理）==========
-  # 登录模块
+  # ========== 登录模块 ==========
   - msg_id: 1001  # kLoginReq
-    service: db
+    service: logic
     require_auth: false
   - msg_id: 1003  # kLogout
-    service: db
+    service: logic
     require_auth: true
 
-  # ========== World 服务（全局逻辑）==========
-  # 角色管理
+  # ========== 角色管理与社交模块 ==========
   - msg_id: 1010  # kCreateRoleReq
-    service: world
+    service: logic
     require_auth: true
   - msg_id: 1012  # kSelectRoleReq
-    service: world
+    service: logic
     require_auth: true
   - msg_id: 1020  # kRoleListReq
-    service: world
+    service: logic
     require_auth: true
 
-  # 社交模块
   - msg_id: 5001  # kChatReq
-    service: world
+    service: logic
     require_auth: true
   - msg_id: 5010  # kPrivateChat
-    service: world
+    service: logic
     require_auth: true
   - msg_id: 5020  # kGuildChat
-    service: world
+    service: logic
     require_auth: true
 
-  # ========== Game 服务（地图实例、战斗逻辑）==========
-  # 游戏模块
+  # ========== 游戏与战斗模块 ==========
   - msg_id: 2010  # kMoveReq
-    service: game
+    service: logic
     require_auth: true
   - msg_id: 2030  # kChangeMap
-    service: game
+    service: logic
     require_auth: true
   - msg_id: 2031  # kTeleport
-    service: game
+    service: logic
     require_auth: true
 
-  # 战斗模块
   - msg_id: 3001  # kAttackReq
-    service: game
+    service: logic
     require_auth: true
   - msg_id: 3010  # kSkillReq
-    service: game
+    service: logic
     require_auth: true
 
-  # 物品模块
   - msg_id: 4010  # kUseItemReq
-    service: game
+    service: logic
     require_auth: true
   - msg_id: 4020  # kDropItemReq
-    service: game
+    service: logic
     require_auth: true
   - msg_id: 4030  # kPickupItemReq
-    service: game
+    service: logic
     require_auth: true
   - msg_id: 4040  # kEquipReq
-    service: game
+    service: logic
     require_auth: true
   - msg_id: 4041  # kUnequipReq
-    service: game
+    service: logic
     require_auth: true

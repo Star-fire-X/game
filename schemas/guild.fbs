@@ -2,9 +2,70 @@
 include "common.fbs";
 namespace mir2.proto;
 
+enum GuildMessageType : ubyte {
+  CREATE = 1,
+  JOIN = 2,
+  LEAVE = 3,
+  KICK = 4,
+  DECLARE_WAR = 5,
+  CANCEL_WAR = 6,
+  MAKE_ALLY = 7,
+  BREAK_ALLY = 8,
+  UPDATE_NOTICE = 9,
+  UPDATE_RANK = 10
+}
+
+table GuildRankInfo {
+  rank: ubyte;
+  rank_name: string;
+  members: [string];
+}
+
+table GuildWarInfo {
+  enemy_guild_id: uint;
+  start_time: ulong;
+  remain_time: ulong;
+}
+
 table GuildInfo {
   id: ulong;
   name: string;
   level: ushort;
   member_count: uint;
+  leader_id: ulong;
+  leader_name: string;
+  max_members: uint;
+  notice_list: [string];
+  ranks: [GuildRankInfo];
+  war_guilds: [GuildWarInfo];
+  ally_guild_ids: [uint];
+  allow_ally: bool;
+  in_team_fight: bool;
+  match_point: int;
+  fight_members: [string];
+}
+
+table CreateGuildRequest {
+  guild_name: string;
+}
+
+table CreateGuildResponse {
+  success: bool;
+  error_code: int;
+  guild_info: GuildInfo;
+}
+
+table JoinGuildRequest {
+  guild_id: uint;
+}
+
+table LeaveGuildRequest {
+}
+
+table DeclareWarRequest {
+  target_guild_id: uint;
+}
+
+table MakeAllianceRequest {
+  target_guild_id: uint;
 }

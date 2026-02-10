@@ -6,6 +6,7 @@
 #include "client/handlers/login_handler.h"
 #include "common/enums.h"
 #include "common/protocol/message_codec.h"
+#include "common/types/error_codes.h"
 
 namespace {
 
@@ -72,7 +73,7 @@ TEST(LoginHandlerTest, LoginFailureInvokesFailureCallback) {
 
     handler.HandleLoginResponse(MakePacket(MsgId::kLoginRsp, std::move(payload)));
 
-    EXPECT_EQ(captured_error, "Password incorrect");
+    EXPECT_EQ(captured_error, "密码错误");
 }
 
 TEST(LoginHandlerTest, LoginWrongMsgIdReportsError) {
@@ -93,7 +94,7 @@ TEST(LoginHandlerTest, LoginWrongMsgIdReportsError) {
 
     handler.HandleLoginResponse(MakePacket(MsgId::kMoveRsp, std::move(payload)));
 
-    EXPECT_EQ(captured_error, "Invalid login response");
+    EXPECT_EQ(captured_error, "登录响应无效");
 }
 
 TEST(LoginHandlerTest, LoginTimeoutInvokesCallback) {
@@ -118,7 +119,7 @@ TEST(LoginHandlerTest, LoginEmptyPayloadReportsError) {
 
     handler.HandleLoginResponse(MakePacket(MsgId::kLoginRsp, {}));
 
-    EXPECT_EQ(captured_error, "Empty login response");
+    EXPECT_EQ(captured_error, "登录响应为空");
 }
 
 TEST(LoginHandlerTest, LoginInvalidPayloadReportsError) {
@@ -132,5 +133,27 @@ TEST(LoginHandlerTest, LoginInvalidPayloadReportsError) {
     std::vector<uint8_t> bad_payload = {0x01, 0x02, 0x03};
     handler.HandleLoginResponse(MakePacket(MsgId::kLoginRsp, std::move(bad_payload)));
 
-    EXPECT_EQ(captured_error, "Invalid login response");
+    EXPECT_EQ(captured_error, "登录响应无效");
+}
+
+TEST(LoginHandlerTest, AccountBannedMapsToChineseErrorMessage) {
+    std::string captured_error;
+
+    LoginHandler::Callbacks callbacks;
+    callbacks.on_login_failure = [&](const std::string& error) { captured_error = error; };
+
+    LoginHandler handler(callbacks);
+
+    mir2::common::LoginResponse response;
+    response.code = static_cast<mir2::proto::ErrorCode>(
+        static_cast<uint16_t>(mir2::common::ErrorCode::ACCOUNT_BANNED));
+    response.account_id = 0u;
+    response.session_token.clear();
+    mir2::common::MessageCodecStatus status = mir2::common::MessageCodecStatus::kOk;
+    auto payload = mir2::common::EncodeLoginResponse(response, &status);
+    ASSERT_EQ(status, mir2::common::MessageCodecStatus::kOk);
+
+    handler.HandleLoginResponse(MakePacket(MsgId::kLoginRsp, std::move(payload)));
+
+    EXPECT_EQ(captured_error, "账号已被封禁");
 }

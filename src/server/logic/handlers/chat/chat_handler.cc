@@ -1,146 +1,345 @@
-#include "handlers/chat/chat_handler.h"
+#include "logic/handlers/chat/chat_handler.h"
 
-#include <chrono>
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include <flatbuffers/flatbuffers.h>
 
 #include "chat_generated.h"
 #include "common/enums.h"
-#include "handlers/handler_utils.h"
+#include "ecs/components/character_components.h"
+#include "game/chat/chat_service.h"
+#include "game/map/aoi_manager.h"
+#include "log/logger.h"
+#include "logic/handlers/handler_error_utils.h"
+#include "logic/response_sender.h"
+#include "logic/services/player_presence_service.h"
 
-namespace legend2::handlers {
+namespace mir2::logic {
 
 namespace {
 
+constexpr size_t kMaxChatLength = 256;
+
+std::optional<entt::entity> FindOnlineCharacterEntity(entt::registry& registry,
+                                                       uint64_t character_id) {
+  auto view = registry.view<ecs::CharacterIdentityComponent, ecs::CharacterStateComponent>();
+  for (auto entity : view) {
+    const auto& identity = view.get<ecs::CharacterIdentityComponent>(entity);
+    if (identity.id != character_id) {
+      continue;
+    }
+
+    const auto& state = view.get<ecs::CharacterStateComponent>(entity);
+    if (!state.is_online) {
+      return std::nullopt;
+    }
+    return entity;
+  }
+  return std::nullopt;
+}
+
+std::optional<uint64_t> FindOnlineCharacterIdByName(entt::registry& registry,
+                                                     const std::string& name) {
+  auto view = registry.view<ecs::CharacterIdentityComponent, ecs::CharacterStateComponent>();
+  for (auto entity : view) {
+    const auto& identity = view.get<ecs::CharacterIdentityComponent>(entity);
+    if (identity.name != name) {
+      continue;
+    }
+
+    const auto& state = view.get<ecs::CharacterStateComponent>(entity);
+    if (!state.is_online) {
+      return std::nullopt;
+    }
+    return identity.id;
+  }
+  return std::nullopt;
+}
+
+ecs::ChatPreferenceComponent& EnsureChatPreference(entt::registry& registry,
+                                                   entt::entity entity) {
+  return registry.get_or_emplace<ecs::ChatPreferenceComponent>(entity);
+}
+
 std::vector<uint8_t> BuildChatRsp(mir2::common::ErrorCode code) {
-    flatbuffers::FlatBufferBuilder builder;
-    const auto rsp = mir2::proto::CreateChatRsp(builder, ToProtoError(code));
-    builder.Finish(rsp);
-    const uint8_t* data = builder.GetBufferPointer();
-    return std::vector<uint8_t>(data, data + builder.GetSize());
-}
-
-std::vector<uint8_t> BuildChatMessage(mir2::proto::ChatChannel channel,
-                                      uint64_t from_id,
-                                      const std::string& from_name,
-                                      uint64_t to_id,
-                                      const std::string& content,
-                                      uint32_t timestamp) {
-    flatbuffers::FlatBufferBuilder builder;
-    const auto name_offset = builder.CreateString(from_name);
-    const auto content_offset = builder.CreateString(content);
-    const auto rsp = mir2::proto::CreateChatMessage(
-        builder, channel, from_id, name_offset, to_id, content_offset, timestamp);
-    builder.Finish(rsp);
-    const uint8_t* data = builder.GetBufferPointer();
-    return std::vector<uint8_t>(data, data + builder.GetSize());
-}
-
-uint32_t NowSeconds() {
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(now).count());
+  flatbuffers::FlatBufferBuilder builder;
+  const auto rsp = mir2::proto::CreateChatRsp(builder, ToProtoError(code));
+  builder.Finish(rsp);
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
 }  // namespace
 
-ChatHandler::ChatHandler(ClientRegistry& registry)
-    : BaseHandler(mir2::log::LogCategory::kGame),
-      client_registry_(registry) {}
+ChatHandler::ChatHandler(CoroutineExecutor& executor,
+                         ResponseSender& response_sender,
+                         ClientRegistry& registry,
+                         PlayerPresenceService& player_presence_service,
+                         mir2::game::map::AOIManager& aoi_mgr,
+                         entt::registry& ecs_registry)
+    : executor_(executor),
+      response_sender_(response_sender),
+      client_registry_(registry),
+      aoi_mgr_(aoi_mgr),
+      ecs_registry_(ecs_registry),
+      chat_service_(std::make_unique<mir2::game::chat::ChatService>(
+          player_presence_service, ecs_registry_)) {}
 
-void ChatHandler::DoHandle(const HandlerContext& context,
-                           uint16_t msg_id,
-                           const std::vector<uint8_t>& payload,
-                           ResponseCallback callback) {
-    if (msg_id == static_cast<uint16_t>(mir2::common::MsgId::kChatReq)) {
-        HandleChat(context, payload, std::move(callback));
-        return;
-    }
+ChatHandler::~ChatHandler() = default;
 
-    OnError(context, msg_id, mir2::common::ErrorCode::kInvalidAction, std::move(callback));
+Task<void> ChatHandler::HandleMessage(HandlerContext ctx,
+                                      const uint8_t* payload,
+                                      size_t payload_size) {
+  if (!payload || payload_size == 0) {
+    SYSLOG_WARN("ChatHandler ignored empty payload (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  flatbuffers::Verifier verifier(payload, payload_size);
+  if (!verifier.VerifyBuffer<mir2::proto::ChatReq>(nullptr)) {
+    SYSLOG_WARN("ChatHandler payload verify failed (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  const auto* req = flatbuffers::GetRoot<mir2::proto::ChatReq>(payload);
+  if (!req || !req->content()) {
+    SYSLOG_WARN("ChatHandler payload missing content (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  const std::string content = req->content()->str();
+  if (content.empty()) {
+    SYSLOG_WARN("ChatHandler empty content (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  if (content.size() > kMaxChatLength) {
+    SYSLOG_WARN("ChatHandler content too long (client_id={}, len={})",
+                ctx.client_id, content.size());
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  if (content.size() > 1 && content[0] == '@') {
+    co_await HandleHot(std::move(ctx), req->channel(), req->target_id(), content);
+    co_return;
+  }
+
+  co_await HandleHot(std::move(ctx), req->channel(), req->target_id(), content);
 }
 
-void ChatHandler::OnError(const HandlerContext& context,
-                          uint16_t msg_id,
-                          mir2::common::ErrorCode error_code,
-                          ResponseCallback callback) {
-    BaseHandler::OnError(context, msg_id, error_code, callback);
+Task<void> ChatHandler::HandleHot(HandlerContext ctx,
+                                  mir2::proto::ChatChannel channel,
+                                  uint64_t target_id,
+                                  std::string content) {
+  if (content.empty()) {
+    SYSLOG_WARN("ChatHandler empty content (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
 
-    if (msg_id != static_cast<uint16_t>(mir2::common::MsgId::kChatReq)) {
-        if (callback) {
-            callback(ResponseList{});
-        }
-        return;
-    }
+  if (content.size() > kMaxChatLength) {
+    SYSLOG_WARN("ChatHandler content too long (client_id={}, len={})",
+                ctx.client_id, content.size());
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
 
-    ResponseList responses;
-    responses.push_back({context.client_id,
-                         static_cast<uint16_t>(mir2::common::MsgId::kChatRsp),
-                         BuildChatRsp(error_code)});
-    if (callback) {
-        callback(responses);
-    }
+  if (content.size() > 1 && content[0] == '@') {
+    co_await HandleChatCommand(std::move(ctx), content);
+    co_return;
+  }
+
+  switch (channel) {
+    case mir2::proto::ChatChannel::WORLD:
+      co_await HandleWorldChat(std::move(ctx), content);
+      break;
+    case mir2::proto::ChatChannel::PRIVATE:
+      co_await HandlePrivateChat(std::move(ctx), target_id, content);
+      break;
+    case mir2::proto::ChatChannel::TEAM:
+      co_await HandleTeamChat(std::move(ctx), content);
+      break;
+    case mir2::proto::ChatChannel::AREA:
+      co_await HandleAreaChat(std::move(ctx), content);
+      break;
+    case mir2::proto::ChatChannel::GUILD:
+      co_await HandleGuildChat(std::move(ctx), content);
+      break;
+    default:
+      co_await HandleWorldChat(std::move(ctx), content);
+      break;
+  }
 }
 
-void ChatHandler::HandleChat(const HandlerContext& context,
-                             const std::vector<uint8_t>& payload,
-                             ResponseCallback callback) {
-    flatbuffers::Verifier verifier(payload.data(), payload.size());
-    if (!verifier.VerifyBuffer<mir2::proto::ChatReq>(nullptr)) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
+Task<void> ChatHandler::HandleWorldChat(HandlerContext ctx, const std::string& content) {
+  const auto dispatches =
+      chat_service_->SendNormalChat(ctx.client_id, content, aoi_mgr_);
+  co_await SendChatDispatches(static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
+                              dispatches);
+  co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
 
-    const auto* req = flatbuffers::GetRoot<mir2::proto::ChatReq>(payload.data());
-    if (!req || !req->content()) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
+  SYSLOG_DEBUG("ChatHandler world chat sender={} count={}",
+               ctx.client_id, dispatches.size());
+}
 
-    const std::string content = req->content()->str();
-    if (content.empty()) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
+Task<void> ChatHandler::HandlePrivateChat(HandlerContext ctx,
+                                          uint64_t target_id,
+                                          const std::string& content) {
+  if (!FindOnlineCharacterEntity(ecs_registry_, target_id).has_value()) {
+    SYSLOG_WARN("ChatHandler private target offline (client_id={}, target_id={})",
+                ctx.client_id, target_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kTargetNotFound);
+    co_return;
+  }
 
-    const auto channel = req->channel();
-    const uint64_t target_id = req->target_id();
-    const std::string from_name = std::string("Player") + std::to_string(context.client_id);
+  auto dispatches = chat_service_->SendWhisper(ctx.client_id, target_id, content);
+  if (dispatches.empty()) {
+    SYSLOG_WARN("ChatHandler private chat refused (client_id={}, target_id={})",
+                ctx.client_id, target_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kTargetRefused);
+    co_return;
+  }
 
-    ResponseList responses;
-    responses.push_back({context.client_id,
-                         static_cast<uint16_t>(mir2::common::MsgId::kChatRsp),
-                         BuildChatRsp(mir2::common::ErrorCode::kOk)});
+  co_await SendChatDispatches(static_cast<uint16_t>(mir2::common::MsgId::kPrivateChat),
+                              dispatches);
+  co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
 
-    uint16_t message_type = static_cast<uint16_t>(mir2::common::MsgId::kChatReq);
-    std::vector<uint64_t> targets;
+  SYSLOG_DEBUG("ChatHandler private chat sender={} target={} count={}",
+               ctx.client_id, target_id, dispatches.size());
+}
 
-    if (channel == mir2::proto::ChatChannel::PRIVATE) {
-        message_type = static_cast<uint16_t>(mir2::common::MsgId::kPrivateChat);
-        if (!client_registry_.Contains(target_id)) {
-            OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
-                    mir2::common::ErrorCode::kTargetNotFound, std::move(callback));
-            return;
-        }
-        targets.push_back(target_id);
-    } else if (channel == mir2::proto::ChatChannel::GUILD) {
-        message_type = static_cast<uint16_t>(mir2::common::MsgId::kGuildChat);
-        targets = client_registry_.GetAll();
+Task<void> ChatHandler::HandleTeamChat(HandlerContext ctx, const std::string& content) {
+  auto dispatches = chat_service_->SendTeamChat(ctx.client_id, content);
+  if (dispatches.empty()) {
+    SYSLOG_WARN("ChatHandler team chat no party (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kNoParty);
+    co_return;
+  }
+
+  co_await SendChatDispatches(static_cast<uint16_t>(mir2::common::MsgId::kTeamChat),
+                              dispatches);
+  co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
+
+  SYSLOG_DEBUG("ChatHandler team chat sender={} count={}",
+               ctx.client_id, dispatches.size());
+}
+
+Task<void> ChatHandler::HandleAreaChat(HandlerContext ctx, const std::string& content) {
+  const auto dispatches = chat_service_->SendAreaChat(ctx.client_id, content);
+  co_await SendChatDispatches(static_cast<uint16_t>(mir2::common::MsgId::kAreaChat),
+                              dispatches);
+  co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
+
+  SYSLOG_DEBUG("ChatHandler area chat sender={} count={}",
+               ctx.client_id, dispatches.size());
+}
+
+Task<void> ChatHandler::HandleGuildChat(HandlerContext ctx, const std::string& content) {
+  auto dispatches = chat_service_->SendGuildChat(ctx.client_id, content);
+  if (dispatches.empty()) {
+    SYSLOG_WARN("ChatHandler guild chat unavailable (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  co_await SendChatDispatches(static_cast<uint16_t>(mir2::common::MsgId::kGuildChat),
+                              dispatches);
+  co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
+
+  SYSLOG_DEBUG("ChatHandler guild chat sender={} count={}",
+               ctx.client_id, dispatches.size());
+}
+
+Task<void> ChatHandler::HandleChatCommand(HandlerContext ctx, const std::string& content) {
+  auto sender_entity = FindOnlineCharacterEntity(ecs_registry_, ctx.client_id);
+  if (!sender_entity.has_value()) {
+    SYSLOG_WARN("ChatHandler command missing player (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+  auto& chat_pref = EnsureChatPreference(ecs_registry_, *sender_entity);
+
+  size_t space_pos = content.find(' ');
+  std::string cmd = (space_pos != std::string::npos)
+                        ? content.substr(1, space_pos - 1)
+                        : content.substr(1);
+  std::string arg = (space_pos != std::string::npos)
+                        ? content.substr(space_pos + 1)
+                        : "";
+
+  mir2::common::ErrorCode result = mir2::common::ErrorCode::kInvalidAction;
+
+  if (cmd == "block" && !arg.empty()) {
+    auto target_id = FindOnlineCharacterIdByName(ecs_registry_, arg);
+    if (target_id.has_value() && *target_id != ctx.client_id) {
+      if (chat_pref.AddBlock(static_cast<uint32_t>(*target_id))) {
+        result = mir2::common::ErrorCode::kOk;
+      }
     } else {
-        message_type = static_cast<uint16_t>(mir2::common::MsgId::kChatReq);
-        targets = client_registry_.GetAll();
+      result = mir2::common::ErrorCode::kTargetNotFound;
     }
+  } else if (cmd == "unblock" && !arg.empty()) {
+    auto target_id = FindOnlineCharacterIdByName(ecs_registry_, arg);
+    if (target_id.has_value()) {
+      chat_pref.RemoveBlock(static_cast<uint32_t>(*target_id));
+      result = mir2::common::ErrorCode::kOk;
+    } else {
+      result = mir2::common::ErrorCode::kTargetNotFound;
+    }
+  } else if (cmd == "whisper") {
+    if (arg == "on") {
+      chat_pref.hear_whisper = true;
+      result = mir2::common::ErrorCode::kOk;
+    } else if (arg == "off") {
+      chat_pref.hear_whisper = false;
+      result = mir2::common::ErrorCode::kOk;
+    }
+  } else if (cmd == "cry") {
+    if (arg == "on") {
+      chat_pref.hear_cry = true;
+      result = mir2::common::ErrorCode::kOk;
+    } else if (arg == "off") {
+      chat_pref.hear_cry = false;
+      result = mir2::common::ErrorCode::kOk;
+    }
+  } else if (cmd == "guild") {
+    if (arg == "on") {
+      chat_pref.hear_guild_msg = true;
+      result = mir2::common::ErrorCode::kOk;
+    } else if (arg == "off") {
+      chat_pref.hear_guild_msg = false;
+      result = mir2::common::ErrorCode::kOk;
+    }
+  }
 
-    const auto chat_payload = BuildChatMessage(
-        channel, context.client_id, from_name, target_id, content, NowSeconds());
-    for (const auto client_id : targets) {
-        responses.push_back({client_id, message_type, chat_payload});
-    }
-
-    if (callback) {
-        callback(responses);
-    }
+  co_await SendChatResponse(ctx, result);
+  SYSLOG_DEBUG("ChatHandler command={} result={} client_id={}",
+               cmd, static_cast<uint16_t>(result), ctx.client_id);
 }
 
-}  // namespace legend2::handlers
+Task<void> ChatHandler::SendChatResponse(HandlerContext ctx, mir2::common::ErrorCode code) {
+  auto payload = BuildChatRsp(code);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kChatRsp),
+      std::move(payload));
+}
+
+Task<void> ChatHandler::SendChatDispatches(
+    uint16_t msg_id,
+    const mir2::game::chat::ChatDispatchList& dispatches) {
+  for (const auto& dispatch : dispatches) {
+    co_await response_sender_.SendAsync(dispatch.first, msg_id, dispatch.second);
+  }
+}
+
+}  // namespace mir2::logic

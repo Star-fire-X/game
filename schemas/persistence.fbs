@@ -1,0 +1,32 @@
+include "common.fbs";
+namespace mir2.persist;
+
+table CharacterSnapshot {
+  id:uint;
+  account_id:string;
+  name:string;
+  char_class:ubyte;
+  gender:ubyte;
+  level:int;
+  hp:int;
+  max_hp:int;
+  mp:int;
+  max_mp:int;
+  attack:int;
+  defense:int;
+  magic_attack:int;
+  magic_defense:int;
+  speed:int;
+  experience:int;
+  gold:int;
+  map_id:uint;
+  pos_x:int;
+  pos_y:int;
+  equipment_data:[ubyte];
+  inventory_data:[ubyte];
+  skills_data:[ubyte];
+  created_at:long;
+  last_login:long;
+}
+
+root_type CharacterSnapshot;

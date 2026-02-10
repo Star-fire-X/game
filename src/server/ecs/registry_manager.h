@@ -3,8 +3,8 @@
  * @brief 全局 ECS Registry 管理器
  */
 
-#ifndef LEGEND2_SERVER_ECS_REGISTRY_MANAGER_H
-#define LEGEND2_SERVER_ECS_REGISTRY_MANAGER_H
+#ifndef MIR2_SERVER_ECS_REGISTRY_MANAGER_H_
+#define MIR2_SERVER_ECS_REGISTRY_MANAGER_H_
 
 #include "ecs/character_entity_manager.h"
 #include "ecs/world.h"
@@ -73,4 +73,4 @@ class RegistryManager {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_REGISTRY_MANAGER_H
+#endif  // MIR2_SERVER_ECS_REGISTRY_MANAGER_H_

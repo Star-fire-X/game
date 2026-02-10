@@ -3,6 +3,7 @@
 #include <asio/error.hpp>
 #include <asio/io_context.hpp>
 
+#include "common/enums.h"
 #include "mocks/mock_socket.h"
 #include "network/packet_codec.h"
 #include "network/tcp_connection.h"
@@ -48,15 +49,15 @@ TEST(TcpConnectionTest, ReadV1PacketTriggersHandler) {
 
   session->Start();
 
-  std::vector<uint8_t> payload{1, 2, 3, 4};
-  auto encoded = PacketCodec::Encode(42, payload.data(), payload.size());
+  const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+  auto encoded = PacketCodec::Encode(msg_id, nullptr, 0);
   mock_socket->PushReadData(std::move(encoded));
 
   io_context.run();
 
   EXPECT_TRUE(called);
-  EXPECT_EQ(received.msg_id, 42u);
-  EXPECT_EQ(received.payload, payload);
+  EXPECT_EQ(received.msg_id, msg_id);
+  EXPECT_TRUE(received.payload.empty());
 }
 
 TEST(TcpConnectionTest, ReadV2PacketTriggersHandler) {
@@ -84,15 +85,54 @@ TEST(TcpConnectionTest, ReadV2PacketTriggersHandler) {
 
   session->Start();
 
-  std::vector<uint8_t> payload{9, 8, 7};
-  auto encoded = PacketCodec::EncodeV2(77, payload.data(), payload.size(), 0);
+  const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+  auto encoded = PacketCodec::EncodeV2(msg_id, nullptr, 0, 0);
   mock_socket->PushReadData(std::move(encoded));
 
   io_context.run();
 
   EXPECT_TRUE(called);
-  EXPECT_EQ(received.msg_id, 77u);
-  EXPECT_EQ(received.payload, payload);
+  EXPECT_EQ(received.msg_id, msg_id);
+  EXPECT_TRUE(received.payload.empty());
+}
+
+TEST(TcpConnectionTest, TcpDropsKcpFlaggedPacket) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(io_context, &mock_socket);
+  auto session = std::make_shared<TcpSession>(connection);
+  std::weak_ptr<TcpSession> weak_session = session;
+
+  connection->SetReadHandler([weak_session](const uint8_t* data, size_t size) {
+    if (auto locked = weak_session.lock()) {
+      locked->HandleBytes(data, size);
+    }
+  });
+
+  size_t call_count = 0;
+  uint16_t last_msg_id = 0;
+  session->SetMessageHandler([&](const std::shared_ptr<TcpSession>& /*active_session*/,
+                                 const Packet& packet) {
+    ++call_count;
+    last_msg_id = packet.msg_id;
+  });
+
+  session->Start();
+
+  const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+  auto invalid = PacketCodec::EncodeV2(
+      msg_id, nullptr, 0, 1, PacketHeaderV2::kFlagChannelKcp);
+  auto valid = PacketCodec::EncodeV2(
+      msg_id, nullptr, 0, 2, 0);
+
+  mock_socket->PushReadData(std::move(invalid));
+  mock_socket->PushReadData(std::move(valid));
+
+  io_context.run();
+
+  EXPECT_EQ(call_count, 1u);
+  EXPECT_EQ(last_msg_id, msg_id);
+  EXPECT_EQ(session->GetState(), TcpSession::SessionState::kActive);
 }
 
 TEST(TcpConnectionTest, SendWritesEncodedPacket) {
@@ -109,8 +149,55 @@ TEST(TcpConnectionTest, SendWritesEncodedPacket) {
 
   const auto& writes = mock_socket->GetWrites();
   ASSERT_EQ(writes.size(), 1u);
-  const auto expected = PacketCodec::Encode(100, payload.data(), payload.size());
+  const auto expected = PacketCodec::EncodeV2(100, payload.data(), payload.size(), 0);
   EXPECT_EQ(writes.front(), expected);
+}
+
+TEST(TcpConnectionTest, PauseReadBlocksUntilResume) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(io_context, &mock_socket);
+  auto session = std::make_shared<TcpSession>(connection);
+  std::weak_ptr<TcpSession> weak_session = session;
+
+  connection->SetReadHandler([weak_session](const uint8_t* data, size_t size) {
+    if (auto locked = weak_session.lock()) {
+      locked->HandleBytes(data, size);
+    }
+  });
+
+  size_t packet_count = 0;
+  session->SetMessageHandler([&](const std::shared_ptr<TcpSession>&, const Packet&) {
+    ++packet_count;
+  });
+
+  session->Start();
+  const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+  mock_socket->PushReadData(PacketCodec::EncodeV2(msg_id, nullptr, 0, 1));
+  io_context.poll();
+  io_context.restart();
+  EXPECT_EQ(packet_count, 1u);
+
+  connection->PauseRead();
+  io_context.poll();
+  io_context.restart();
+  EXPECT_TRUE(connection->IsReadPaused());
+
+  // PauseRead does not cancel an already in-flight read; only one packet may
+  // still pass before reads are fully blocked.
+  mock_socket->PushReadData(PacketCodec::EncodeV2(msg_id, nullptr, 0, 2));
+  mock_socket->PushReadData(PacketCodec::EncodeV2(msg_id, nullptr, 0, 3));
+  io_context.poll();
+  io_context.restart();
+  EXPECT_EQ(packet_count, 2u);
+
+  connection->ResumeRead();
+  io_context.poll();
+  io_context.restart();
+  EXPECT_FALSE(connection->IsReadPaused());
+
+  io_context.run();
+  EXPECT_EQ(packet_count, 3u);
 }
 
 TEST(TcpConnectionTest, ReadErrorTriggersDisconnect) {
@@ -152,9 +239,10 @@ TEST(TcpConnectionTest, RateLimitExceededMarksSessionLimited) {
 
   session->Start();
 
-  std::vector<uint8_t> payload{0x01};
+  const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
   for (int i = 0; i < 51; ++i) {
-    auto encoded = PacketCodec::Encode(1, payload.data(), payload.size());
+    auto encoded = PacketCodec::EncodeV2(msg_id, nullptr, 0,
+                                         static_cast<uint16_t>(i));
     mock_socket->PushReadData(std::move(encoded));
   }
 
@@ -162,6 +250,40 @@ TEST(TcpConnectionTest, RateLimitExceededMarksSessionLimited) {
 
   EXPECT_TRUE(session->IsRateLimited());
   EXPECT_NE(session->GetState(), TcpSession::SessionState::kActive);
+}
+
+TEST(TcpConnectionTest, BypassRateLimitKeepsSessionActive) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(io_context, &mock_socket);
+  auto session = std::make_shared<TcpSession>(connection);
+
+  std::weak_ptr<TcpSession> weak_session = session;
+  connection->SetReadHandler([weak_session](const uint8_t* data, size_t size) {
+    if (auto locked = weak_session.lock()) {
+      locked->HandleBytes(data, size);
+    }
+  });
+  connection->SetDisconnectHandler([weak_session](uint64_t id) {
+    if (auto locked = weak_session.lock()) {
+      locked->HandleDisconnect(id);
+    }
+  });
+
+  session->SetBypassRateLimit(true);
+  session->Start();
+
+  const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+  for (int i = 0; i < 500; ++i) {
+    auto encoded = PacketCodec::EncodeV2(msg_id, nullptr, 0,
+                                         static_cast<uint16_t>(i));
+    mock_socket->PushReadData(std::move(encoded));
+  }
+
+  io_context.run();
+
+  EXPECT_FALSE(session->IsRateLimited());
+  EXPECT_EQ(session->GetState(), TcpSession::SessionState::kActive);
 }
 
 }  // namespace mir2::network

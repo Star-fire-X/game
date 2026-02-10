@@ -5,14 +5,18 @@
  * 合并角色身份、属性、状态与背包数据，便于统一管理。
  */
 
-#ifndef LEGEND2_SERVER_ECS_CHARACTER_COMPONENTS_H
-#define LEGEND2_SERVER_ECS_CHARACTER_COMPONENTS_H
+#ifndef MIR2_SERVER_ECS_CHARACTER_COMPONENTS_H_
+#define MIR2_SERVER_ECS_CHARACTER_COMPONENTS_H_
 
 #include "common/types.h"
-
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <climits>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace mir2::ecs {
 
@@ -37,6 +41,9 @@ struct CharacterAttributesComponent {
     int max_hp = 0;       ///< 最大HP
     int mp = 0;           ///< 当前MP
     int max_mp = 0;       ///< 最大MP
+    int inc_health = 0;   ///< 渐进恢复累计HP
+    int inc_spell = 0;    ///< 渐进恢复累计MP
+    bool next_free_curse_item = false; ///< 下次脱装备可解除诅咒
     int attack = 0;       ///< 物理攻击
     int defense = 0;      ///< 物理防御
     int magic_attack = 0; ///< 魔法攻击
@@ -44,6 +51,7 @@ struct CharacterAttributesComponent {
     int speed = 0;        ///< 移动/攻速
     int gold = 0;         ///< 金币数量
     int luck = 0;         ///< 幸运值
+    int pk_level = 0;     ///< PK等级(>=2 红名)
     int hit_plus = 0;     ///< 力量加成
     uint8_t life_attrib = 0; ///< 生命属性(0=普通,1=不死)
     int anti_poison = 0;  ///< 抗毒
@@ -73,18 +81,92 @@ struct CharacterStateComponent {
     uint32_t map_id = 1;                 ///< 当前地图ID
     mir2::common::Position position = {100, 100}; ///< 当前位置
     mir2::common::Direction direction = mir2::common::Direction::DOWN; ///< 朝向
+    bool is_in_activity = false;         ///< 是否在活动中
     int64_t created_at = 0;              ///< 创建时间戳
     int64_t last_login = 0;              ///< 最后登录时间戳
     int64_t last_active = 0;             ///< 最近活跃时间戳
+    int64_t last_random_scroll_time_ms = 0; ///< 上次随机传送卷使用时间(ms)
+    int64_t last_trade_close_time_ms = 0; ///< 交易窗口关闭时间(ms)
+    bool is_online = false;              ///< 在线态（登录=true，断线=false）
 };
 
 /**
- * @brief 背包与装备组件（JSON）
+ * @brief 聊天偏好组件
+ */
+struct ChatPreferenceComponent {
+    static constexpr std::size_t kMaxBlockCount = 10;
+
+    bool hear_whisper = true;
+    bool hear_cry = true;
+    bool hear_guild_msg = true;
+    std::vector<uint32_t> whisper_block_list;
+
+    bool IsBlocked(uint32_t character_id) const {
+        return std::find(whisper_block_list.begin(),
+                         whisper_block_list.end(),
+                         character_id) != whisper_block_list.end();
+    }
+
+    bool AddBlock(uint32_t character_id) {
+        if (character_id == 0 || IsBlocked(character_id) ||
+            whisper_block_list.size() >= kMaxBlockCount) {
+            return false;
+        }
+        whisper_block_list.push_back(character_id);
+        return true;
+    }
+
+    void RemoveBlock(uint32_t character_id) {
+        whisper_block_list.erase(
+            std::remove(whisper_block_list.begin(),
+                        whisper_block_list.end(),
+                        character_id),
+            whisper_block_list.end());
+    }
+};
+
+/**
+ * @brief 物品实例数据（原生 C++ 存储）
+ */
+struct ItemData {
+    uint64_t instance_id = 0;
+    uint32_t item_id = 0;
+    int count = 1;
+    int durability = 0;
+    int max_durability = 0;
+    int enhancement_level = 0;
+
+    // 以下字段保留运行态兼容，避免能力回退。
+    int shape = 0;
+    int looks = 0;
+    int std_mode = 0;
+    int luck = 0;
+    int equip_slot = -1;
+};
+
+/**
+ * @brief 技能数据（原生 C++ 存储）
+ */
+struct SkillData {
+    uint32_t skill_id = 0;
+    uint8_t level = 0;
+    uint64_t cooldown_end_ms = 0;
+};
+
+/**
+ * @brief 背包与装备组件（原生 C++ 存储）
+ *
+ * 说明：
+ * - 运行时业务逻辑只操作原生结构；
+ * - JSON/FlatBuffers 仅在 DB 与网络边界进行转换。
  */
 struct InventoryComponent {
-    std::string inventory_json = "[]"; ///< 背包数据（JSON格式）
-    std::string equipment_json = "{}"; ///< 装备数据（JSON格式）
-    std::string skills_json = "[]";    ///< 技能数据（JSON格式）
+    static constexpr std::size_t kMaxSlots = 46;
+    static constexpr std::size_t kMaxEquipmentSlots = 13;
+
+    std::array<std::optional<ItemData>, kMaxSlots> slots;
+    std::array<std::optional<ItemData>, kMaxEquipmentSlots> equipment;
+    std::vector<SkillData> skills;
 };
 
 /**
@@ -102,4 +184,4 @@ struct DirtyComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_CHARACTER_COMPONENTS_H
+#endif  // MIR2_SERVER_ECS_CHARACTER_COMPONENTS_H_

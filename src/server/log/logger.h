@@ -3,9 +3,10 @@
  * @brief 日志系统
  */
 
-#ifndef MIR2_LOG_LOGGER_H
-#define MIR2_LOG_LOGGER_H
+#ifndef MIR2_LOG_LOGGER_H_
+#define MIR2_LOG_LOGGER_H_
 
+#include <mutex>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -66,6 +67,7 @@ class Logger : public core::Singleton<Logger> {
  private:
   Logger() = default;
 
+  mutable std::mutex mutex_;
   std::unordered_map<LogCategory, std::shared_ptr<spdlog::logger>> loggers_;
 };
 
@@ -85,4 +87,4 @@ class Logger : public core::Singleton<Logger> {
 
 }  // namespace mir2::log
 
-#endif  // MIR2_LOG_LOGGER_H
+#endif  // MIR2_LOG_LOGGER_H_

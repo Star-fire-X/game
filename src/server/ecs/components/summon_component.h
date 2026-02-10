@@ -3,8 +3,8 @@
  * @brief ECS 召唤相关组件定义
  */
 
-#ifndef LEGEND2_SERVER_ECS_SUMMON_COMPONENT_H
-#define LEGEND2_SERVER_ECS_SUMMON_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_SUMMON_COMPONENT_H_
+#define MIR2_SERVER_ECS_SUMMON_COMPONENT_H_
 
 #include <cstdint>
 #include <vector>
@@ -12,6 +12,15 @@
 #include <entt/entt.hpp>
 
 namespace mir2::ecs {
+
+/**
+ * @brief 召唤兽AI状态
+ */
+enum class SummonAIState : uint8_t {
+    IDLE = 0,
+    FOLLOW = 1,
+    ATTACK = 2,
+};
 
 /**
  * @brief 召唤者组件（附加在角色上）
@@ -31,8 +40,14 @@ struct SummonComponent {
     int64_t summon_time_ms = 0;
     int64_t loyalty_expire_time_ms = 0;  ///< 忠诚度过期时间（MasterRoyaltyTime）
     int summon_experience = 0;            ///< 召唤兽经验值（SlaveExp）
+
+    // AI相关字段
+    SummonAIState ai_state = SummonAIState::IDLE;
+    entt::entity target_entity = entt::null;
+    int64_t last_ai_update_ms = 0;
+    int64_t next_attack_time_ms = 0;
 };
 
 } // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SUMMON_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_SUMMON_COMPONENT_H_

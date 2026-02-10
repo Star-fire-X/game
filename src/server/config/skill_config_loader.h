@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_SKILL_CONFIG_LOADER_H
-#define LEGEND2_SERVER_SKILL_CONFIG_LOADER_H
+#ifndef MIR2_SERVER_SKILL_CONFIG_LOADER_H_
+#define MIR2_SERVER_SKILL_CONFIG_LOADER_H_
 
 #include "ecs/components/skill_template_component.h"
 #include <string>

@@ -34,6 +34,19 @@ TEST_F(SceneManagerTest, CreateMap) {
   EXPECT_EQ(scene_manager_->MapCount(), 1);
 }
 
+TEST_F(SceneManagerTest, CreateMapAppliesConfiguredWalkabilityFixes) {
+  SceneManager::MapConfig config{3, 400, 400};
+  config.load_walkability = false;
+  config.fixes = {{329, 332}, {329, 333}, {330, 332}, {330, 333}};
+
+  auto* map = scene_manager_->CreateMap(config);
+  ASSERT_NE(map, nullptr);
+  EXPECT_FALSE(map->IsWalkable(329, 332));
+  EXPECT_FALSE(map->IsWalkable(329, 333));
+  EXPECT_FALSE(map->IsWalkable(330, 332));
+  EXPECT_FALSE(map->IsWalkable(330, 333));
+}
+
 // 测试重复创建地图
 TEST_F(SceneManagerTest, CreateMapDuplicate) {
   SceneManager::MapConfig config{1, 100, 100};
@@ -177,6 +190,65 @@ TEST_F(SceneManagerTest, EntityCrossMapMovement) {
   auto* map2 = scene_manager_->GetMap(2);
   EXPECT_FALSE(map1->HasEntity(entity));
   EXPECT_TRUE(map2->HasEntity(entity));
+}
+
+// 测试 TeleportEntity 跨地图成功
+TEST_F(SceneManagerTest, TeleportEntityCrossMapSuccess) {
+  SceneManager::MapConfig config1{1, 100, 100};
+  SceneManager::MapConfig config2{2, 200, 200};
+  config1.load_walkability = false;
+  config2.load_walkability = false;
+  scene_manager_->CreateMap(config1);
+  scene_manager_->CreateMap(config2);
+
+  entt::entity entity = entt::entity{1};
+  ASSERT_TRUE(scene_manager_->AddEntityToMap(1, entity, 10, 20));
+
+  EXPECT_TRUE(scene_manager_->TeleportEntity(entity, 2, 50, 60));
+
+  auto* map1 = scene_manager_->GetMap(1);
+  auto* map2 = scene_manager_->GetMap(2);
+  ASSERT_NE(map1, nullptr);
+  ASSERT_NE(map2, nullptr);
+  EXPECT_FALSE(map1->HasEntity(entity));
+  EXPECT_TRUE(map2->HasEntity(entity));
+  EXPECT_EQ(scene_manager_->GetMapByEntity(entity)->GetMapId(), 2);
+
+  int32_t x = 0;
+  int32_t y = 0;
+  ASSERT_TRUE(map2->GetEntityPosition(entity, x, y));
+  EXPECT_EQ(x, 50);
+  EXPECT_EQ(y, 60);
+}
+
+// 测试 TeleportEntity 失败时保持原状态（原子性）
+TEST_F(SceneManagerTest, TeleportEntityFailureKeepsEntityInSourceMap) {
+  SceneManager::MapConfig config1{1, 100, 100};
+  SceneManager::MapConfig config2{2, 200, 200};
+  config1.load_walkability = false;
+  config2.load_walkability = false;
+  scene_manager_->CreateMap(config1);
+  scene_manager_->CreateMap(config2);
+
+  entt::entity entity = entt::entity{1};
+  ASSERT_TRUE(scene_manager_->AddEntityToMap(1, entity, 10, 20));
+
+  // 地图2为 200x200，(250,250) 非法
+  EXPECT_FALSE(scene_manager_->TeleportEntity(entity, 2, 250, 250));
+
+  auto* map1 = scene_manager_->GetMap(1);
+  auto* map2 = scene_manager_->GetMap(2);
+  ASSERT_NE(map1, nullptr);
+  ASSERT_NE(map2, nullptr);
+  EXPECT_TRUE(map1->HasEntity(entity));
+  EXPECT_FALSE(map2->HasEntity(entity));
+  EXPECT_EQ(scene_manager_->GetMapByEntity(entity)->GetMapId(), 1);
+
+  int32_t x = 0;
+  int32_t y = 0;
+  ASSERT_TRUE(map1->GetEntityPosition(entity, x, y));
+  EXPECT_EQ(x, 10);
+  EXPECT_EQ(y, 20);
 }
 
 // 测试销毁地图

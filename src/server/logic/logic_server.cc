@@ -1,6 +1,7 @@
 #include "logic/logic_server.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <future>
@@ -16,7 +17,8 @@
 #include "common/protocol/message_codec.h"
 #include "config/config_manager.h"
 #include "core/utils.h"
-#include "db/storage_engine_backend.h"
+#include "storage_engine/backends/account_storage_backend.h"
+#include "storage_engine/backends/storage_engine_backend.h"
 #include "ecs/components/entity_version_component.h"
 #include "ecs/character_snapshot_codec.h"
 #include "ecs/registry_manager.h"
@@ -37,7 +39,6 @@
 #include "logic/handlers/attack_handler.h"
 #include "logic/handlers/character/character_handler.h"
 #include "logic/handlers/chat/chat_handler.h"
-#include "logic/handlers/combat/combat_handler.h"
 #include "logic/handlers/guild/guild_handler.h"
 #include "logic/handlers/item/item_handler.h"
 #include "logic/handlers/login/login_handler.h"
@@ -48,14 +49,14 @@
 #include "logic/response_sender.h"
 #include "logic/services/ecs_combat_service.h"
 #include "logic/services/ecs_inventory_service.h"
+#include "logic/services/player_presence_service.h"
+#include "logic/services/session_role_store.h"
 #include "logic/services/storage_login_service.h"
 #include "monitor/metrics.h"
 #include "network/network_manager.h"
 #include "network/tcp_session.h"
 #include "storage_engine/storage_engine.h"
-#include "world/role_store.h"
 #include "ecs/systems/guild_system.h"
-#include "game/entity/player_manager.h"
 #include "game/guild/guild_manager.h"
 #include "game/map/aoi_manager.h"
 #include "guild_generated.h"
@@ -65,14 +66,10 @@
 
 namespace mir2::logic {
 
-struct WorldSystemBundle {
-  bool ecs_systems_registered = false;
-  std::unique_ptr<ecs::EffectSystem> effect_system;
-  std::unique_ptr<ecs::SkillSystem> skill_system;
-  std::unique_ptr<ecs::MonsterAISystem> monster_ai_system;
-  std::unique_ptr<ecs::MonsterDropSystem> monster_drop_system;
-  ecs::TeleportSystem* teleport_system = nullptr;
-};
+WorldSystemBundle::WorldSystemBundle() = default;
+WorldSystemBundle::~WorldSystemBundle() = default;
+WorldSystemBundle::WorldSystemBundle(WorldSystemBundle&&) noexcept = default;
+WorldSystemBundle& WorldSystemBundle::operator=(WorldSystemBundle&&) noexcept = default;
 
 namespace {
 constexpr auto kTickInterval = std::chrono::milliseconds(50);
@@ -83,11 +80,102 @@ constexpr const char* kMonsterDropTablePath = "config/tables/monsters.yaml";
 constexpr uint32_t kBackpressurePauseMs = 100;
 constexpr int64_t kBackpressureSignalCooldownMs = 100;
 constexpr size_t kBackpressureStateMaxEntries = 8192;
+constexpr size_t kBackpressurePruneBatchSize = 256;
+constexpr size_t kBackpressureStateHardCapEntries = 16384;
 constexpr size_t kPlayerMailboxMaxPending = 100;
+constexpr auto kExecutorDrainTimeout = std::chrono::seconds(10);
+constexpr const char* kMetricLegacyFallbackTotal =
+    "logic.hot_event.legacy_fallback_total";
+constexpr const char* kMetricArenaFallbackTotal =
+    "logic.hot_event.arena_fallback_total";
+constexpr const char* kMetricQueueFullFallbackTotal =
+    "logic.hot_event.queue_full_fallback_total";
+constexpr const char* kMetricMailboxBatchSize = "logic.mailbox.batch_size";
+constexpr const char* kMetricMailboxBatchPlayers = "logic.mailbox.batch_players";
+constexpr const char* kMetricMailboxOverflowTotal = "logic.mailbox.overflow_total";
 
-world::RoleRecord BuildRoleRecordFromSnapshot(const common::CharacterData& data,
-                                              uint32_t fallback_player_id) {
-  world::RoleRecord record;
+constexpr std::array<uint16_t, 1> kLoginHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kLoginReq)};
+constexpr std::array<uint16_t, 1> kMovementHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kMoveReq)};
+constexpr std::array<uint16_t, 1> kAttackHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kAttackReq)};
+constexpr std::array<uint16_t, 1> kSkillHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kSkillReq)};
+constexpr std::array<uint16_t, 4> kCharacterHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kRoleListReq),
+    static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
+    static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
+    static_cast<uint16_t>(common::MsgId::kLogout)};
+constexpr std::array<uint16_t, 1> kChatHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kChatReq)};
+constexpr std::array<uint16_t, 3> kItemHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kPickupItemReq),
+    static_cast<uint16_t>(common::MsgId::kUseItemReq),
+    static_cast<uint16_t>(common::MsgId::kDropItemReq)};
+constexpr std::array<uint16_t, 5> kGuildHandlerMsgIds = {
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR),
+    static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR)};
+constexpr std::array<uint16_t, 2> kNpcHandlerMsgIds = {
+    static_cast<uint16_t>(common::MsgId::kNpcInteractReq),
+    static_cast<uint16_t>(common::MsgId::kNpcMenuSelect)};
+
+struct PlaceholderBinding {
+  uint16_t msg_id;
+  const char* name;
+};
+
+constexpr std::array<PlaceholderBinding, 8> kPlaceholderBindings = {{
+    {static_cast<uint16_t>(common::MsgId::kEquipReq), "equip_req"},
+    {static_cast<uint16_t>(common::MsgId::kUnequipReq), "unequip_req"},
+    {static_cast<uint16_t>(common::MsgId::kGuildChat), "guild_chat"},
+    {static_cast<uint16_t>(mir2::proto::GuildMessageType::KICK), "guild_kick"},
+    {static_cast<uint16_t>(mir2::proto::GuildMessageType::MAKE_ALLY),
+     "guild_make_ally"},
+    {static_cast<uint16_t>(mir2::proto::GuildMessageType::BREAK_ALLY),
+     "guild_break_ally"},
+    {static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_NOTICE),
+     "guild_update_notice"},
+    {static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
+     "guild_update_rank"},
+}};
+
+bool IsAuthWhitelistedMsgId(uint16_t msg_id) {
+  switch (static_cast<common::MsgId>(msg_id)) {
+    case common::MsgId::kLoginReq:
+    case common::MsgId::kHeartbeat:
+    case common::MsgId::kLogout:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsAuthWhitelistedEvent(const events::HotEvent& event) {
+  if (event.type == events::HotEventType::kHeartbeat) {
+    return true;
+  }
+  return IsAuthWhitelistedMsgId(event.msg_id);
+}
+
+bool ShouldFallbackOnQueueFull(uint16_t msg_id) {
+  // Heartbeat/chat are best-effort under overload. Other messages should take
+  // legacy fallback to avoid dropping critical gameplay/account operations.
+  switch (static_cast<common::MsgId>(msg_id)) {
+    case common::MsgId::kHeartbeat:
+    case common::MsgId::kChatReq:
+      return false;
+    default:
+      return true;
+  }
+}
+
+RoleRecord BuildRoleRecordFromSnapshot(const common::CharacterData& data,
+                                       uint32_t fallback_player_id) {
+  RoleRecord record;
   record.player_id = data.id != 0 ? data.id : fallback_player_id;
   record.name = data.name.empty()
                     ? std::string("Player") + std::to_string(record.player_id)
@@ -160,7 +248,13 @@ bool LogicServer::Initialize(const std::string& config_path) {
   }
   CrashHandler::Initialize();
 
-  const auto& server_config = config::ConfigManager::Instance().GetServerConfig();
+  auto server_config = config::ConfigManager::Instance().GetServerConfig();
+  if (server_config.io_threads != 1) {
+    SYSLOG_WARN(
+        "LogicServer forcing io_threads=1 for ECS/thread-safety (configured={})",
+        server_config.io_threads);
+    server_config.io_threads = 1;
+  }
   if (!app_.Initialize(server_config)) {
     SYSLOG_ERROR("LogicServer application init failed");
     return false;
@@ -178,10 +272,6 @@ bool LogicServer::Initialize(const std::string& config_path) {
   }
 
   network_ = std::make_unique<network::NetworkManager>(app_.GetIoContext());
-  if (!network_->Start(server_config.bind_ip, server_config.port, server_config.max_connections)) {
-    SYSLOG_ERROR("LogicServer network start failed");
-    return false;
-  }
 
   executor_ = std::make_unique<CoroutineExecutor>(app_.GetIoContext());
   prewarm_manager_ = std::make_unique<PrewarmManager>(*executor_);
@@ -189,8 +279,7 @@ bool LogicServer::Initialize(const std::string& config_path) {
       [this](const PrewarmEntry& entry) {
         return RestoreSessionFromPrewarm(entry.client_id, entry.player_id, entry.account_id);
       });
-  role_store_ = std::make_unique<world::RoleStore>();
-  RegisterHandlers();
+  role_store_ = std::make_unique<RoleStore>();
 
   io_context_ = &app_.GetIoContext();
   tick_timer_ = std::make_unique<asio::steady_timer>(*io_context_);
@@ -198,9 +287,18 @@ bool LogicServer::Initialize(const std::string& config_path) {
   RegisterSignalHandlers();
 
   const auto& db_config = config::ConfigManager::Instance().GetDatabaseConfig();
-  auto backend = std::make_unique<db::StorageEngineBackend>(db_config);
-  if (!backend->Initialize()) {
+  auto storage_pool = std::make_shared<db::PgConnectionPool>();
+  auto kv_backend =
+      std::make_unique<db::StorageEngineBackend>(db_config, storage_pool);
+  if (!kv_backend->Initialize()) {
     SYSLOG_ERROR("StorageEngine backend init failed");
+    return false;
+  }
+  auto backend =
+      std::make_unique<db::AccountStorageBackend>(
+          std::move(kv_backend), db_config, storage_pool);
+  if (!backend->Initialize()) {
+    SYSLOG_ERROR("AccountStorageBackend init failed");
     return false;
   }
 
@@ -212,6 +310,8 @@ bool LogicServer::Initialize(const std::string& config_path) {
     return false;
   }
 
+  RegisterHandlers();
+
   if (auto* storage_login_service =
           dynamic_cast<StorageLoginService*>(login_service_.get())) {
     storage_login_service->SetStorageEngine(&storage_engine::StorageEngine::Instance());
@@ -219,6 +319,11 @@ bool LogicServer::Initialize(const std::string& config_path) {
 
   if (!storage_engine::StorageEngine::Instance().PerformStartupRecovery()) {
     SYSLOG_WARN("StorageEngine startup recovery had errors");
+  }
+
+  if (!network_->Start(server_config.bind_ip, server_config.port, server_config.max_connections)) {
+    SYSLOG_ERROR("LogicServer network start failed");
+    return false;
   }
 
   SYSLOG_INFO("LogicServer initialized");
@@ -237,21 +342,51 @@ void LogicServer::Run() {
     running_.store(false);
     return;
   }
+
+  // Initialize() may run on a bootstrap thread while io_context callbacks run
+  // on Application worker threads. Rebind CharacterEntityManager on the actual
+  // io thread that executes Tick/handlers.
+  if (registry_manager_) {
+    std::promise<void> bind_promise;
+    auto bind_future = bind_promise.get_future();
+    asio::post(*io_context_, [this, promise = std::move(bind_promise)]() mutable {
+      logic_thread_id_ = std::this_thread::get_id();
+      if (registry_manager_) {
+        registry_manager_->GetCharacterManager().BindToCurrentThread();
+      }
+      promise.set_value();
+    });
+    bind_future.wait();
+  }
+
   StartTick();
   SYSLOG_INFO("LogicServer running");
 
-  io_context_->run();
+  // Application already owns io_context threads. Keep Run() blocked until
+  // shutdown without busy polling.
+  {
+    std::unique_lock<std::mutex> lock(run_state_mutex_);
+    run_state_cv_.wait(lock, [this]() {
+      return stopping_.load(std::memory_order_acquire);
+    });
+  }
 
   Shutdown();
 }
 
 void LogicServer::Shutdown() {
   if (shutdown_called_.exchange(true)) {
+    run_state_cv_.notify_all();
     return;
   }
 
   running_.store(false);
   stopping_.store(true);
+  run_state_cv_.notify_all();
+
+  if (executor_) {
+    executor_->StopAccepting();
+  }
 
   if (tick_timer_) {
     tick_timer_->cancel();
@@ -263,6 +398,13 @@ void LogicServer::Shutdown() {
 
   if (network_) {
     network_->Stop();
+  }
+
+  if (executor_) {
+    const bool drained = executor_->DrainAndJoin(kExecutorDrainTimeout);
+    if (!drained) {
+      SYSLOG_WARN("LogicServer shutdown: coroutine executor drain timed out");
+    }
   }
 
   // Flush dirty character data before tearing down registries.
@@ -282,10 +424,7 @@ void LogicServer::Shutdown() {
   scene_manager_.reset();
   registry_manager_ = nullptr;
 
-  if (io_context_) {
-    io_context_->stop();
-  }
-
+  app_.ReleaseWorkGuard();
   app_.Shutdown();
   handler_registry_.reset();
   hot_event_pipeline_.reset();
@@ -296,7 +435,7 @@ void LogicServer::Shutdown() {
   movement_handler_.reset();
   character_handler_.reset();
   chat_handler_.reset();
-  combat_handler_.reset();
+  player_presence_service_.reset();
   item_handler_.reset();
   guild_handler_.reset();
   npc_command_handler_.reset();
@@ -314,8 +453,8 @@ void LogicServer::Shutdown() {
   tick_timer_.reset();
   signal_set_.reset();
   io_context_ = nullptr;
+  logic_thread_id_ = std::thread::id();
   CrashHandler::Shutdown();
-  log::Logger::Instance().Shutdown();
 }
 
 void LogicServer::StartTick() {
@@ -366,7 +505,20 @@ void LogicServer::RegisterHandlers() {
     handler_registry_ = std::make_unique<HandlerRegistry>(*executor_);
   }
   if (network_ && !response_sender_) {
-    response_sender_ = std::make_unique<ResponseSender>(*network_);
+    response_sender_ = std::make_unique<ResponseSender>(
+        *network_,
+        [this](uint64_t client_id, uint16_t msg_id, const std::vector<uint8_t>& payload) {
+          const auto routed_payload = common::BuildRoutedMessage(client_id, msg_id, payload);
+          if (auto gateway = GetGatewaySession()) {
+            gateway->Send(
+                static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage),
+                routed_payload);
+            return;
+          }
+          network_->Broadcast(
+              static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage),
+              routed_payload);
+        });
   }
   if (registry_manager_ && !ecs_combat_service_) {
     ecs_combat_service_ = std::make_unique<EcsCombatService>(*registry_manager_);
@@ -389,17 +541,20 @@ void LogicServer::RegisterHandlers() {
   if (executor_ && !login_service_) {
     login_service_ = std::make_unique<StorageLoginService>(*executor_, nullptr);
   }
-  if (executor_ && response_sender_ && login_service_ && !login_handler_) {
+  if (executor_ && response_sender_ && login_service_ && role_store_ && !login_handler_) {
     login_handler_ = std::make_unique<LoginHandler>(*executor_,
                                                     *response_sender_,
-                                                    *login_service_);
+                                                    *login_service_,
+                                                    client_registry_,
+                                                    *role_store_);
   }
   if (executor_ && response_sender_ && registry_manager_ && role_store_ && !character_handler_) {
     auto& character_manager = registry_manager_->GetCharacterManager();
     character_handler_ = std::make_unique<CharacterHandler>(*executor_,
                                                             *response_sender_,
                                                             character_manager,
-                                                            *role_store_);
+                                                            *role_store_,
+                                                            client_registry_);
   }
   uint32_t default_map_id = 1;
   const auto& combat_config = config::ConfigManager::Instance().GetCombatConfig();
@@ -441,34 +596,36 @@ void LogicServer::RegisterHandlers() {
     SYSLOG_WARN("LogicServer using fallback AOI manager for chat");
   }
 
-  if (executor_ && response_sender_ && ecs_combat_service_ && !combat_handler_) {
-    combat_handler_ = std::make_unique<CombatHandler>(*executor_,
-                                                      *response_sender_,
-                                                      *ecs_combat_service_);
-  }
-
   if (executor_ && response_sender_ && ecs_inventory_service_ && !item_handler_) {
     item_handler_ = std::make_unique<ItemHandler>(*executor_,
                                                   *response_sender_,
                                                   *ecs_inventory_service_);
   }
 
-  if (executor_ && response_sender_ && default_registry && chat_aoi && !chat_handler_) {
-    auto& player_mgr = mir2::game::entity::PlayerManager::Instance();
+  if (!player_presence_service_) {
+    if (!default_registry) {
+      SYSLOG_ERROR("LogicServer missing default ECS registry for PlayerPresenceService");
+      return;
+    }
+    player_presence_service_ = PlayerPresenceService::CreateDefault(*default_registry);
+  }
+
+  if (executor_ && response_sender_ && default_registry && chat_aoi &&
+      player_presence_service_ && !chat_handler_) {
     chat_handler_ = std::make_unique<ChatHandler>(*executor_,
                                                   *response_sender_,
                                                   client_registry_,
-                                                  player_mgr,
+                                                  *player_presence_service_,
                                                   *chat_aoi,
                                                   *default_registry);
   }
 
-  if (executor_ && response_sender_ && default_registry && guild_system_ && !guild_handler_) {
-    auto& player_mgr = mir2::game::entity::PlayerManager::Instance();
+  if (executor_ && response_sender_ && default_registry && guild_system_ &&
+      player_presence_service_ && !guild_handler_) {
     guild_handler_ = std::make_unique<GuildHandler>(*executor_,
                                                     *response_sender_,
                                                     client_registry_,
-                                                    player_mgr,
+                                                    *player_presence_service_,
                                                     *guild_system_,
                                                     *default_registry);
   }
@@ -490,187 +647,115 @@ void LogicServer::RegisterHandlers() {
                                                           character_manager,
                                                           *scene_manager_,
                                                           default_map_id,
-                                                          legend2::handlers::MovementValidator::Config(),
+                                                          MovementValidator::Config(),
                                                           teleport_system,
                                                           &gate_manager_);
   }
 
-  if (handler_registry_ && login_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kLoginReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return login_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-  }
-
-  if (handler_registry_ && movement_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kMoveReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return movement_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-  }
-
-  if (handler_registry_ && attack_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kAttackReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return attack_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-  }
-
-  if (handler_registry_ && skill_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kSkillReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return skill_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-  }
-
-  if (handler_registry_ && character_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kRoleListReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return character_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return character_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return character_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kLogout),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return character_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-  }
-
-  if (handler_registry_ && chat_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kChatReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return chat_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-  }
-
-  if (handler_registry_ && item_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kPickupItemReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return item_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kUseItemReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return item_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kDropItemReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return item_handler_->HandleMessage(std::move(ctx), payload, payload_size);
-        });
-  }
-
-  if (handler_registry_ && guild_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return guild_handler_->HandleMessage(std::move(ctx),
-                                               static_cast<uint16_t>(
-                                                   mir2::proto::GuildMessageType::CREATE),
-                                               payload,
-                                               payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return guild_handler_->HandleMessage(std::move(ctx),
-                                               static_cast<uint16_t>(
-                                                   mir2::proto::GuildMessageType::JOIN),
-                                               payload,
-                                               payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return guild_handler_->HandleMessage(std::move(ctx),
-                                               static_cast<uint16_t>(
-                                                   mir2::proto::GuildMessageType::LEAVE),
-                                               payload,
-                                               payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return guild_handler_->HandleMessage(std::move(ctx),
-                                               static_cast<uint16_t>(
-                                                   mir2::proto::GuildMessageType::DECLARE_WAR),
-                                               payload,
-                                               payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return guild_handler_->HandleMessage(std::move(ctx),
-                                               static_cast<uint16_t>(
-                                                   mir2::proto::GuildMessageType::CANCEL_WAR),
-                                               payload,
-                                               payload_size);
-        });
-  }
-
-  if (handler_registry_ && npc_command_handler_) {
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kNpcInteractReq),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return npc_command_handler_->HandleMessage(std::move(ctx),
-                                                     static_cast<uint16_t>(
-                                                         common::MsgId::kNpcInteractReq),
-                                                     payload,
-                                                     payload_size);
-        });
-    handler_registry_->RegisterHandler(
-        static_cast<uint16_t>(common::MsgId::kNpcMenuSelect),
-        [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
-          return npc_command_handler_->HandleMessage(std::move(ctx),
-                                                     static_cast<uint16_t>(
-                                                         common::MsgId::kNpcMenuSelect),
-                                                     payload,
-                                                     payload_size);
-        });
-  }
-
   if (handler_registry_) {
-    auto register_placeholder = [this](uint16_t msg_id, const char* name) {
+    auto register_direct_table =
+        [this](const auto& msg_ids, HandlerRegistry::HandlerFunc handler) {
+          for (const uint16_t msg_id : msg_ids) {
+            handler_registry_->RegisterHandler(msg_id, handler);
+          }
+        };
+    auto register_msg_aware_table =
+        [this](const auto& msg_ids,
+               std::function<Task<void>(HandlerContext, uint16_t, const uint8_t*, size_t)>
+                   handler) {
+          for (const uint16_t msg_id : msg_ids) {
+            handler_registry_->RegisterHandler(
+                msg_id,
+                [handler, msg_id](HandlerContext ctx,
+                                  const uint8_t* payload,
+                                  size_t payload_size) {
+                  return handler(std::move(ctx), msg_id, payload, payload_size);
+                });
+          }
+        };
+
+    if (login_handler_) {
+      register_direct_table(
+          kLoginHandlerMsgIds,
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return login_handler_->HandleMessage(std::move(ctx), payload, payload_size);
+          });
+    }
+    if (movement_handler_) {
+      register_direct_table(
+          kMovementHandlerMsgIds,
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return movement_handler_->HandleMessage(std::move(ctx), payload, payload_size);
+          });
+    }
+    if (attack_handler_) {
+      register_direct_table(
+          kAttackHandlerMsgIds,
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return attack_handler_->HandleMessage(std::move(ctx), payload, payload_size);
+          });
+    }
+    if (skill_handler_) {
+      register_direct_table(
+          kSkillHandlerMsgIds,
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return skill_handler_->HandleMessage(std::move(ctx), payload, payload_size);
+          });
+    }
+    if (character_handler_) {
+      register_direct_table(
+          kCharacterHandlerMsgIds,
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return character_handler_->HandleMessage(std::move(ctx), payload, payload_size);
+          });
+    }
+    if (chat_handler_) {
+      register_direct_table(
+          kChatHandlerMsgIds,
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return chat_handler_->HandleMessage(std::move(ctx), payload, payload_size);
+          });
+    }
+    if (item_handler_) {
+      register_direct_table(
+          kItemHandlerMsgIds,
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return item_handler_->HandleMessage(std::move(ctx), payload, payload_size);
+          });
+    }
+    if (guild_handler_) {
+      register_msg_aware_table(
+          kGuildHandlerMsgIds,
+          [this](HandlerContext ctx,
+                 uint16_t msg_id,
+                 const uint8_t* payload,
+                 size_t payload_size) {
+            return guild_handler_->HandleMessage(std::move(ctx), msg_id, payload, payload_size);
+          });
+    }
+    if (npc_command_handler_) {
+      register_msg_aware_table(
+          kNpcHandlerMsgIds,
+          [this](HandlerContext ctx,
+                 uint16_t msg_id,
+                 const uint8_t* payload,
+                 size_t payload_size) {
+            return npc_command_handler_->HandleMessage(
+                std::move(ctx), msg_id, payload, payload_size);
+          });
+    }
+
+    for (const auto& binding : kPlaceholderBindings) {
       handler_registry_->RegisterHandler(
-          msg_id,
-          [name](HandlerContext ctx, const uint8_t*, size_t) -> Task<void> {
+          binding.msg_id,
+          [name = binding.name](HandlerContext ctx, const uint8_t*, size_t) -> Task<void> {
             SYSLOG_WARN("LogicServer placeholder handler {} msg_id={} client_id={}",
                         name,
                         ctx.msg_id,
                         ctx.client_id);
             co_return;
           });
-    };
-
-    register_placeholder(static_cast<uint16_t>(common::MsgId::kEquipReq), "equip_req");
-    register_placeholder(static_cast<uint16_t>(common::MsgId::kUnequipReq), "unequip_req");
-    register_placeholder(static_cast<uint16_t>(common::MsgId::kGuildChat), "guild_chat");
-    register_placeholder(static_cast<uint16_t>(mir2::proto::GuildMessageType::KICK),
-                         "guild_kick");
-    register_placeholder(static_cast<uint16_t>(mir2::proto::GuildMessageType::MAKE_ALLY),
-                         "guild_make_ally");
-    register_placeholder(static_cast<uint16_t>(mir2::proto::GuildMessageType::BREAK_ALLY),
-                         "guild_break_ally");
-    register_placeholder(static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_NOTICE),
-                         "guild_update_notice");
-    register_placeholder(static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
-                         "guild_update_rank");
+    }
   }
 
   if (!network_) {
@@ -700,12 +785,16 @@ HandlerContext LogicServer::BuildHandlerContext(uint64_t client_id) {
   HandlerContext context;
   context.client_id = client_id;
 
-  uint32_t character_id = static_cast<uint32_t>(client_id);
-  if (role_store_) {
-    if (const auto role_id = role_store_->GetRoleId(client_id)) {
-      character_id = static_cast<uint32_t>(*role_id);
-    }
+  if (!role_store_) {
+    return context;
   }
+
+  const auto role_id = role_store_->GetRoleId(client_id);
+  if (!role_id.has_value() ||
+      *role_id > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+    return context;
+  }
+  const uint32_t character_id = static_cast<uint32_t>(*role_id);
 
   if (registry_manager_) {
     auto& character_manager = registry_manager_->GetCharacterManager();
@@ -727,17 +816,24 @@ HandlerContext LogicServer::BuildHandlerContext(uint64_t client_id) {
     }
   }
 
-  if (context.entity == entt::null) {
-    context.entity = static_cast<entt::entity>(static_cast<entt::id_type>(client_id));
-  }
-  if (context.entity_version == 0) {
-    context.entity_version = 1;
-  }
-
   return context;
 }
 
 void LogicServer::DispatchHotEvent(const events::HotEvent& event) {
+  const std::thread::id bound_logic_thread = logic_thread_id_;
+  if (bound_logic_thread != std::thread::id() &&
+      std::this_thread::get_id() != bound_logic_thread) {
+    if (io_context_) {
+      events::HotEvent event_copy = event;
+      asio::post(*io_context_, [this, event = std::move(event_copy)]() mutable {
+        DispatchHotEvent(event);
+      });
+    } else if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    return;
+  }
+
   if (!executor_ || event.client_id == 0) {
     if (hot_event_pipeline_ && event.var_ref.length > 0) {
       hot_event_pipeline_->ReleaseVarPayload(event);
@@ -747,21 +843,19 @@ void LogicServer::DispatchHotEvent(const events::HotEvent& event) {
 
   bool start_runner = false;
   bool overflow = false;
-  {
-    std::lock_guard<std::mutex> lock(mailbox_mutex_);
-    auto& mailbox = player_mailboxes_[event.client_id];
-    if (mailbox.pending_events.size() >= kPlayerMailboxMaxPending) {
-      overflow = true;
-    } else {
-      mailbox.pending_events.push_back(event);
-      if (!mailbox.executing) {
-        mailbox.executing = true;
-        start_runner = true;
-      }
+  auto& mailbox = player_mailboxes_[event.client_id];
+  if (mailbox.pending_events.size() >= kPlayerMailboxMaxPending) {
+    overflow = true;
+  } else {
+    mailbox.pending_events.push_back(event);
+    if (!mailbox.executing) {
+      mailbox.executing = true;
+      start_runner = true;
     }
   }
 
   if (overflow) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricMailboxOverflowTotal);
     if (hot_event_pipeline_ && event.var_ref.length > 0) {
       hot_event_pipeline_->ReleaseVarPayload(event);
     }
@@ -774,33 +868,133 @@ void LogicServer::DispatchHotEvent(const events::HotEvent& event) {
   }
 }
 
-Task<void> LogicServer::RunPlayerMailbox(uint64_t client_id) {
-  for (;;) {
-    events::HotEvent next_event{};
-    bool has_event = false;
-    {
-      std::lock_guard<std::mutex> lock(mailbox_mutex_);
-      auto it = player_mailboxes_.find(client_id);
-      if (it == player_mailboxes_.end()) {
-        co_return;
+void LogicServer::DispatchHotEventsBatch(std::vector<events::HotEvent> events) {
+  const std::thread::id bound_logic_thread = logic_thread_id_;
+  if (bound_logic_thread != std::thread::id() &&
+      std::this_thread::get_id() != bound_logic_thread) {
+    if (io_context_) {
+      asio::post(*io_context_, [this, events = std::move(events)]() mutable {
+        DispatchHotEventsBatch(std::move(events));
+      });
+    } else {
+      for (const auto& event : events) {
+        if (hot_event_pipeline_ && event.var_ref.length > 0) {
+          hot_event_pipeline_->ReleaseVarPayload(event);
+        }
       }
-      if (it->second.pending_events.empty()) {
-        it->second.executing = false;
-        player_mailboxes_.erase(it);
-        co_return;
+    }
+    return;
+  }
+
+  if (events.empty()) {
+    return;
+  }
+
+  monitor::Metrics::Instance().SetGauge(
+      kMetricMailboxBatchSize, static_cast<double>(events.size()));
+
+  if (!executor_) {
+    for (const auto& event : events) {
+      if (hot_event_pipeline_ && event.var_ref.length > 0) {
+        hot_event_pipeline_->ReleaseVarPayload(event);
       }
-      next_event = it->second.pending_events.front();
-      it->second.pending_events.pop_front();
-      has_event = true;
+    }
+    return;
+  }
+
+  std::unordered_map<uint64_t, std::vector<events::HotEvent>> grouped_events;
+  grouped_events.reserve(events.size());
+
+  std::vector<events::HotEvent> overflow_events;
+  overflow_events.reserve(events.size() / 4 + 1);
+
+  for (const auto& event : events) {
+    if (event.client_id == 0) {
+      overflow_events.push_back(event);
+      continue;
+    }
+    grouped_events[event.client_id].push_back(event);
+  }
+
+  monitor::Metrics::Instance().SetGauge(
+      kMetricMailboxBatchPlayers, static_cast<double>(grouped_events.size()));
+
+  std::vector<uint64_t> runners_to_start;
+  runners_to_start.reserve(grouped_events.size());
+
+  for (auto& [client_id, batch] : grouped_events) {
+    bool start_runner = false;
+    size_t accepted = 0;
+    auto& mailbox = player_mailboxes_[client_id];
+    const size_t pending = mailbox.pending_events.size();
+    const size_t available =
+        pending >= kPlayerMailboxMaxPending ? 0 : (kPlayerMailboxMaxPending - pending);
+    accepted = std::min(available, batch.size());
+    for (size_t i = 0; i < accepted; ++i) {
+      mailbox.pending_events.push_back(batch[i]);
+    }
+    if (accepted > 0 && !mailbox.executing) {
+      mailbox.executing = true;
+      start_runner = true;
     }
 
-    if (has_event) {
-      co_await ExecuteQueuedEvent(next_event);
+    if (start_runner) {
+      runners_to_start.push_back(client_id);
     }
+    for (size_t i = accepted; i < batch.size(); ++i) {
+      overflow_events.push_back(batch[i]);
+    }
+  }
+
+  for (const auto& event : overflow_events) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricMailboxOverflowTotal);
+    if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    if (event.client_id != 0) {
+      KickMailboxOverflow(event.client_id);
+    }
+  }
+
+  for (uint64_t client_id : runners_to_start) {
+    executor_->Spawn(RunPlayerMailbox(client_id));
+  }
+}
+
+Task<void> LogicServer::RunPlayerMailbox(uint64_t client_id) {
+  for (;;) {
+    auto it = player_mailboxes_.find(client_id);
+    if (it == player_mailboxes_.end()) {
+      co_return;
+    }
+    if (it->second.pending_events.empty()) {
+      it->second.executing = false;
+      player_mailboxes_.erase(it);
+      co_return;
+    }
+    events::HotEvent next_event = it->second.pending_events.front();
+    it->second.pending_events.pop_front();
+    co_await ExecuteQueuedEvent(next_event);
   }
 }
 
 Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
+  if (!IsAuthWhitelistedEvent(event) &&
+      !client_registry_.Contains(event.client_id)) {
+    if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    SYSLOG_WARN("LogicServer dropped unauthenticated event client_id={} msg_id={} type={}",
+                event.client_id,
+                event.msg_id,
+                static_cast<int>(event.type));
+    co_return;
+  }
+
+  if (event.type == events::HotEventType::kHeartbeat) {
+    co_return;
+  }
+
   auto context = BuildHandlerContext(event.client_id);
 
   switch (event.type) {
@@ -932,6 +1126,7 @@ void LogicServer::HandleServiceHello(const std::shared_ptr<network::TcpSession>&
     return;
   }
 
+  session->SetBypassRateLimit(true);
   SYSLOG_INFO("LogicServer handshake from service={}", static_cast<int>(remote));
   const auto ack = common::BuildServiceHelloAck(common::ServiceType::kLogic, true);
   session->Send(static_cast<uint16_t>(common::InternalMsgId::kServiceHelloAck), ack);
@@ -987,13 +1182,18 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
   }
 
   if (!hot_event_pipeline_) {
-    SYSLOG_ERROR("LogicServer hot_event_pipeline unavailable, drop msg_id={} client_id={}",
-                 routed.msg_id,
-                 routed.client_id);
+    monitor::Metrics::Instance().IncrementCounter(kMetricLegacyFallbackTotal);
+    SYSLOG_WARN("LogicServer hot_event_pipeline unavailable, fallback to legacy dispatch "
+                "msg_id={} client_id={}",
+                routed.msg_id,
+                routed.client_id);
+    DispatchRoutedMessageLegacy(routed.client_id, routed.msg_id, routed.payload);
     return;
   }
 
-  auto context = BuildHandlerContext(routed.client_id);
+  HandlerContext context;
+  context.client_id = routed.client_id;
+  context.msg_id = routed.msg_id;
   const auto enqueue_result = hot_event_pipeline_->TryEnqueue(
       context, routed.msg_id, routed.payload.data(), routed.payload.size());
 
@@ -1001,9 +1201,50 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
     return;
   }
 
+  if (enqueue_result == events::HotEventPipeline::EnqueueResult::kBypass ||
+      enqueue_result == events::HotEventPipeline::EnqueueResult::kArenaExhausted) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricLegacyFallbackTotal);
+    if (enqueue_result == events::HotEventPipeline::EnqueueResult::kArenaExhausted) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricArenaFallbackTotal);
+      SYSLOG_WARN("LogicServer hot arena exhausted, fallback to legacy dispatch "
+                  "msg_id={} client_id={}",
+                  routed.msg_id,
+                  routed.client_id);
+    }
+    if (!DispatchRoutedMessageLegacy(routed.client_id, routed.msg_id, routed.payload)) {
+      SYSLOG_WARN("LogicServer legacy fallback failed msg_id={} client_id={}",
+                  routed.msg_id,
+                  routed.client_id);
+    }
+    return;
+  }
+
+  if (enqueue_result == events::HotEventPipeline::EnqueueResult::kPayloadTooLarge) {
+    SYSLOG_WARN("LogicServer dropped oversized payload msg_id={} client_id={} size={}",
+                routed.msg_id,
+                routed.client_id,
+                routed.payload.size());
+    return;
+  }
+
   if (enqueue_result == events::HotEventPipeline::EnqueueResult::kQueueFull) {
-    SYSLOG_WARN("LogicServer hot queue full, dropping msg_id={} client_id={}",
-                routed.msg_id, routed.client_id);
+    if (ShouldFallbackOnQueueFull(routed.msg_id)) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricQueueFullFallbackTotal);
+      SYSLOG_WARN("LogicServer hot queue full, fallback to legacy dispatch "
+                  "msg_id={} client_id={}",
+                  routed.msg_id,
+                  routed.client_id);
+      if (!DispatchRoutedMessageLegacy(routed.client_id, routed.msg_id, routed.payload)) {
+        SYSLOG_WARN("LogicServer legacy fallback failed msg_id={} client_id={}",
+                    routed.msg_id,
+                    routed.client_id);
+      }
+      return;
+    }
+
+    SYSLOG_WARN("LogicServer hot queue full, dropping non-critical msg_id={} client_id={}",
+                routed.msg_id,
+                routed.client_id);
     const int64_t now_ms = network::TcpSession::NowMs();
     bool should_signal = false;
     {
@@ -1015,13 +1256,35 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
       }
 
       if (backpressure_until_ms_.size() > kBackpressureStateMaxEntries) {
+        size_t scanned = 0;
+        size_t trimmed = 0;
         for (auto it = backpressure_until_ms_.begin();
-             it != backpressure_until_ms_.end();) {
+             it != backpressure_until_ms_.end() &&
+             scanned < kBackpressurePruneBatchSize;) {
+          ++scanned;
           if (it->second <= now_ms) {
             it = backpressure_until_ms_.erase(it);
+            ++trimmed;
           } else {
             ++it;
           }
+        }
+
+        if (backpressure_until_ms_.size() > kBackpressureStateHardCapEntries) {
+          size_t forced_trim = 0;
+          while (backpressure_until_ms_.size() > kBackpressureStateMaxEntries &&
+                 forced_trim < kBackpressurePruneBatchSize &&
+                 !backpressure_until_ms_.empty()) {
+            backpressure_until_ms_.erase(backpressure_until_ms_.begin());
+            ++forced_trim;
+          }
+          trimmed += forced_trim;
+        }
+
+        if (trimmed > 0) {
+          SYSLOG_DEBUG("LogicServer trimmed backpressure state entries={} remaining={}",
+                       trimmed,
+                       backpressure_until_ms_.size());
         }
       }
     }
@@ -1035,6 +1298,32 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
               routed.msg_id,
               routed.client_id,
               static_cast<int>(enqueue_result));
+}
+
+bool LogicServer::DispatchRoutedMessageLegacy(uint64_t client_id,
+                                              uint16_t msg_id,
+                                              const std::vector<uint8_t>& payload) {
+  if (msg_id == static_cast<uint16_t>(common::MsgId::kHeartbeat)) {
+    return true;
+  }
+
+  if (!IsAuthWhitelistedMsgId(msg_id) && !client_registry_.Contains(client_id)) {
+    SYSLOG_WARN("LogicServer dropped unauthenticated routed message client_id={} msg_id={}",
+                client_id,
+                msg_id);
+    return true;
+  }
+
+  if (!handler_registry_) {
+    SYSLOG_WARN("LogicServer legacy dispatch unavailable msg_id={} client_id={} (registry nil)",
+                msg_id,
+                client_id);
+    return false;
+  }
+
+  auto context = BuildHandlerContext(client_id);
+  const uint8_t* raw = payload.empty() ? nullptr : payload.data();
+  return handler_registry_->DispatchMessage(context, msg_id, raw, payload.size());
 }
 
 void LogicServer::SendBackpressurePause(const std::shared_ptr<network::TcpSession>& session,
@@ -1121,20 +1410,27 @@ void LogicServer::HandleContextRestoreResponse(
     return;
   }
 
-  executor_->Spawn([this, entries = std::move(entries)]() mutable -> Task<void> {
-    PrewarmResult result;
-    try {
-      result = co_await prewarm_manager_->Prewarm(entries);
-    } catch (const std::exception& ex) {
-      SYSLOG_WARN("LogicServer prewarm failed: {}", ex.what());
-    } catch (...) {
-      SYSLOG_WARN("LogicServer prewarm failed: unknown error");
-    }
-
+  if (!executor_->Spawn(RunPrewarm(std::move(entries)))) {
     prewarm_running_.store(false);
-    SendLogicReady(result.success, result.duration_ms);
-    co_return;
-  }());
+    SYSLOG_WARN("LogicServer prewarm skipped: coroutine executor is not accepting tasks");
+  }
+}
+
+Task<void> LogicServer::RunPrewarm(std::vector<PrewarmEntry> entries) {
+  PrewarmResult result;
+  try {
+    if (prewarm_manager_) {
+      result = co_await prewarm_manager_->Prewarm(entries);
+    }
+  } catch (const std::exception& ex) {
+    SYSLOG_WARN("LogicServer prewarm failed: {}", ex.what());
+  } catch (...) {
+    SYSLOG_WARN("LogicServer prewarm failed: unknown error");
+  }
+
+  prewarm_running_.store(false);
+  SendLogicReady(result.success, result.duration_ms);
+  co_return;
 }
 
 bool LogicServer::PostToMainThread(std::function<void()> fn) {
@@ -1203,6 +1499,7 @@ bool LogicServer::RestoreSessionFromPrewarm(uint64_t client_id,
 
           character_manager.OnLogin(player_id);
           role_store_->BindClientRole(client_id, player_id);
+          client_registry_.Track(client_id);
 
           uint64_t resolved_account_id = account_id;
           if (resolved_account_id == 0 && snapshot &&
@@ -1218,7 +1515,7 @@ bool LogicServer::RestoreSessionFromPrewarm(uint64_t client_id,
           if (resolved_account_id != 0) {
             role_store_->BindClientAccount(client_id, resolved_account_id);
 
-            world::RoleRecord role;
+            RoleRecord role;
             if (snapshot) {
               role = BuildRoleRecordFromSnapshot(*snapshot, player_id);
             } else {
@@ -1316,7 +1613,13 @@ void LogicServer::OnSignal(const asio::error_code& ec, int signal) {
 
 void LogicServer::RequestStop() {
   if (stopping_.exchange(true)) {
+    run_state_cv_.notify_all();
     return;
+  }
+  run_state_cv_.notify_all();
+
+  if (executor_) {
+    executor_->StopAccepting();
   }
 
   if (tick_timer_) {
@@ -1327,8 +1630,8 @@ void LogicServer::RequestStop() {
     signal_set_->cancel();
   }
 
-  if (io_context_) {
-    io_context_->stop();
+  if (network_) {
+    network_->Stop();
   }
 }
 
@@ -1395,11 +1698,14 @@ void LogicServer::TickWorldSystems(ecs::World& world,
 void LogicServer::Tick(float delta_time) {
   if (hot_event_pipeline_) {
     std::size_t drained = 0;
+    std::vector<events::HotEvent> drained_events;
+    drained_events.reserve(256);
     events::HotEvent event{};
     while (hot_event_pipeline_->TryDequeue(&event)) {
-      DispatchHotEvent(event);
+      drained_events.push_back(event);
       ++drained;
     }
+    DispatchHotEventsBatch(std::move(drained_events));
     hot_event_pipeline_->ObserveDrain(drained);
   }
 

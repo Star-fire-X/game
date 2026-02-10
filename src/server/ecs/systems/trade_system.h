@@ -3,8 +3,8 @@
  * @brief ECS 玩家间交易系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H_
 
 #include <entt/entt.hpp>
 
@@ -75,4 +75,4 @@ class TradeSystem : public System {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H_

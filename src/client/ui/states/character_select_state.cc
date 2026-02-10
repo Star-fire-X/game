@@ -1,10 +1,11 @@
 #include "ui/states/character_select_state.h"
 
+#include "ui/login_screen.h"
 #include "ui/states/login_state_helpers.h"
 
 namespace mir2::ui::screens {
 
-CharacterSelectState::CharacterSelectState(LoginStateContext& context)
+CharacterSelectState::CharacterSelectState(ICharacterSelectStateContext& context)
     : context_(context) {}
 
 void CharacterSelectState::on_enter() {
@@ -27,16 +28,13 @@ void CharacterSelectState::render(UIRenderer& renderer) {
 bool CharacterSelectState::handle_event(const SDL_Event& event) {
     switch (event.type) {
         case SDL_MOUSEMOTION:
-            for (auto& slot : context_.character_slots) {
+            for (auto& slot : context_.get_character_slots()) {
                 update_slot_hover(slot, event.motion.x, event.motion.y);
             }
             return false;
         case SDL_KEYDOWN:
             if (event.key.keysym.sym == SDLK_ESCAPE) {
-                if (context_.transition_to) {
-                    // Transition: character select -> login input.
-                    context_.transition_to(LoginScreenState::LOGIN);
-                }
+                context_.transition_to(LoginScreenState::LOGIN);
                 return true;
             }
             break;
@@ -48,7 +46,7 @@ bool CharacterSelectState::handle_event(const SDL_Event& event) {
 }
 
 void CharacterSelectState::layout() {
-    if (context_.enter_reason == LoginStateEnterReason::LayoutRefresh) {
+    if (context_.get_enter_reason() == LoginStateEnterReason::LayoutRefresh) {
         return;
     }
 
@@ -56,13 +54,7 @@ void CharacterSelectState::layout() {
 }
 
 void CharacterSelectState::render_background() {
-    context_.renderer.clear(Color::black());
-
-    if (context_.background_texture && context_.background_texture->valid()) {
-        Rect bg_src = {0, 0, context_.background_texture->width(), context_.background_texture->height()};
-        Rect bg_dst = {0, 0, context_.screen_width, context_.screen_height};
-        context_.renderer.draw_texture(*context_.background_texture, bg_src, bg_dst);
-    }
+    render_common_background(context_);
 }
 
 } // namespace mir2::ui::screens

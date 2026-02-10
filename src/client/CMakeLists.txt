@@ -1,7 +1,12 @@
 # Legend2 Client CMakeLists.txt
 
 find_package(flatbuffers CONFIG REQUIRED)
-find_program(FLATC flatc REQUIRED)
+# Prefer vcpkg-provided flatc target when available.
+if(TARGET flatbuffers::flatc)
+    set(FLATC $<TARGET_FILE:flatbuffers::flatc>)
+else()
+    find_program(FLATC flatc REQUIRED)
+endif()
 
 set(SCHEMA_DIR ${CMAKE_SOURCE_DIR}/schemas)
 set(GENERATED_SCHEMA_DIR ${CMAKE_BINARY_DIR}/schemas_generated_client)
@@ -57,10 +62,10 @@ add_executable(legend2_client
     # Render module
     render/renderer.cc
     render/renderer.h
+    render/sprite_batch.cc
+    render/sprite_batch.h
     render/camera.h
     render/texture.h
-    render/animation.cc
-    render/animation.h
     render/effect_player.cc
     render/actor_renderer.cc
     render/actor_renderer.h
@@ -78,6 +83,9 @@ add_executable(legend2_client
     # Game module
     game/game_client.cc
     game/game_client.h
+    game/game_client_input.cc
+    game/game_client_input.h
+    game/game_client_network.h
     game/actor_data.cc
     game/client_character.h
     game/entity_manager.cc
@@ -172,6 +180,14 @@ add_executable(legend2_client
     network/network_manager.h
     network/network_client.cc
     network/network_client.h
+    network/dual_channel_client.cc
+    network/dual_channel_client.h
+    network/kcp_upgrade_handler.cc
+    network/kcp_upgrade_handler.h
+    network/udp_transport.cc
+    network/udp_transport.h
+    network/kcp_channel.cc
+    network/kcp_channel.h
 )
 
 add_dependencies(legend2_client legend2_client_schemas)

@@ -162,6 +162,7 @@ public:
     // Header buffer for V2 (16 bytes)
     static constexpr size_t HEADER_BUFFER_SIZE = 16;
     std::array<uint8_t, HEADER_BUFFER_SIZE> header_buffer_{};
+    static constexpr size_t MAX_RECEIVE_QUEUE_SIZE = 1000;
      std::atomic<bool> auto_reconnect_{false};
 
      // Message queues

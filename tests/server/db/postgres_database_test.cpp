@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "db/postgres_database.h"
+#include "storage_engine/backends/postgres/postgres_database.h"
 
 using namespace mir2::db;
 using namespace mir2::common;

@@ -3,8 +3,8 @@
  * @brief EnTT 事件系统封装
  */
 
-#ifndef MIR2_ECS_EVENT_BUS_H
-#define MIR2_ECS_EVENT_BUS_H
+#ifndef MIR2_ECS_EVENT_BUS_H_
+#define MIR2_ECS_EVENT_BUS_H_
 
 #include <entt/entt.hpp>
 #include <functional>
@@ -17,6 +17,9 @@ namespace mir2::ecs {
 class EventBus {
 public:
     explicit EventBus(entt::registry& registry) : registry_(registry) {}
+
+    entt::registry& Registry() { return registry_; }
+    const entt::registry& Registry() const { return registry_; }
 
     template<typename Event>
     void Publish(const Event& event) {
@@ -58,4 +61,4 @@ private:
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_EVENT_BUS_H
+#endif  // MIR2_ECS_EVENT_BUS_H_

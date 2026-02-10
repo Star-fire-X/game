@@ -1,185 +1,176 @@
-#include "handlers/item/item_handler.h"
+#include "logic/handlers/item/item_handler.h"
+
+#include <utility>
+#include <vector>
 
 #include <flatbuffers/flatbuffers.h>
 
 #include "common/enums.h"
-#include "handlers/handler_utils.h"
 #include "item_generated.h"
+#include "log/logger.h"
+#include "logic/handlers/handler_error_utils.h"
+#include "logic/response_sender.h"
 
-namespace legend2::handlers {
+namespace mir2::logic {
 
 namespace {
 
 std::vector<uint8_t> BuildPickupRsp(const ItemPickupResult& result) {
-    flatbuffers::FlatBufferBuilder builder;
-    const auto rsp = mir2::proto::CreatePickupItemRsp(
-        builder, ToProtoError(result.code), result.item_id);
-    builder.Finish(rsp);
-    const uint8_t* data = builder.GetBufferPointer();
-    return std::vector<uint8_t>(data, data + builder.GetSize());
+  flatbuffers::FlatBufferBuilder builder;
+  const auto rsp = mir2::proto::CreatePickupItemRsp(
+      builder, ToProtoError(result.code), result.item_id);
+  builder.Finish(rsp);
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
 std::vector<uint8_t> BuildUseRsp(const ItemUseResult& result) {
-    flatbuffers::FlatBufferBuilder builder;
-    const auto rsp = mir2::proto::CreateUseItemRsp(
-        builder, ToProtoError(result.code), result.slot, result.item_id, result.remaining);
-    builder.Finish(rsp);
-    const uint8_t* data = builder.GetBufferPointer();
-    return std::vector<uint8_t>(data, data + builder.GetSize());
+  flatbuffers::FlatBufferBuilder builder;
+  const auto rsp = mir2::proto::CreateUseItemRsp(
+      builder, ToProtoError(result.code), result.slot, result.item_id, result.remaining);
+  builder.Finish(rsp);
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
 std::vector<uint8_t> BuildDropRsp(const ItemDropResult& result) {
-    flatbuffers::FlatBufferBuilder builder;
-    const auto rsp = mir2::proto::CreateDropItemRsp(
-        builder, ToProtoError(result.code), result.item_id, result.count);
-    builder.Finish(rsp);
-    const uint8_t* data = builder.GetBufferPointer();
-    return std::vector<uint8_t>(data, data + builder.GetSize());
+  flatbuffers::FlatBufferBuilder builder;
+  const auto rsp = mir2::proto::CreateDropItemRsp(
+      builder, ToProtoError(result.code), result.item_id, result.count);
+  builder.Finish(rsp);
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
 }  // namespace
 
-ItemHandler::ItemHandler(InventoryService& service)
-    : BaseHandler(mir2::log::LogCategory::kGame),
+ItemHandler::ItemHandler(CoroutineExecutor& executor,
+                         ResponseSender& response_sender,
+                         InventoryService& service)
+    : executor_(executor),
+      response_sender_(response_sender),
       service_(service) {}
 
-void ItemHandler::DoHandle(const HandlerContext& context,
-                           uint16_t msg_id,
-                           const std::vector<uint8_t>& payload,
-                           ResponseCallback callback) {
-    if (msg_id == static_cast<uint16_t>(mir2::common::MsgId::kPickupItemReq)) {
-        HandlePickup(context, payload, std::move(callback));
-        return;
-    }
-    if (msg_id == static_cast<uint16_t>(mir2::common::MsgId::kUseItemReq)) {
-        HandleUse(context, payload, std::move(callback));
-        return;
-    }
-    if (msg_id == static_cast<uint16_t>(mir2::common::MsgId::kDropItemReq)) {
-        HandleDrop(context, payload, std::move(callback));
-        return;
-    }
+Task<void> ItemHandler::HandleMessage(HandlerContext ctx,
+                                      const uint8_t* payload,
+                                      size_t payload_size) {
+  if (!payload || payload_size == 0) {
+    SYSLOG_WARN("ItemHandler ignored empty payload (client_id={})", ctx.client_id);
+    co_return;
+  }
 
-    OnError(context, msg_id, mir2::common::ErrorCode::kInvalidAction, std::move(callback));
+  flatbuffers::Verifier pickup_verifier(payload, payload_size);
+  if (pickup_verifier.VerifyBuffer<mir2::proto::PickupItemReq>(nullptr)) {
+    const auto* req = flatbuffers::GetRoot<mir2::proto::PickupItemReq>(payload);
+    co_await HandlePickup(std::move(ctx), req);
+    co_return;
+  }
+
+  flatbuffers::Verifier use_verifier(payload, payload_size);
+  if (use_verifier.VerifyBuffer<mir2::proto::UseItemReq>(nullptr)) {
+    const auto* req = flatbuffers::GetRoot<mir2::proto::UseItemReq>(payload);
+    co_await HandleUse(std::move(ctx), req);
+    co_return;
+  }
+
+  flatbuffers::Verifier drop_verifier(payload, payload_size);
+  if (drop_verifier.VerifyBuffer<mir2::proto::DropItemReq>(nullptr)) {
+    const auto* req = flatbuffers::GetRoot<mir2::proto::DropItemReq>(payload);
+    co_await HandleDrop(std::move(ctx), req);
+    co_return;
+  }
+
+  SYSLOG_WARN("ItemHandler payload verify failed (client_id={})", ctx.client_id);
 }
 
-void ItemHandler::OnError(const HandlerContext& context,
-                          uint16_t msg_id,
-                          mir2::common::ErrorCode error_code,
-                          ResponseCallback callback) {
-    BaseHandler::OnError(context, msg_id, error_code, callback);
+Task<void> ItemHandler::HandlePickup(HandlerContext ctx, const mir2::proto::PickupItemReq* req) {
+  const uint32_t item_id = req ? req->item_id() : 0;
+  if (item_id == 0) {
+    SYSLOG_WARN("ItemHandler pickup invalid item_id (client_id={})", ctx.client_id);
+    co_await SendPickupError(std::move(ctx), mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
 
-    ResponseList responses;
-    if (msg_id == static_cast<uint16_t>(mir2::common::MsgId::kPickupItemReq)) {
-        ItemPickupResult result;
-        result.code = error_code;
-        responses.push_back({context.client_id,
-                             static_cast<uint16_t>(mir2::common::MsgId::kPickupItemRsp),
-                             BuildPickupRsp(result)});
-    } else if (msg_id == static_cast<uint16_t>(mir2::common::MsgId::kUseItemReq)) {
-        ItemUseResult result;
-        result.code = error_code;
-        responses.push_back({context.client_id,
-                             static_cast<uint16_t>(mir2::common::MsgId::kUseItemRsp),
-                             BuildUseRsp(result)});
-    } else if (msg_id == static_cast<uint16_t>(mir2::common::MsgId::kDropItemReq)) {
-        ItemDropResult result;
-        result.code = error_code;
-        responses.push_back({context.client_id,
-                             static_cast<uint16_t>(mir2::common::MsgId::kDropItemRsp),
-                             BuildDropRsp(result)});
-    }
+  ItemPickupResult result = service_.PickupItem(ctx.client_id, item_id);
+  auto payload = BuildPickupRsp(result);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kPickupItemRsp),
+      std::move(payload));
 
-    if (callback) {
-        callback(responses);
-    }
+  SYSLOG_DEBUG("ItemHandler pickup client_id={} item_id={} code={}",
+               ctx.client_id, item_id, static_cast<int>(result.code));
 }
 
-void ItemHandler::HandlePickup(const HandlerContext& context,
-                               const std::vector<uint8_t>& payload,
-                               ResponseCallback callback) {
-    flatbuffers::Verifier verifier(payload.data(), payload.size());
-    if (!verifier.VerifyBuffer<mir2::proto::PickupItemReq>(nullptr)) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kPickupItemReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
+Task<void> ItemHandler::HandleUse(HandlerContext ctx, const mir2::proto::UseItemReq* req) {
+  const uint16_t slot = req ? req->slot() : 0;
+  const uint32_t item_id = req ? req->item_id() : 0;
+  if (item_id == 0) {
+    SYSLOG_WARN("ItemHandler use invalid item_id (client_id={})", ctx.client_id);
+    co_await SendUseError(std::move(ctx), mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
 
-    const auto* req = flatbuffers::GetRoot<mir2::proto::PickupItemReq>(payload.data());
-    const uint32_t item_id = req ? req->item_id() : 0;
-    if (item_id == 0) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kPickupItemReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
+  ItemUseResult result = service_.UseItem(ctx.client_id, slot, item_id);
+  auto payload = BuildUseRsp(result);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kUseItemRsp),
+      std::move(payload));
 
-    ItemPickupResult result = service_.PickupItem(context.client_id, item_id);
-    ResponseList responses;
-    responses.push_back({context.client_id,
-                         static_cast<uint16_t>(mir2::common::MsgId::kPickupItemRsp),
-                         BuildPickupRsp(result)});
-    if (callback) {
-        callback(responses);
-    }
+  SYSLOG_DEBUG("ItemHandler use client_id={} item_id={} slot={} code={}",
+               ctx.client_id, item_id, slot, static_cast<int>(result.code));
 }
 
-void ItemHandler::HandleUse(const HandlerContext& context,
-                            const std::vector<uint8_t>& payload,
-                            ResponseCallback callback) {
-    flatbuffers::Verifier verifier(payload.data(), payload.size());
-    if (!verifier.VerifyBuffer<mir2::proto::UseItemReq>(nullptr)) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kUseItemReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
+Task<void> ItemHandler::HandleDrop(HandlerContext ctx, const mir2::proto::DropItemReq* req) {
+  const uint16_t slot = req ? req->slot() : 0;
+  const uint32_t item_id = req ? req->item_id() : 0;
+  const uint32_t count = req ? req->count() : 0;
+  if (item_id == 0 || count == 0) {
+    SYSLOG_WARN("ItemHandler drop invalid payload (client_id={})", ctx.client_id);
+    co_await SendDropError(std::move(ctx), mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
 
-    const auto* req = flatbuffers::GetRoot<mir2::proto::UseItemReq>(payload.data());
-    const uint16_t slot = req ? req->slot() : 0;
-    const uint32_t item_id = req ? req->item_id() : 0;
-    if (item_id == 0) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kUseItemReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
+  ItemDropResult result = service_.DropItem(ctx.client_id, slot, item_id, count);
+  auto payload = BuildDropRsp(result);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kDropItemRsp),
+      std::move(payload));
 
-    ItemUseResult result = service_.UseItem(context.client_id, slot, item_id);
-    ResponseList responses;
-    responses.push_back({context.client_id,
-                         static_cast<uint16_t>(mir2::common::MsgId::kUseItemRsp),
-                         BuildUseRsp(result)});
-    if (callback) {
-        callback(responses);
-    }
+  SYSLOG_DEBUG("ItemHandler drop client_id={} item_id={} slot={} count={} code={}",
+               ctx.client_id, item_id, slot, count, static_cast<int>(result.code));
 }
 
-void ItemHandler::HandleDrop(const HandlerContext& context,
-                             const std::vector<uint8_t>& payload,
-                             ResponseCallback callback) {
-    flatbuffers::Verifier verifier(payload.data(), payload.size());
-    if (!verifier.VerifyBuffer<mir2::proto::DropItemReq>(nullptr)) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kDropItemReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
-
-    const auto* req = flatbuffers::GetRoot<mir2::proto::DropItemReq>(payload.data());
-    const uint16_t slot = req ? req->slot() : 0;
-    const uint32_t item_id = req ? req->item_id() : 0;
-    const uint32_t count = req ? req->count() : 0;
-    if (item_id == 0 || count == 0) {
-        OnError(context, static_cast<uint16_t>(mir2::common::MsgId::kDropItemReq),
-                mir2::common::ErrorCode::kInvalidAction, std::move(callback));
-        return;
-    }
-
-    ItemDropResult result = service_.DropItem(context.client_id, slot, item_id, count);
-    ResponseList responses;
-    responses.push_back({context.client_id,
-                         static_cast<uint16_t>(mir2::common::MsgId::kDropItemRsp),
-                         BuildDropRsp(result)});
-    if (callback) {
-        callback(responses);
-    }
+Task<void> ItemHandler::SendPickupError(HandlerContext ctx, mir2::common::ErrorCode code) {
+  ItemPickupResult result;
+  result.code = code;
+  auto payload = BuildPickupRsp(result);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kPickupItemRsp),
+      std::move(payload));
 }
 
-}  // namespace legend2::handlers
+Task<void> ItemHandler::SendUseError(HandlerContext ctx, mir2::common::ErrorCode code) {
+  ItemUseResult result;
+  result.code = code;
+  auto payload = BuildUseRsp(result);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kUseItemRsp),
+      std::move(payload));
+}
+
+Task<void> ItemHandler::SendDropError(HandlerContext ctx, mir2::common::ErrorCode code) {
+  ItemDropResult result;
+  result.code = code;
+  auto payload = BuildDropRsp(result);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kDropItemRsp),
+      std::move(payload));
+}
+
+}  // namespace mir2::logic

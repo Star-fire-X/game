@@ -9,10 +9,9 @@
 
 #include "config/config_manager.h"
 #include "gateway/gateway_server.h"
-#include "gateway/message_router.h"
 #include "network/tcp_connection.h"
 #include "network/tcp_session.h"
-#include "tests/mocks/mock_socket.h"
+#include "mocks/mock_socket.h"
 
 namespace mir2::gateway {
 
@@ -59,22 +58,30 @@ TEST(GatewayErrorHandlingTest, LoadConfig_MissingRequiredFields_ReturnsDefaults)
   const auto& config = config::ConfigManager::Instance().GetServerConfig();
   EXPECT_EQ(config.heartbeat_timeout_ms, defaults.heartbeat_timeout_ms);
   EXPECT_EQ(config.max_connections, defaults.max_connections);
+  EXPECT_EQ(config.login_ip_rate_limit_capacity, defaults.login_ip_rate_limit_capacity);
+  EXPECT_EQ(config.login_ip_rate_limit_refill_rate, defaults.login_ip_rate_limit_refill_rate);
   EXPECT_EQ(config.bind_ip, defaults.bind_ip);
 
   std::filesystem::remove(path);
 }
 
-TEST(GatewayErrorHandlingTest, LoadConfig_InvalidServiceEndpoint_LogsWarning) {
-  const std::string config = R"(
-message_routes:
-  - msg_id: 1001
-    service: invalid_service
-)";
-  const auto path = WriteTempConfig(config, "invalid_service");
+TEST(GatewayErrorHandlingTest, ServerConfig_DefaultLoginIpRateLimitValues) {
+  config::ServerConfig defaults;
+  EXPECT_EQ(defaults.login_ip_rate_limit_capacity, 5);
+  EXPECT_EQ(defaults.login_ip_rate_limit_refill_rate, 1);
+}
 
-  MessageRouter router;
-  ASSERT_TRUE(router.LoadRoutesFromConfig(path));
-  EXPECT_EQ(router.GetRouteCount(), 0u);
+TEST(GatewayErrorHandlingTest, LoadConfig_LoginIpRateLimitFieldsParsed) {
+  const auto path = WriteTempConfig(
+      "server:\n"
+      "  login_ip_rate_limit_capacity: 12\n"
+      "  login_ip_rate_limit_refill_rate: 3\n",
+      "login_ip_limit");
+  ASSERT_TRUE(config::ConfigManager::Instance().Load(path));
+
+  const auto& config = config::ConfigManager::Instance().GetServerConfig();
+  EXPECT_EQ(config.login_ip_rate_limit_capacity, 12);
+  EXPECT_EQ(config.login_ip_rate_limit_refill_rate, 3);
 
   std::filesystem::remove(path);
 }
@@ -92,15 +99,12 @@ TEST(GatewayErrorHandlingTest, ClientDisconnect_DuringForward_CleanupRoutes) {
   asio::io_context io_context;
   GatewayServer server;
   auto session_bundle = CreateSession(io_context, 4001);
-  session_bundle.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
 
   server.RegisterConnection(4001, session_bundle.session);
-  server.RegisterUser(5001, session_bundle.session);
 
   server.UnregisterSession(session_bundle.session);
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
-  EXPECT_EQ(server.GetUserRouteCount(), 0u);
+  EXPECT_EQ(server.GetConnectionCount(), 0u);
 }
 
 TEST(GatewayErrorHandlingTest, MaxConnectionsReached_RejectsNewConnections) {

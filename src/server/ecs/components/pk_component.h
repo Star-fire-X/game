@@ -3,8 +3,8 @@
  * @brief PK系统相关组件定义
  */
 
-#ifndef LEGEND2_SERVER_ECS_PK_COMPONENT_H
-#define LEGEND2_SERVER_ECS_PK_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_PK_COMPONENT_H_
+#define MIR2_SERVER_ECS_PK_COMPONENT_H_
 
 #include <cstdint>
 #include <vector>
@@ -78,4 +78,4 @@ struct PKComponent {
 
 } // namespace mir2::ecs
 
-#endif // LEGEND2_SERVER_ECS_PK_COMPONENT_H
+#endif // MIR2_SERVER_ECS_PK_COMPONENT_H_

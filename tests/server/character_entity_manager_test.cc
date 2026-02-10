@@ -5,9 +5,11 @@
 #include "common/character_data.h"
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
+#include "ecs/dirty_tracker.h"
 #include "ecs/systems/combat_system.h"
 
 #include <atomic>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -34,9 +36,9 @@ mir2::common::CharacterData MakeCharacterData(uint32_t id) {
     data.stats.gold = 1234;
     data.map_id = 3;
     data.position = {8, 9};
-    data.equipment_json = R"({"weapon":"staff"})";
-    data.inventory_json = R"(["potion"])";
-    data.skills_json = R"(["blink"])";
+    data.equipment_json = R"([{"slot":0,"item":{"template_id":1001,"quantity":1,"durability":50}}])";
+    data.inventory_json = R"([{"slot":0,"item":{"template_id":2001,"quantity":3,"durability":10}}])";
+    data.skills_json = R"([{"id":3001,"level":2}])";
     data.created_at = 1700000000;
     data.last_login = 1700000100;
     return data;
@@ -79,9 +81,17 @@ TEST(CharacterEntityManagerTest, PreloadCreatesEntityFromData) {
     EXPECT_EQ(state.map_id, data.map_id);
     EXPECT_EQ(state.position, data.position);
 
-    EXPECT_EQ(inventory.equipment_json, data.equipment_json);
-    EXPECT_EQ(inventory.inventory_json, data.inventory_json);
-    EXPECT_EQ(inventory.skills_json, data.skills_json);
+    ASSERT_TRUE(inventory.slots[0].has_value());
+    EXPECT_EQ(inventory.slots[0]->item_id, 2001u);
+    EXPECT_EQ(inventory.slots[0]->count, 3);
+
+    ASSERT_TRUE(inventory.equipment[0].has_value());
+    EXPECT_EQ(inventory.equipment[0]->item_id, 1001u);
+    EXPECT_EQ(inventory.equipment[0]->count, 1);
+
+    ASSERT_EQ(inventory.skills.size(), 1u);
+    EXPECT_EQ(inventory.skills[0].skill_id, 3001u);
+    EXPECT_EQ(inventory.skills[0].level, 2);
 }
 
 TEST(CharacterEntityManagerTest, GetOrCreateRepairsIndex) {
@@ -109,6 +119,7 @@ TEST(CharacterEntityManagerTest, SaveAndTimeoutCleanup) {
 
     auto& attributes = registry.get<mir2::ecs::CharacterAttributesComponent>(entity);
     attributes.hp = 42;
+    mir2::ecs::dirty_tracker::mark_attributes_dirty(registry, entity);
 
     manager.Update(0.11f);
     auto stored = manager.GetStoredData(5);
@@ -150,6 +161,22 @@ TEST(CharacterEntityManagerTest, CombatSystemIntegratesWithManager) {
     auto result = mir2::ecs::CombatSystem::ExecuteAttack(registry, attacker, target, config);
     EXPECT_TRUE(result.success);
     EXPECT_LT(target_attr.hp, 50);
+}
+
+TEST(CharacterEntityManagerTest, BindToCurrentThreadAllowsThreadHandoff) {
+    entt::registry registry;
+    std::unique_ptr<mir2::ecs::CharacterEntityManager> manager;
+
+    std::thread bootstrap_thread([&]() {
+        manager = std::make_unique<mir2::ecs::CharacterEntityManager>(registry);
+    });
+    bootstrap_thread.join();
+
+    ASSERT_NE(manager, nullptr);
+    manager->BindToCurrentThread();
+
+    const auto entity = manager->GetOrCreate(1001);
+    EXPECT_TRUE(registry.valid(entity));
 }
 
 // ============================================================================

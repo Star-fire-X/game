@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: legend2-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mir2_game}
+      POSTGRES_USER: ${POSTGRES_USER:-mir2}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mir2_password}
+      PGDATA: ${PGDATA:-/var/lib/postgresql/data/pgdata}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${POSTGRES_BIND_IP:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mir2} -d ${POSTGRES_DB:-mir2_game}"]
+      interval: ${POSTGRES_HEALTHCHECK_INTERVAL:-10}s
+      timeout: ${POSTGRES_HEALTHCHECK_TIMEOUT:-5}s
+      retries: ${POSTGRES_HEALTHCHECK_RETRIES:-5}
+      start_period: 10s
+    networks:
+      - legend2-db
+
+  db-init:
+    image: postgres:16-alpine
+    container_name: legend2-postgres-init
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-mir2_game}
+      POSTGRES_USER: ${POSTGRES_USER:-mir2}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mir2_password}
+    command:
+      - sh
+      - -ec
+      - |
+        export PGPASSWORD="$${POSTGRES_PASSWORD}"
+        # Skip if the base schema already exists.
+        if psql -h "$${POSTGRES_HOST}" -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -tAc "SELECT to_regclass('public.accounts') IS NOT NULL" | grep -q "t"; then
+          echo "schema exists, skip migration bootstrap"
+          exit 0
+        fi
+        for f in /migrations/[0-9][0-9][0-9]*.sql; do
+          echo "apply migration: $${f}"
+          psql -h "$${POSTGRES_HOST}" -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -v ON_ERROR_STOP=1 -f "$${f}"
+        done
+    volumes:
+      - ./migrations:/migrations:ro
+    networks:
+      - legend2-db
+
+networks:
+  legend2-db:
+    name: legend2-db
+
+volumes:
+  postgres_data:
+    name: ${POSTGRES_VOLUME_NAME:-legend2_postgres_data}

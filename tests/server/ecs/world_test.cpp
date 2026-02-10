@@ -37,10 +37,11 @@ class RecordingSystem : public mir2::ecs::System {
 
 TEST(WorldTest, CreateSystemAddsToCount) {
     mir2::ecs::World world;
+    const auto initial_count = world.GetSystemCount();
 
     world.CreateSystem<RecordingSystem>(mir2::ecs::SystemPriority::kMovement, nullptr, 1);
 
-    EXPECT_EQ(world.GetSystemCount(), 1u);
+    EXPECT_EQ(world.GetSystemCount(), initial_count + 1u);
 }
 
 TEST(WorldTest, ClearSystemsResetsCount) {

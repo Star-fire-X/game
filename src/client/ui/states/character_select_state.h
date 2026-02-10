@@ -2,13 +2,13 @@
 #define LEGEND2_CHARACTER_SELECT_STATE_H
 
 #include "ui/states/login_state_interface.h"
-#include "ui/login_screen.h"
+#include "ui/states/login_state_context.h"
 
 namespace mir2::ui::screens {
 
 class CharacterSelectState : public ILoginState {
 public:
-    explicit CharacterSelectState(LoginStateContext& context);
+    explicit CharacterSelectState(ICharacterSelectStateContext& context);
 
     void on_enter() override;
     void on_exit() override;
@@ -18,7 +18,7 @@ public:
     LoginScreenState get_state_type() const override { return LoginScreenState::CHARACTER_SELECT; }
 
 private:
-    LoginStateContext& context_;
+    ICharacterSelectStateContext& context_;
 
     void layout();
     void render_background();

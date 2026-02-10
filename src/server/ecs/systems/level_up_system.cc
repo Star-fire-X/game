@@ -4,17 +4,60 @@
 #include "ecs/dirty_tracker.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/attribute_events.h"
+#include "ecs/events/combat_events.h"
+#include "ecs/components/monster_component.h"
 
 namespace mir2::ecs {
 
 LevelUpSystem::LevelUpSystem()
     : System(SystemPriority::kLevelUp) {}
 
+LevelUpSystem::LevelUpSystem(entt::registry& registry, EventBus& event_bus)
+    : System(SystemPriority::kLevelUp),
+      registry_(&registry),
+      event_bus_(&event_bus) {
+    event_bus_->Subscribe<events::EntityDeathEvent>(
+        [this](events::EntityDeathEvent& event) {
+            OnEntityDeath(event);
+        });
+}
+
 void LevelUpSystem::Update(entt::registry& registry, float /*delta_time*/) {
     auto view = registry.view<CharacterIdentityComponent, CharacterAttributesComponent>();
     for (auto entity : view) {
         CheckLevelUp(registry, entity);
     }
+}
+
+void LevelUpSystem::OnEntityDeath(events::EntityDeathEvent& event) {
+    if (!registry_) {
+        return;
+    }
+
+    if (event.entity == entt::null || !registry_->valid(event.entity)) {
+        return;
+    }
+
+    const auto* monster_identity = registry_->try_get<MonsterIdentityComponent>(event.entity);
+    if (!monster_identity || monster_identity->monster_template_id == 0) {
+        return;
+    }
+
+    const auto* attributes = registry_->try_get<CharacterAttributesComponent>(event.entity);
+    if (!attributes) {
+        return;
+    }
+
+    const int base_exp = attributes->level * 10;
+    if (base_exp <= 0) {
+        return;
+    }
+
+    if (event.killer == entt::null || !registry_->valid(event.killer)) {
+        return;
+    }
+
+    DistributeExpToParty(*registry_, event.killer, base_exp, event_bus_);
 }
 
 void LevelUpSystem::ApplyLevelUpStats(mir2::common::CharacterClass char_class,

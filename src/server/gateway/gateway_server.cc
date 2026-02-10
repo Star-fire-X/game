@@ -37,6 +37,23 @@ struct ConnectionSnapshot {
   uint64_t last_active_ms = 0;
 };
 
+std::vector<uint8_t> BuildLoginRateLimitedPayload() {
+  common::LoginResponse response;
+  response.code = static_cast<mir2::proto::ErrorCode>(
+      static_cast<uint16_t>(common::ErrorCode::RATE_LIMITED));
+  response.account_id = 0;
+  response.session_token.clear();
+
+  common::MessageCodecStatus status = common::MessageCodecStatus::kOk;
+  auto payload = common::EncodeLoginResponse(response, &status);
+  if (status == common::MessageCodecStatus::kOk) {
+    return payload;
+  }
+
+  response.code = mir2::proto::ErrorCode::ERR_UNKNOWN;
+  return common::EncodeLoginResponse(response, nullptr);
+}
+
 void UpdateSessionContextFromLogicMessage(
     const std::shared_ptr<network::TcpSession>& session,
     uint16_t msg_id,
@@ -84,6 +101,8 @@ void UpdateSessionContextFromLogicMessage(
 }  // namespace
 
 bool GatewayServer::Initialize(const std::string& config_path) {
+  shutting_down_.store(false, std::memory_order_release);
+
   if (!config::ConfigManager::Instance().Load(config_path)) {
     return false;
   }
@@ -95,6 +114,22 @@ bool GatewayServer::Initialize(const std::string& config_path) {
   }
 
   const auto& server_config = config::ConfigManager::Instance().GetServerConfig();
+  const int configured_capacity = server_config.login_ip_rate_limit_capacity;
+  const int configured_refill_rate = server_config.login_ip_rate_limit_refill_rate;
+  const mir2::security::RateLimiter::Config login_rate_limit_config{
+      .capacity = std::max(1, configured_capacity),
+      .refill_rate = std::max(1, configured_refill_rate)};
+  if (configured_capacity <= 0 || configured_refill_rate <= 0) {
+    SYSLOG_WARN(
+        "GatewayServer invalid login IP rate limit config "
+        "(capacity={}, refill_rate={}), clamped to (capacity={}, refill_rate={})",
+        configured_capacity,
+        configured_refill_rate,
+        login_rate_limit_config.capacity,
+        login_rate_limit_config.refill_rate);
+  }
+  login_ip_rate_limiter_.SetConfig(login_rate_limit_config);
+
   if (!app_.Initialize(server_config)) {
     SYSLOG_ERROR("GatewayServer application init failed");
     return false;
@@ -131,6 +166,15 @@ void GatewayServer::Run() {
 }
 
 void GatewayServer::Shutdown() {
+  if (shutting_down_.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  {
+    std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
+    logic_reconnecting_ = false;
+  }
+
   if (logic_client_) {
     logic_client_->Close();
   }
@@ -142,7 +186,6 @@ void GatewayServer::Shutdown() {
     logic_thread_.join();
   }
   app_.Shutdown();
-  log::Logger::Instance().Shutdown();
 }
 
 void GatewayServer::Tick(float delta_time) {
@@ -380,6 +423,9 @@ bool GatewayServer::ConnectLogicService() {
 
 void GatewayServer::StartAsyncConnect() {
   asio::post(app_.GetIoContext(), [this]() {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+      return;
+    }
     if (!ConnectToLogicService()) {
       SYSLOG_ERROR("Initial connect failed, scheduling reconnect (logic)");
       ScheduleReconnect(0);
@@ -392,6 +438,10 @@ bool GatewayServer::IsLogicConnected() const {
 }
 
 bool GatewayServer::ConnectToLogicService() {
+  if (shutting_down_.load(std::memory_order_acquire)) {
+    return false;
+  }
+
   const auto& services = config::ConfigManager::Instance().GetServiceConfig();
 
   if (!logic_client_) {
@@ -401,6 +451,9 @@ bool GatewayServer::ConnectToLogicService() {
     OnLogicPacket(packet);
   });
   logic_client_->SetDisconnectHandler([this]() {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+      return;
+    }
     SYSLOG_ERROR("Logic service disconnected, scheduling reconnect");
     EnterHoldingState();
     ScheduleReconnect(0);
@@ -419,6 +472,10 @@ bool GatewayServer::ConnectToLogicService() {
 }
 
 void GatewayServer::ScheduleReconnect(int retry_count) {
+  if (shutting_down_.load(std::memory_order_acquire)) {
+    return;
+  }
+
   {
     std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
     if (logic_reconnecting_) {
@@ -435,6 +492,12 @@ void GatewayServer::ScheduleReconnect(int retry_count) {
   auto timer = std::make_shared<asio::steady_timer>(
       app_.GetIoContext(), std::chrono::milliseconds(delay_ms));
   timer->async_wait([this, retry_count, timer](const asio::error_code& ec) {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+      std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
+      logic_reconnecting_ = false;
+      return;
+    }
+
     if (ec) {
       std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
       logic_reconnecting_ = false;
@@ -698,7 +761,7 @@ std::vector<uint8_t> GatewayServer::BuildContextRestoreResponse(uint32_t request
 
 void GatewayServer::EnterHoldingState() {
   std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-  if (holder_state_ != ConnectionHolder::State::FORWARDING) {
+  if (holder_state_ == ConnectionHolder::State::HOLDING) {
     return;
   }
   holder_state_ = ConnectionHolder::State::HOLDING;
@@ -879,6 +942,30 @@ void GatewayServer::HandleForwardMessage(const std::shared_ptr<network::TcpSessi
   if (client_id == 0) {
     SYSLOG_WARN("Invalid session ID, dropping message msg_id={}", msg_id);
     return;
+  }
+
+  if (msg_id == static_cast<uint16_t>(common::MsgId::kLoginReq)) {
+    std::string rate_limit_key = session->GetRemoteAddress();
+    if (rate_limit_key.empty()) {
+      rate_limit_key = "client:" + std::to_string(client_id);
+    }
+
+    if (!login_ip_rate_limiter_.TryAcquire(rate_limit_key)) {
+      SYSLOG_WARN("Gateway login rate limited ip={} client_id={}",
+                  rate_limit_key,
+                  client_id);
+      monitor::Metrics::Instance().IncrementCounter(
+          "gateway.login.ip_rate_limited_total");
+      const auto limited_payload = BuildLoginRateLimitedPayload();
+      if (network_) {
+        network_->Send(client_id,
+                       static_cast<uint16_t>(common::MsgId::kLoginRsp),
+                       limited_payload);
+      } else {
+        session->Send(static_cast<uint16_t>(common::MsgId::kLoginRsp), limited_payload);
+      }
+      return;
+    }
   }
 
   // 检查 LogicServer 连接状态

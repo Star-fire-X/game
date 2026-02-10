@@ -23,12 +23,12 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace mir2::render {
 
 // 引入公共类型定义
-using namespace mir2::common;
 using mir2::client::ResourceManager;
 
 // 跨模块类型引用
@@ -75,59 +75,6 @@ using mir2::game::FIREGUN_FRAME;
 // 引入 mir2::game 命名空间的辅助函数
 using mir2::game::get_color_effect_from_state;
 using mir2::game::get_monster_action;
-
-// =============================================================================
-// Optional animation config loader stubs (fall back to hardcoded defaults)
-// =============================================================================
-
-struct ActionConfig {
-    int start = 0;
-    int frame = 0;
-    int skip = 0;
-    int ftime = 0;
-
-    int get_frame_index(int direction, int frame_offset) const {
-        return start + direction * (frame + skip) + frame_offset;
-    }
-};
-
-struct HumanActionConfig {
-    ActionConfig stand;
-    ActionConfig walk;
-    ActionConfig run;
-    ActionConfig rush_left;
-    ActionConfig rush_right;
-    ActionConfig hit;
-    ActionConfig heavy_hit;
-    ActionConfig big_hit;
-    ActionConfig fire_hit_ready;
-    ActionConfig spell;
-    ActionConfig sitdown;
-    ActionConfig struck;
-    ActionConfig die;
-};
-
-struct MonsterActionConfig {
-    ActionConfig stand;
-    ActionConfig walk;
-    ActionConfig attack;
-    ActionConfig critical;
-    ActionConfig struck;
-    ActionConfig die;
-    ActionConfig death;
-};
-
-class AnimationConfigLoader {
-public:
-    explicit AnimationConfigLoader(std::string base_dir) : base_dir_(std::move(base_dir)) {}
-
-    int load_all_configs() { return 0; }
-    const HumanActionConfig* get_human_config(Gender, CharacterClass) const { return nullptr; }
-    const MonsterActionConfig* get_monster_config(int) const { return nullptr; }
-
-private:
-    std::string base_dir_;
-};
 
 // =============================================================================
 // Actor 基础数据结构
@@ -207,6 +154,10 @@ struct ActorAnimState {
 struct Actor {
     ActorData data;                     ///< 基础数据
     ActorAnimState anim;                ///< 动画状态
+
+    // 资源加载状态
+    bool     surfaces_loaded = false;   ///< 角色资源是否已加载
+    uint64_t surfaces_key = 0;          ///< 外观签名(用于变更检测)
 
     // 绘制相关
     int      render_x = 0;              ///< 渲染X坐标(屏幕)
@@ -428,16 +379,13 @@ private:
     // 数据目录
     std::string data_path_ = "Data/";
 
-    // Optional animation config overrides
-    AnimationConfigLoader config_loader_;
-    bool use_config_system_ = true;
-
-    // 精灵偏移量缓存(cache_key -> {offset_x, offset_y})
-    struct SpriteOffset {
+    // 帧缓存：合并纹理引用与偏移量，单次查找完成
+    struct CachedFrame {
+        std::weak_ptr<Texture> texture;
         int offset_x = 0;
         int offset_y = 0;
     };
-    std::unordered_map<std::string, SpriteOffset> offset_cache_;
+    std::unordered_map<TextureKey, CachedFrame, TextureKeyHash> frame_cache_;
 
     // 已加载的档案集合
     std::unordered_map<std::string, bool> loaded_archives_;

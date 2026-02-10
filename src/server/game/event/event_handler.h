@@ -3,8 +3,8 @@
  * @brief 定时事件处理器基类
  */
 
-#ifndef LEGEND2_SERVER_GAME_EVENT_EVENT_HANDLER_H
-#define LEGEND2_SERVER_GAME_EVENT_EVENT_HANDLER_H
+#ifndef MIR2_SERVER_GAME_EVENT_EVENT_HANDLER_H_
+#define MIR2_SERVER_GAME_EVENT_EVENT_HANDLER_H_
 
 #include <cstdint>
 
@@ -26,4 +26,4 @@ class EventHandler {
 
 }  // namespace legend2::game::event
 
-#endif  // LEGEND2_SERVER_GAME_EVENT_EVENT_HANDLER_H
+#endif  // MIR2_SERVER_GAME_EVENT_EVENT_HANDLER_H_

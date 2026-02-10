@@ -23,7 +23,7 @@ constexpr Color kSlotDragging{255, 200, 80, 255};
 constexpr Color kSlotCooldown{0, 0, 0, 160};
 } // namespace
 
-SkillBar::SkillBar(client::skill::SkillManager& skill_manager)
+SkillBar::SkillBar(client::skill::ISkillManager& skill_manager)
     : skill_manager_(skill_manager) {}
 
 void SkillBar::update(int64_t now_ms) {

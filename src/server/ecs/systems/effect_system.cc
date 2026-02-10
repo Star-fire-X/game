@@ -223,24 +223,60 @@ void EffectSystem::apply_stat_modifiers(entt::entity entity) {
 
     int attack_bonus = 0;
     int defense_penalty = 0;
+    int magic_attack_bonus = 0;
+    int sc_bonus = 0;
+    int speed_bonus = 0;
+    int max_hp_bonus = 0;
+    int max_mp_bonus = 0;
     for (const auto& effect : effects->effects) {
+        if (effect.category != EffectCategory::STAT_BUFF &&
+            effect.category != EffectCategory::STAT_DEBUFF) {
+            continue;
+        }
+
         if (effect.category == EffectCategory::STAT_BUFF) {
             attack_bonus += effect.value;
-        } else if (effect.category == EffectCategory::STAT_DEBUFF) {
+        } else {
             defense_penalty += effect.value;
         }
+
+        magic_attack_bonus += effect.magic_attack_bonus;
+        sc_bonus += effect.sc_bonus;
+        speed_bonus += effect.speed_bonus;
+        max_hp_bonus += effect.max_hp_bonus;
+        max_mp_bonus += effect.max_mp_bonus;
     }
 
     const int delta_attack = attack_bonus - effects->applied_attack_bonus;
     const int delta_defense = defense_penalty - effects->applied_defense_penalty;
-    if (delta_attack == 0 && delta_defense == 0) {
+    const int delta_magic_attack =
+        magic_attack_bonus - effects->applied_magic_attack_bonus;
+    const int delta_sc = sc_bonus - effects->applied_sc_bonus;
+    const int delta_speed = speed_bonus - effects->applied_speed_bonus;
+    const int delta_max_hp = max_hp_bonus - effects->applied_max_hp_bonus;
+    const int delta_max_mp = max_mp_bonus - effects->applied_max_mp_bonus;
+    if (delta_attack == 0 && delta_defense == 0 && delta_magic_attack == 0 &&
+        delta_sc == 0 && delta_speed == 0 && delta_max_hp == 0 &&
+        delta_max_mp == 0) {
         return;
     }
 
     attributes->attack += delta_attack;
     attributes->defense -= delta_defense;
+    attributes->magic_attack += delta_magic_attack;
+    attributes->sc += delta_sc;
+    attributes->speed = std::max(0, attributes->speed + delta_speed);
+    attributes->max_hp = std::max(1, attributes->max_hp + delta_max_hp);
+    attributes->max_mp = std::max(0, attributes->max_mp + delta_max_mp);
+    attributes->hp = std::min(attributes->hp, attributes->max_hp);
+    attributes->mp = std::min(attributes->mp, attributes->max_mp);
     effects->applied_attack_bonus = attack_bonus;
     effects->applied_defense_penalty = defense_penalty;
+    effects->applied_magic_attack_bonus = magic_attack_bonus;
+    effects->applied_sc_bonus = sc_bonus;
+    effects->applied_speed_bonus = speed_bonus;
+    effects->applied_max_hp_bonus = max_hp_bonus;
+    effects->applied_max_mp_bonus = max_mp_bonus;
 
     dirty_tracker::mark_attributes_dirty(registry_, entity);
 }

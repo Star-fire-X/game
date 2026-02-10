@@ -3,8 +3,8 @@
  * @brief 怪物刷新系统
  */
 
-#ifndef MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H
-#define MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H
+#ifndef MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H_
+#define MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H_
 
 #include <entt/entt.hpp>
 #include <unordered_map>
@@ -57,4 +57,4 @@ private:
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H
+#endif  // MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H_

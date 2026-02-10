@@ -23,7 +23,7 @@ std::vector<uint8_t> BuildChatReq(mir2::proto::ChatChannel channel,
 }  // namespace
 
 TEST(ChatHandlerTest, WorldChatBroadcastsMessage) {
-    legend2::handlers::ClientRegistry registry;
+    mir2::logic::ClientRegistry registry;
     registry.Track(1);
     registry.Track(2);
 
@@ -50,7 +50,7 @@ TEST(ChatHandlerTest, WorldChatBroadcastsMessage) {
 }
 
 TEST(ChatHandlerTest, PrivateChatToUnknownTargetReturnsError) {
-    legend2::handlers::ClientRegistry registry;
+    mir2::logic::ClientRegistry registry;
     registry.Track(1);
 
     legend2::handlers::ChatHandler handler(registry);
@@ -74,7 +74,7 @@ TEST(ChatHandlerTest, PrivateChatToUnknownTargetReturnsError) {
 }
 
 TEST(ChatHandlerTest, EmptyContentReturnsError) {
-    legend2::handlers::ClientRegistry registry;
+    mir2::logic::ClientRegistry registry;
     registry.Track(1);
 
     legend2::handlers::ChatHandler handler(registry);

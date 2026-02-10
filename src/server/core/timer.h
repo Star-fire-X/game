@@ -3,8 +3,8 @@
  * @brief 服务器Tick计时器
  */
 
-#ifndef MIR2_CORE_TIMER_H
-#define MIR2_CORE_TIMER_H
+#ifndef MIR2_CORE_TIMER_H_
+#define MIR2_CORE_TIMER_H_
 
 #include <chrono>
 #include <cstdint>
@@ -63,4 +63,4 @@ class TickTimer {
 
 }  // namespace mir2::core
 
-#endif  // MIR2_CORE_TIMER_H
+#endif  // MIR2_CORE_TIMER_H_

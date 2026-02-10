@@ -3,6 +3,7 @@
 #include "ecs/components/character_components.h"
 #include "ecs/components/combat_component.h"
 #include "ecs/event_bus.h"
+#include "ecs/systems/ground_item_system.h"
 #include "ecs/systems/npc_ai_system.h"
 #include "ecs/systems/storage_system.h"
 #include "log/logger.h"
@@ -17,6 +18,8 @@ World::World(std::size_t reserve_capacity)
     SYSLOG_INFO("World: NpcAISystem registered");
     CreateSystem<StorageSystem>(registry_, *event_bus_);
     SYSLOG_INFO("World: StorageSystem registered");
+    CreateSystem<GroundItemSystem>();
+    SYSLOG_INFO("World: GroundItemSystem registered");
     if (reserve_capacity == 0) {
         return;
     }

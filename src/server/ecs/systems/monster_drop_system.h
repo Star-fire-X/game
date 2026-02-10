@@ -3,8 +3,8 @@
  * @brief 怪物掉落系统
  */
 
-#ifndef MIR2_ECS_SYSTEMS_MONSTER_DROP_SYSTEM_H
-#define MIR2_ECS_SYSTEMS_MONSTER_DROP_SYSTEM_H
+#ifndef MIR2_ECS_SYSTEMS_MONSTER_DROP_SYSTEM_H_
+#define MIR2_ECS_SYSTEMS_MONSTER_DROP_SYSTEM_H_
 
 #include <entt/entt.hpp>
 #include <unordered_map>
@@ -44,6 +44,8 @@ private:
 
     std::vector<game::entity::DropItem> SelectDropItems(
         const game::entity::MonsterDropTable& table);
+    std::vector<game::entity::DropItem> SelectDropItemsForBoss(
+        const game::entity::MonsterDropTable& table);
     void CreateLootEntity(entt::registry& registry,
                          const game::entity::DropItem& item,
                          int32_t x, int32_t y,
@@ -61,4 +63,4 @@ private:
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_SYSTEMS_MONSTER_DROP_SYSTEM_H
+#endif  // MIR2_ECS_SYSTEMS_MONSTER_DROP_SYSTEM_H_

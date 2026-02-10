@@ -10,7 +10,7 @@
 #include "gateway/gateway_server.h"
 #include "network/tcp_connection.h"
 #include "network/tcp_session.h"
-#include "tests/mocks/mock_socket.h"
+#include "mocks/mock_socket.h"
 
 namespace mir2::gateway {
 
@@ -31,15 +31,15 @@ SessionBundle CreateSession(asio::io_context& io_context, uint64_t connection_id
 
 }  // namespace
 
-// Connection management.
-TEST(GatewayServerTest, RegisterConnectionAddsToTable) {
+// Connection management (session_map_ only).
+TEST(GatewayServerTest, RegisterConnectionAddsToSessionMap) {
   asio::io_context io_context;
   GatewayServer server;
   auto bundle = CreateSession(io_context, 101);
 
   server.RegisterConnection(101, bundle.session);
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 1u);
+  EXPECT_EQ(server.GetConnectionCount(), 1u);
   EXPECT_EQ(server.GetConnectionSession(101), bundle.session);
 }
 
@@ -52,11 +52,11 @@ TEST(GatewayServerTest, RegisterConnectionReplacesExisting) {
   server.RegisterConnection(101, bundle_a.session);
   server.RegisterConnection(101, bundle_b.session);
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 1u);
+  EXPECT_EQ(server.GetConnectionCount(), 1u);
   EXPECT_EQ(server.GetConnectionSession(101), bundle_b.session);
 }
 
-TEST(GatewayServerTest, UnregisterSessionRemovesFromConnectionTable) {
+TEST(GatewayServerTest, UnregisterSessionRemovesFromSessionMap) {
   asio::io_context io_context;
   GatewayServer server;
   auto bundle = CreateSession(io_context, 202);
@@ -64,21 +64,8 @@ TEST(GatewayServerTest, UnregisterSessionRemovesFromConnectionTable) {
   server.RegisterConnection(202, bundle.session);
   server.UnregisterSession(bundle.session);
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
+  EXPECT_EQ(server.GetConnectionCount(), 0u);
   EXPECT_EQ(server.GetConnectionSession(202), nullptr);
-}
-
-TEST(GatewayServerTest, UnregisterSessionRemovesFromUserTable) {
-  asio::io_context io_context;
-  GatewayServer server;
-  auto bundle = CreateSession(io_context, 203);
-
-  bundle.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-  server.RegisterUser(77, bundle.session);
-  server.UnregisterSession(bundle.session);
-
-  EXPECT_EQ(server.GetUserRouteCount(), 0u);
-  EXPECT_EQ(server.GetUserSession(77), nullptr);
 }
 
 TEST(GatewayServerTest, UnregisterSessionHandlesNonExistent) {
@@ -88,18 +75,12 @@ TEST(GatewayServerTest, UnregisterSessionHandlesNonExistent) {
 
   server.UnregisterSession(bundle.session);
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
-  EXPECT_EQ(server.GetUserRouteCount(), 0u);
+  EXPECT_EQ(server.GetConnectionCount(), 0u);
 }
 
 TEST(GatewayServerTest, GetConnectionSessionReturnsNullForMissing) {
   GatewayServer server;
   EXPECT_EQ(server.GetConnectionSession(999), nullptr);
-}
-
-TEST(GatewayServerTest, GetUserSessionReturnsNullForMissing) {
-  GatewayServer server;
-  EXPECT_EQ(server.GetUserSession(999), nullptr);
 }
 
 // Route cleanup behavior.
@@ -109,15 +90,12 @@ TEST(GatewayServerTest, CleanupStaleRoutesRemovesDisconnectedSessions) {
   auto bundle = CreateSession(io_context, 301);
 
   server.RegisterConnection(301, bundle.session);
-  bundle.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-  server.RegisterUser(55, bundle.session);
 
   bundle.session->HandleDisconnect(301);
   server.CleanupStaleRoutes();
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
-  EXPECT_EQ(server.GetUserRouteCount(), 0u);
-  EXPECT_EQ(bundle.session->GetUserId(), 0u);
+  EXPECT_EQ(server.GetConnectionCount(), 0u);
+  EXPECT_EQ(server.GetConnectionSession(301), nullptr);
 }
 
 TEST(GatewayServerTest, CleanupStaleRoutesPreservesActiveSessions) {
@@ -126,13 +104,10 @@ TEST(GatewayServerTest, CleanupStaleRoutesPreservesActiveSessions) {
   auto bundle = CreateSession(io_context, 302);
 
   server.RegisterConnection(302, bundle.session);
-  bundle.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-  server.RegisterUser(56, bundle.session);
 
   server.CleanupStaleRoutes();
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 1u);
-  EXPECT_EQ(server.GetUserRouteCount(), 1u);
+  EXPECT_EQ(server.GetConnectionCount(), 1u);
 }
 
 // Concurrency safety checks.
@@ -155,7 +130,7 @@ TEST(GatewayServerTest, CleanupStaleRoutesThreadSafe) {
   std::thread reader([&]() {
     while (!stop.load()) {
       server.GetConnectionSession(400);
-      server.GetConnectionRouteCount();
+      server.GetConnectionCount();
     }
   });
 
@@ -164,7 +139,7 @@ TEST(GatewayServerTest, CleanupStaleRoutesThreadSafe) {
   cleaner.join();
   reader.join();
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 32u);
+  EXPECT_EQ(server.GetConnectionCount(), 32u);
 }
 
 TEST(GatewayServerTest, ConcurrentConnectionRegistration) {
@@ -200,54 +175,25 @@ TEST(GatewayServerTest, ConcurrentConnectionRegistration) {
     thread.join();
   }
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), static_cast<size_t>(kThreadCount));
+  EXPECT_EQ(server.GetConnectionCount(), static_cast<size_t>(kThreadCount));
 }
 
-TEST(GatewayServerTest, ConcurrentUserRegistration) {
-  asio::io_context io_context;
-  GatewayServer server;
-  constexpr int kThreadCount = 64;
-  std::vector<std::shared_ptr<network::TcpSession>> sessions;
-  sessions.reserve(kThreadCount);
-  for (int i = 0; i < kThreadCount; ++i) {
-    auto session = CreateSession(io_context, 2000 + i).session;
-    session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-    sessions.push_back(session);
-  }
-
-  std::vector<std::thread> threads;
-  threads.reserve(kThreadCount);
-  for (int i = 0; i < kThreadCount; ++i) {
-    threads.emplace_back([&server, &sessions, i]() {
-      server.RegisterUser(3000 + i, sessions[static_cast<size_t>(i)]);
-    });
-  }
-
-  for (auto& thread : threads) {
-    thread.join();
-  }
-
-  EXPECT_EQ(server.GetUserRouteCount(), static_cast<size_t>(kThreadCount));
-}
-
-TEST(GatewayServerTest, ConcurrentRouteTableAccess) {
+TEST(GatewayServerTest, ConcurrentSessionMapAccess) {
   asio::io_context io_context;
   GatewayServer server;
   auto bundle = CreateSession(io_context, 5000);
-  bundle.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
 
   std::atomic<bool> stop{false};
   std::thread writer([&]() {
     while (!stop.load()) {
       server.RegisterConnection(5000, bundle.session);
-      server.RegisterUser(6000, bundle.session);
       server.UnregisterSession(bundle.session);
     }
   });
   std::thread reader([&]() {
     while (!stop.load()) {
       server.GetConnectionSession(5000);
-      server.GetUserSession(6000);
+      server.GetConnectionCount();
     }
   });
 
@@ -267,28 +213,16 @@ TEST(GatewayServerTest, RegisterConnectionWithZeroId) {
 
   server.RegisterConnection(0, bundle.session);
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
-}
-
-TEST(GatewayServerTest, RegisterUserWithZeroId) {
-  asio::io_context io_context;
-  GatewayServer server;
-  auto bundle = CreateSession(io_context, 6001);
-  bundle.session->SetAuthState(network::TcpSession::AuthState::kAuthed);
-
-  server.RegisterUser(0, bundle.session);
-
-  EXPECT_EQ(server.GetUserRouteCount(), 0u);
+  EXPECT_EQ(server.GetConnectionCount(), 0u);
 }
 
 TEST(GatewayServerTest, UnregisterNullSession) {
   GatewayServer server;
   server.UnregisterSession(nullptr);
-  EXPECT_EQ(server.GetConnectionRouteCount(), 0u);
-  EXPECT_EQ(server.GetUserRouteCount(), 0u);
+  EXPECT_EQ(server.GetConnectionCount(), 0u);
 }
 
-TEST(GatewayServerTest, RouteCountsAccurate) {
+TEST(GatewayServerTest, SessionCountAccurate) {
   asio::io_context io_context;
   GatewayServer server;
   auto session_a = CreateSession(io_context, 7001).session;
@@ -296,13 +230,8 @@ TEST(GatewayServerTest, RouteCountsAccurate) {
 
   server.RegisterConnection(7001, session_a);
   server.RegisterConnection(7002, session_b);
-  session_a->SetAuthState(network::TcpSession::AuthState::kAuthed);
-  session_b->SetAuthState(network::TcpSession::AuthState::kAuthed);
-  server.RegisterUser(8001, session_a);
-  server.RegisterUser(8002, session_b);
 
-  EXPECT_EQ(server.GetConnectionRouteCount(), 2u);
-  EXPECT_EQ(server.GetUserRouteCount(), 2u);
+  EXPECT_EQ(server.GetConnectionCount(), 2u);
 }
 
 }  // namespace mir2::gateway

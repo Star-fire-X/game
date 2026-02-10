@@ -3,8 +3,8 @@
  * @brief 角色生命周期事件定义
  */
 
-#ifndef MIR2_ECS_EVENTS_LIFECYCLE_EVENTS_H
-#define MIR2_ECS_EVENTS_LIFECYCLE_EVENTS_H
+#ifndef MIR2_ECS_EVENTS_LIFECYCLE_EVENTS_H_
+#define MIR2_ECS_EVENTS_LIFECYCLE_EVENTS_H_
 
 #include <entt/entt.hpp>
 #include <cstdint>
@@ -37,4 +37,4 @@ struct CharacterLogoutEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // MIR2_ECS_EVENTS_LIFECYCLE_EVENTS_H
+#endif  // MIR2_ECS_EVENTS_LIFECYCLE_EVENTS_H_

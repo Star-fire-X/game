@@ -2,9 +2,14 @@
 
 #include <entt/entt.hpp>
 
+#include "common/item_constants.h"
 #include "common/types/constants.h"
+#include "core/utils.h"
+#include "ecs/components/character_components.h"
 #include "ecs/components/equipment_component.h"
+#include "ecs/components/ground_item_component.h"
 #include "ecs/components/item_component.h"
+#include "ecs/components/party_component.h"
 #include "ecs/components/skill_component.h"
 #include "ecs/dirty_tracker.h"
 #include "ecs/event_bus.h"
@@ -15,8 +20,11 @@ namespace {
 
 using mir2::ecs::DirtyComponent;
 using mir2::ecs::EventBus;
+using mir2::ecs::CharacterStateComponent;
+using mir2::ecs::GroundItemComponent;
 using mir2::ecs::InventoryOwnerComponent;
 using mir2::ecs::ItemComponent;
+using mir2::ecs::PartyMemberComponent;
 using mir2::ecs::SkillComponent;
 using mir2::ecs::dirty_tracker::is_dirty;
 using mir2::ecs::events::ItemAddedEvent;
@@ -240,6 +248,7 @@ TEST(InventorySystemTest, UseItemConsumesStackAndDestroysWhenEmpty) {
 TEST(InventorySystemTest, DropItemClearsOwnership) {
     entt::registry registry;
     const auto character = CreateCharacter(registry);
+    registry.emplace<CharacterStateComponent>(character);
     EventBus event_bus(registry);
 
     int drop_count = 0;
@@ -290,4 +299,159 @@ TEST(InventorySystemTest, LearnAndUpgradeSkill) {
     EXPECT_TRUE(dirty->skills_dirty);
     EXPECT_EQ(learned_count, 1);
     EXPECT_EQ(upgraded_count, 1);
+}
+
+TEST(InventorySystemTest, DropItemSpecialMeatDecaysDurability) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+    registry.emplace<CharacterStateComponent>(character);
+
+    auto item = CreateItem(registry, character, 0, 1001u, 1, -1);
+    auto& item_component = registry.get<ItemComponent>(item);
+    item_component.std_mode = mir2::common::item_std_mode::kSpecialMeat;
+    item_component.durability = 5000;
+    item_component.max_durability = 5000;
+
+    EXPECT_TRUE(mir2::ecs::InventorySystem::DropItem(
+        registry, character, item, nullptr));
+    EXPECT_EQ(item_component.durability, 3000);
+}
+
+TEST(InventorySystemTest, DropItemDiceRollsLooksInRange) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+    registry.emplace<CharacterStateComponent>(character);
+
+    auto item = CreateItem(registry, character, 0, 1002u, 1, -1);
+    auto& item_component = registry.get<ItemComponent>(item);
+    item_component.std_mode = mir2::common::item_std_mode::kDice;
+    item_component.looks = 0;
+
+    EXPECT_TRUE(mir2::ecs::InventorySystem::DropItem(
+        registry, character, item, nullptr));
+    EXPECT_GE(item_component.looks, 1);
+    EXPECT_LE(item_component.looks, 6);
+}
+
+TEST(InventorySystemTest, DropItemFailsDuringActivity) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+    auto& state = registry.emplace<CharacterStateComponent>(character);
+    state.is_in_activity = true;
+
+    auto item = CreateItem(registry, character, 0, 1003u, 1, -1);
+
+    EXPECT_FALSE(mir2::ecs::InventorySystem::DropItem(
+        registry, character, item, nullptr));
+    const auto& owner = registry.get<InventoryOwnerComponent>(item);
+    EXPECT_EQ(owner.owner, character);
+    EXPECT_EQ(owner.slot_index, 0);
+}
+
+TEST(InventorySystemTest, DropItemFailsDuringTradeCooldown) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+    auto& state = registry.emplace<CharacterStateComponent>(character);
+    state.last_trade_close_time_ms = mir2::core::GetCurrentTimestampMs();
+
+    auto item = CreateItem(registry, character, 0, 1004u, 1, -1);
+
+    EXPECT_FALSE(mir2::ecs::InventorySystem::DropItem(
+        registry, character, item, nullptr));
+    const auto& owner = registry.get<InventoryOwnerComponent>(item);
+    EXPECT_EQ(owner.owner, character);
+    EXPECT_EQ(owner.slot_index, 0);
+}
+
+TEST(InventorySystemTest, PickupItemHonorsOwner) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+    registry.emplace<CharacterStateComponent>(character);
+
+    auto ground_item = registry.create();
+    auto& item_component = registry.emplace<ItemComponent>(ground_item);
+    item_component.item_id = 2000u;
+    item_component.count = 1;
+    auto& owner = registry.emplace<InventoryOwnerComponent>(ground_item);
+    owner.owner = entt::null;
+    owner.slot_index = -1;
+
+    auto& ground_state = registry.emplace<GroundItemComponent>(ground_item);
+    ground_state.owner = character;
+    ground_state.drop_time_ms = mir2::core::GetCurrentTimestampMs();
+
+    EXPECT_TRUE(mir2::ecs::InventorySystem::PickupItem(
+        registry, character, ground_item, nullptr));
+    EXPECT_EQ(owner.owner, character);
+    EXPECT_EQ(owner.slot_index, 0);
+    EXPECT_FALSE(registry.all_of<GroundItemComponent>(ground_item));
+}
+
+TEST(InventorySystemTest, PickupItemAllowsPartySharedOwnership) {
+    entt::registry registry;
+    const auto owner_character = CreateCharacter(registry);
+    const auto picker = CreateCharacter(registry);
+    registry.emplace<PartyMemberComponent>(owner_character, 10u);
+    registry.emplace<PartyMemberComponent>(picker, 10u);
+
+    auto ground_item = registry.create();
+    auto& item_component = registry.emplace<ItemComponent>(ground_item);
+    item_component.item_id = 2001u;
+    item_component.count = 1;
+    auto& owner = registry.emplace<InventoryOwnerComponent>(ground_item);
+    owner.owner = entt::null;
+    owner.slot_index = -1;
+
+    auto& ground_state = registry.emplace<GroundItemComponent>(ground_item);
+    ground_state.owner = owner_character;
+    ground_state.drop_time_ms = mir2::core::GetCurrentTimestampMs();
+
+    EXPECT_TRUE(mir2::ecs::InventorySystem::PickupItem(
+        registry, picker, ground_item, nullptr));
+    EXPECT_EQ(owner.owner, picker);
+}
+
+TEST(InventorySystemTest, PickupItemRejectsNonOwnerWithoutParty) {
+    entt::registry registry;
+    const auto owner_character = CreateCharacter(registry);
+    const auto picker = CreateCharacter(registry);
+
+    auto ground_item = registry.create();
+    auto& item_component = registry.emplace<ItemComponent>(ground_item);
+    item_component.item_id = 2003u;
+    item_component.count = 1;
+    auto& owner = registry.emplace<InventoryOwnerComponent>(ground_item);
+    owner.owner = entt::null;
+    owner.slot_index = -1;
+
+    auto& ground_state = registry.emplace<GroundItemComponent>(ground_item);
+    ground_state.owner = owner_character;
+    ground_state.drop_time_ms = mir2::core::GetCurrentTimestampMs();
+
+    EXPECT_FALSE(mir2::ecs::InventorySystem::PickupItem(
+        registry, picker, ground_item, nullptr));
+    EXPECT_EQ(owner.owner, static_cast<entt::entity>(entt::null));
+    EXPECT_EQ(owner.slot_index, -1);
+}
+
+TEST(InventorySystemTest, PickupItemAllowsAfterOwnershipExpiry) {
+    entt::registry registry;
+    const auto owner_character = CreateCharacter(registry);
+    const auto picker = CreateCharacter(registry);
+
+    auto ground_item = registry.create();
+    auto& item_component = registry.emplace<ItemComponent>(ground_item);
+    item_component.item_id = 2002u;
+    item_component.count = 1;
+    auto& owner = registry.emplace<InventoryOwnerComponent>(ground_item);
+    owner.owner = entt::null;
+    owner.slot_index = -1;
+
+    auto& ground_state = registry.emplace<GroundItemComponent>(ground_item);
+    ground_state.owner = owner_character;
+    ground_state.ownership_expire_ms = mir2::core::GetCurrentTimestampMs() - 1;
+
+    EXPECT_TRUE(mir2::ecs::InventorySystem::PickupItem(
+        registry, picker, ground_item, nullptr));
+    EXPECT_EQ(owner.owner, picker);
 }

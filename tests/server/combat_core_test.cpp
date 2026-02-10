@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "common/enums.h"
-#include "server/combat/combat_core.h"
+#include "server/ecs/systems/combat_core.h"
 
 namespace {
 
@@ -184,6 +184,30 @@ TEST(AttackTypeModifierTest, WideHitIsAoeWithRadius1) {
 TEST(AttackTypeModifierTest, FireHitHasFireDamageBonus) {
     auto modifier = legend2::combat::get_attack_modifier(mir2::common::AttackType::kFireHit);
     EXPECT_EQ(modifier.fire_damage_bonus, 20);
+}
+
+TEST(SkillAttackTypeMappingTest, KnownWarriorSkillIdsMapCorrectly) {
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(3),
+              mir2::common::AttackType::kHeavyHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(4),
+              mir2::common::AttackType::kLongHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(7),
+              mir2::common::AttackType::kWideHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(12),
+              mir2::common::AttackType::kFireHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(25),
+              mir2::common::AttackType::kTwnHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(26),
+              mir2::common::AttackType::kPowerHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(27),
+              mir2::common::AttackType::kLongHit);
+}
+
+TEST(SkillAttackTypeMappingTest, UnknownSkillFallsBackToHit) {
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(0),
+              mir2::common::AttackType::kHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(99999),
+              mir2::common::AttackType::kHit);
 }
 
 // ============================================================================

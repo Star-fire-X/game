@@ -1,55 +1,57 @@
 /**
  * @file character_handler.h
- * @brief 角色相关处理
+ * @brief Character handler for logic layer.
  */
 
-#ifndef LEGEND2_SERVER_HANDLERS_CHARACTER_HANDLER_H
-#define LEGEND2_SERVER_HANDLERS_CHARACTER_HANDLER_H
+#ifndef MIR2_LOGIC_HANDLERS_CHARACTER_CHARACTER_HANDLER_H_
+#define MIR2_LOGIC_HANDLERS_CHARACTER_CHARACTER_HANDLER_H_
 
-#include "ecs/character_entity_manager.h"
+#include <cstddef>
+#include <cstdint>
 
-#include "handlers/base_handler.h"
-#include "world/role_store.h"
+#include "logic/handler_context.h"
+#include "logic/task.h"
 
-namespace legend2::handlers {
+namespace mir2::ecs {
+class CharacterEntityManager;
+}
 
-/**
- * @brief 角色Handler
- */
-class CharacterHandler : public BaseHandler {
-public:
-    CharacterHandler(mir2::ecs::CharacterEntityManager& entity_manager,
-                     mir2::world::RoleStore& role_store);
+namespace mir2::proto {
+class RoleListReq;
+class CreateRoleReq;
+class SelectRoleReq;
+}
 
-protected:
-    void DoHandle(const HandlerContext& context,
-                  uint16_t msg_id,
-                  const std::vector<uint8_t>& payload,
-                  ResponseCallback callback) override;
+namespace mir2::logic {
 
-    void OnError(const HandlerContext& context,
-                 uint16_t msg_id,
-                 mir2::common::ErrorCode error_code,
-                 ResponseCallback callback) override;
+class CoroutineExecutor;
+class ResponseSender;
+class RoleStore;
+class ClientRegistry;
 
-private:
-    void HandleRoleList(const HandlerContext& context,
-                        const std::vector<uint8_t>& payload,
-                        ResponseCallback callback);
-    void HandleCreateRole(const HandlerContext& context,
-                          const std::vector<uint8_t>& payload,
-                          ResponseCallback callback);
-    void HandleSelectRole(const HandlerContext& context,
-                          const std::vector<uint8_t>& payload,
-                          ResponseCallback callback);
-    void HandleLogout(const HandlerContext& context,
-                      const std::vector<uint8_t>& payload,
-                      ResponseCallback callback);
+class CharacterHandler {
+ public:
+  CharacterHandler(CoroutineExecutor& executor,
+                   ResponseSender& response_sender,
+                   mir2::ecs::CharacterEntityManager& entity_manager,
+                   RoleStore& role_store,
+                   ClientRegistry& client_registry);
 
-    mir2::ecs::CharacterEntityManager& entity_manager_;
-    mir2::world::RoleStore& role_store_;
+  Task<void> HandleMessage(HandlerContext ctx, const uint8_t* payload, size_t payload_size);
+
+ private:
+  Task<void> HandleRoleList(HandlerContext ctx, const mir2::proto::RoleListReq* req);
+  Task<void> HandleCreateRole(HandlerContext ctx, const mir2::proto::CreateRoleReq* req);
+  Task<void> HandleSelectRole(HandlerContext ctx, const mir2::proto::SelectRoleReq* req);
+  Task<void> HandleLogout(HandlerContext ctx);
+
+  CoroutineExecutor& executor_;
+  ResponseSender& response_sender_;
+  mir2::ecs::CharacterEntityManager& entity_manager_;
+  RoleStore& role_store_;
+  ClientRegistry& client_registry_;
 };
 
-}  // namespace legend2::handlers
+}  // namespace mir2::logic
 
-#endif  // LEGEND2_SERVER_HANDLERS_CHARACTER_HANDLER_H
+#endif  // MIR2_LOGIC_HANDLERS_CHARACTER_CHARACTER_HANDLER_H_

@@ -3,9 +3,10 @@
  * @brief 网关服务器
  */
 
-#ifndef MIR2_GATEWAY_GATEWAY_SERVER_H
-#define MIR2_GATEWAY_GATEWAY_SERVER_H
+#ifndef MIR2_GATEWAY_GATEWAY_SERVER_H_
+#define MIR2_GATEWAY_GATEWAY_SERVER_H_
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -14,11 +15,12 @@
 #include <unordered_map>
 #include <vector>
 
-#include "common/enums.h"
 #include "core/application.h"
+#include "gateway/connection_holder.h"
 #include "gateway/message_router.h"
 #include "network/tcp_client.h"
-#include "network/network_manager.h"
+#include "network/dual_channel_manager.h"
+#include "security/rate_limiter.h"
 
 namespace mir2::gateway {
 
@@ -35,14 +37,11 @@ class GatewayServer {
 
   void RegisterConnection(uint64_t connection_id,
                           const std::shared_ptr<network::TcpSession>& session);
-  void RegisterUser(uint64_t user_id, const std::shared_ptr<network::TcpSession>& session);
   void UnregisterSession(const std::shared_ptr<network::TcpSession>& session);
   void CleanupStaleRoutes();
 
   std::shared_ptr<network::TcpSession> GetConnectionSession(uint64_t connection_id) const;
-  std::shared_ptr<network::TcpSession> GetUserSession(uint64_t user_id) const;
-  size_t GetConnectionRouteCount() const;
-  size_t GetUserRouteCount() const;
+  size_t GetConnectionCount() const;
 
  protected:
   void Tick(float delta_time);
@@ -52,38 +51,51 @@ class GatewayServer {
 
  private:
   void RegisterHandlers();
-  void RegisterDefaultRoutes();
-  bool ConnectServices();
-  void StartAsyncConnect(common::ServiceType service);
-  bool IsServiceConnected(common::ServiceType service) const;
-  bool ConnectToWorldService();
-  bool ConnectToGameService();
-  bool ConnectToDbService();
-  void ScheduleReconnect(common::ServiceType service, int retry_count);
-  void ForwardToService(common::ServiceType service, uint64_t client_id, uint16_t msg_id,
-                        const std::vector<uint8_t>& payload);
+  void HandleHeartbeat(const std::shared_ptr<network::TcpSession>& session,
+                       const std::vector<uint8_t>& payload);
+  void HandleForwardMessage(const std::shared_ptr<network::TcpSession>& session,
+                            uint16_t msg_id,
+                            const std::vector<uint8_t>& payload);
+  bool ConnectLogicService();
+  void StartAsyncConnect();
+  bool IsLogicConnected() const;
+  bool ConnectToLogicService();
+  void ScheduleReconnect(int retry_count);
+  void ForwardToLogic(uint64_t client_id, uint16_t msg_id,
+                      const std::vector<uint8_t>& payload);
   void NotifyClientDisconnected(uint64_t client_id);
-  void OnServicePacket(common::ServiceType service, const network::Packet& packet);
-  network::TcpClient* GetServiceClient(common::ServiceType service) const;
+  void OnLogicPacket(const network::Packet& packet);
+  void HandleBackpressureControl(const std::vector<uint8_t>& payload);
+  void ResumeBackpressuredSessions(int64_t now_ms);
+  std::vector<uint8_t> BuildContextRestoreResponse(uint32_t request_id) const;
+  void EnterHoldingState();
+  void EnterRestoringState();
+  void EnterFlushingState();
+  void FlushBufferedMessages();
+  void ApplyHolderState(ConnectionHolder& holder, ConnectionHolder::State target);
+  network::TcpClient* GetLogicClient() const;
 
   core::Application app_;
-  std::unique_ptr<network::NetworkManager> network_;
-  std::unique_ptr<network::TcpClient> world_client_;
-  std::unique_ptr<network::TcpClient> game_client_;
-  std::unique_ptr<network::TcpClient> db_client_;
+  std::unique_ptr<network::DualChannelManager> network_;
+  std::unique_ptr<network::TcpClient> logic_client_;
   std::thread logic_thread_;
 
-  mutable std::shared_mutex route_table_mutex_;
-  std::unordered_map<uint64_t, std::shared_ptr<network::TcpSession>> connection_route_table_;
-  std::unordered_map<uint64_t, std::shared_ptr<network::TcpSession>> user_route_table_;
-
-  MessageRouter message_router_;
+  // SessionMap: connection_id -> TcpSession
+  // 用于上下文注入和消息转发
+  mutable std::shared_mutex session_map_mutex_;
+  std::unordered_map<uint64_t, std::shared_ptr<network::TcpSession>> session_map_;
+  std::unordered_map<uint64_t, std::unique_ptr<ConnectionHolder>> connection_holders_;
+  std::unordered_map<uint64_t, int64_t> connection_connected_at_ms_;
+  std::unordered_map<uint64_t, int64_t> client_backpressure_until_ms_;
+  mir2::security::RateLimiter login_ip_rate_limiter_{
+      {.capacity = 5, .refill_rate = 1}};
   std::shared_mutex reconnect_mutex_;
-  // Track reconnect attempts per service to avoid duplicate timers.
-  std::unordered_map<common::ServiceType, bool> reconnecting_;
+  bool logic_reconnecting_ = false;
+  std::atomic<bool> shutting_down_{false};
   float stale_route_cleanup_elapsed_sec_ = 0.0f;
+  ConnectionHolder::State holder_state_ = ConnectionHolder::State::FORWARDING;
 };
 
 }  // namespace mir2::gateway
 
-#endif  // MIR2_GATEWAY_GATEWAY_SERVER_H
+#endif  // MIR2_GATEWAY_GATEWAY_SERVER_H_

@@ -3,8 +3,8 @@
  * @brief ECS storage component.
  */
 
-#ifndef LEGEND2_SERVER_ECS_STORAGE_COMPONENT_H
-#define LEGEND2_SERVER_ECS_STORAGE_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_STORAGE_COMPONENT_H_
+#define MIR2_SERVER_ECS_STORAGE_COMPONENT_H_
 
 #include <array>
 #include <cstddef>
@@ -33,4 +33,4 @@ struct StorageComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_STORAGE_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_STORAGE_COMPONENT_H_

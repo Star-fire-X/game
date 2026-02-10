@@ -5,8 +5,8 @@
  * 包含怪物AI、仇恨系统、技能管理相关的组件
  */
 
-#ifndef MIR2_ECS_COMPONENTS_MONSTER_COMPONENT_H
-#define MIR2_ECS_COMPONENTS_MONSTER_COMPONENT_H
+#ifndef MIR2_ECS_COMPONENTS_MONSTER_COMPONENT_H_
+#define MIR2_ECS_COMPONENTS_MONSTER_COMPONENT_H_
 
 #include <cstdint>
 #include <unordered_map>
@@ -31,6 +31,15 @@ enum class MonsterAIType : uint8_t {
     kPoisonous = 5,   // 毒素AI - 攻击附带毒素
     kGuard = 6,       // 守卫AI - 城堡防御逻辑
     kBossCowKing = 7  // 牛魔王BOSS - 瞬移+疯狂模式
+};
+
+/**
+ * @brief BOSS阶段
+ */
+enum class BossPhase : uint8_t {
+    PHASE_1 = 0,  // HP > 70%
+    PHASE_2 = 1,  // 30% <= HP <= 70%
+    PHASE_3 = 2   // HP < 30%
 };
 
 /**
@@ -74,6 +83,9 @@ struct MonsterAIComponent {
     bool is_crazy_mode = false;                 ///< 疯狂模式（牛魔王）
     float crazy_mode_timer = 0.0f;              ///< 疯狂模式持续时间
     float teleport_cooldown = 0.0f;             ///< 瞬移冷却时间（牛魔王）
+    BossPhase current_phase = BossPhase::PHASE_1; ///< 当前BOSS阶段
+    float summon_cooldown = 0.0f;               ///< 召唤小怪冷却
+    int summon_count = 0;                       ///< 已召唤数量
 };
 
 /**
@@ -202,4 +214,4 @@ struct MonsterSkillComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_COMPONENTS_MONSTER_COMPONENT_H
+#endif  // MIR2_ECS_COMPONENTS_MONSTER_COMPONENT_H_

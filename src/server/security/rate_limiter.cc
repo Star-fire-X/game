@@ -22,6 +22,15 @@ int RateLimiter::GetTokens(const std::string& key) {
   return bucket.tokens;
 }
 
+void RateLimiter::SetConfig(const Config& config, bool clear_buckets) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  config_.capacity = std::max(1, config.capacity);
+  config_.refill_rate = std::max(1, config.refill_rate);
+  if (clear_buckets) {
+    buckets_.clear();
+  }
+}
+
 void RateLimiter::RefillBucket(Bucket& bucket) {
   const auto now = std::chrono::steady_clock::now();
   if (bucket.last_refill.time_since_epoch().count() == 0) {

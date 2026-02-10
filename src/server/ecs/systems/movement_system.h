@@ -3,8 +3,8 @@
  * @brief ECS 移动逻辑系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_MOVEMENT_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_MOVEMENT_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_MOVEMENT_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_MOVEMENT_SYSTEM_H_
 
 #include "ecs/components/character_components.h"
 #include "ecs/world.h"
@@ -35,4 +35,4 @@ class MovementSystem : public System {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_MOVEMENT_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_MOVEMENT_SYSTEM_H_

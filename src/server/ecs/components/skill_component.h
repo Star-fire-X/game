@@ -5,8 +5,8 @@
  * 包含已学技能、技能列表、冷却追踪、施法状态等组件。
  */
 
-#ifndef LEGEND2_SERVER_ECS_SKILL_COMPONENT_H
-#define LEGEND2_SERVER_ECS_SKILL_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_SKILL_COMPONENT_H
+#define MIR2_SERVER_ECS_SKILL_COMPONENT_H
 
 #include "common/types.h"
 
@@ -253,4 +253,4 @@ struct CastingComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SKILL_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_SKILL_COMPONENT_H

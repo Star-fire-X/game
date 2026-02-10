@@ -74,6 +74,9 @@ public:
     /// Update the network client (process queued callbacks).
     void update() override;
 
+    /// Reset KCP session if using a dual-channel client.
+    bool reset_kcp_session();
+
 private:
     void wire_callbacks();
     void handle_connect();

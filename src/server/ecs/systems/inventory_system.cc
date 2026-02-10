@@ -1,13 +1,20 @@
 #include "ecs/systems/inventory_system.h"
 
+#include "common/item_constants.h"
 #include "common/types/constants.h"
+#include "core/utils.h"
+#include "data/item_template.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/ground_item_component.h"
+#include "ecs/components/party_component.h"
 #include "ecs/dirty_tracker.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/inventory_events.h"
 
+#include <algorithm>
 #include <array>
 #include <limits>
+#include <random>
 
 namespace mir2::ecs {
 
@@ -29,6 +36,31 @@ std::optional<mir2::common::EquipSlot> resolve_equip_slot(const ItemComponent& i
         return std::nullopt;
     }
     return static_cast<mir2::common::EquipSlot>(item.equip_slot);
+}
+
+bool are_in_same_party(entt::registry& registry, entt::entity left, entt::entity right) {
+    if (left == entt::null || right == entt::null) {
+        return false;
+    }
+    auto* left_member = registry.try_get<PartyMemberComponent>(left);
+    auto* right_member = registry.try_get<PartyMemberComponent>(right);
+    if (!left_member || !right_member) {
+        return false;
+    }
+    if (left_member->party_id == 0 || right_member->party_id == 0) {
+        return false;
+    }
+    return left_member->party_id == right_member->party_id;
+}
+
+std::mt19937& ItemDropRng() {
+    static thread_local std::mt19937 rng(std::random_device{}());
+    return rng;
+}
+
+int RollDiceLooks() {
+    std::uniform_int_distribution<int> dist(1, 6);
+    return dist(ItemDropRng());
 }
 
 }  // namespace
@@ -153,6 +185,15 @@ std::optional<entt::entity> InventorySystem::AddItem(entt::registry& registry,
     auto& item_component = registry.emplace<ItemComponent>(item);
     item_component.item_id = item_id;
     item_component.count = count;
+
+    // Fill std_mode and shape from template if available
+    if (const auto* tmpl = data::ItemTemplateManager::Instance().GetTemplate(item_id)) {
+        item_component.std_mode = tmpl->std_mode;
+        item_component.shape = tmpl->shape;
+        item_component.looks = tmpl->looks;
+        item_component.max_durability = tmpl->dura_max;
+        item_component.durability = tmpl->dura_max;
+    }
 
     auto& owner = registry.emplace<InventoryOwnerComponent>(item);
     owner.owner = character;
@@ -376,6 +417,22 @@ bool InventorySystem::DropItem(entt::registry& registry,
         return false;
     }
 
+    auto* state = registry.try_get<CharacterStateComponent>(character);
+    if (!state) {
+        return false;
+    }
+
+    if (state->is_in_activity) {
+        return false;
+    }
+
+    const int64_t now_ms = mir2::core::GetCurrentTimestampMs();
+    if (state->last_trade_close_time_ms > 0 &&
+        now_ms - state->last_trade_close_time_ms <
+            static_cast<int64_t>(mir2::common::trade::kDropCooldownMs)) {
+        return false;
+    }
+
     auto* item_component = registry.try_get<ItemComponent>(item);
     auto* owner = registry.try_get<InventoryOwnerComponent>(item);
     if (!item_component || !owner) {
@@ -392,6 +449,16 @@ bool InventorySystem::DropItem(entt::registry& registry,
 
     if (FindItemInSlot(registry, character, owner->slot_index) != item) {
         return false;
+    }
+
+    if (item_component->std_mode == common::item_std_mode::kSpecialMeat) {
+        const int durability = item_component->durability -
+                               common::durability::kMeatDropDecay;
+        item_component->durability = std::max(0, durability);
+    }
+
+    if (item_component->std_mode == common::item_std_mode::kDice) {
+        item_component->looks = RollDiceLooks();
     }
 
     const int slot_index = owner->slot_index;
@@ -427,7 +494,30 @@ bool InventorySystem::PickupItem(entt::registry& registry,
         return false;
     }
 
-    if (owner->owner != entt::null) {
+    auto* ground_state = registry.try_get<GroundItemComponent>(ground_item);
+    entt::entity pickup_owner = entt::null;
+    bool ownership_expired = false;
+    if (ground_state) {
+        if (ground_state->owner != entt::null && !registry.valid(ground_state->owner)) {
+            ground_state->owner = entt::null;
+        }
+        const int64_t now_ms = mir2::core::GetCurrentTimestampMs();
+        ownership_expired = ground_state->IsOwnershipExpired(now_ms);
+        if (ownership_expired && ground_state->owner != entt::null) {
+            ground_state->owner = entt::null;
+        }
+        pickup_owner = ground_state->owner;
+    } else {
+        pickup_owner = owner->owner;
+        if (pickup_owner != entt::null && !registry.valid(pickup_owner)) {
+            pickup_owner = entt::null;
+        }
+    }
+
+    if (pickup_owner != entt::null &&
+        pickup_owner != character &&
+        !ownership_expired &&
+        !are_in_same_party(registry, character, pickup_owner)) {
         return false;
     }
 
@@ -449,6 +539,9 @@ bool InventorySystem::PickupItem(entt::registry& registry,
 
     owner->owner = character;
     owner->slot_index = free_slot;
+    if (ground_state) {
+        registry.remove<GroundItemComponent>(ground_item);
+    }
 
     dirty_tracker::mark_items_dirty(registry, character);
 

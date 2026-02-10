@@ -19,12 +19,12 @@
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
 #include "handlers/character/character_handler.h"
-#include "handlers/client_registry.h"
+#include "logic/services/client_registry.h"
 #include "handlers/combat/combat_handler.h"
 #include "handlers/login/login_handler.h"
 #include "handlers/movement/movement_handler.h"
 #include "game/map/scene_manager.h"
-#include "world/role_store.h"
+#include "logic/services/session_role_store.h"
 
 namespace {
 
@@ -244,7 +244,7 @@ TEST(ProtocolIntegrationTest, LoginInvalidPasswordEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, CreateCharacterSuccessEndToEnd) {
-    mir2::world::RoleStore role_store;
+    mir2::logic::RoleStore role_store;
     entt::registry registry;
     mir2::ecs::CharacterEntityManager entity_manager(registry);
     const uint64_t account_id = 9001;
@@ -301,13 +301,13 @@ TEST(ProtocolIntegrationTest, CreateCharacterSuccessEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, CreateCharacterDuplicateNameEndToEnd) {
-    mir2::world::RoleStore role_store;
+    mir2::logic::RoleStore role_store;
     entt::registry registry;
     mir2::ecs::CharacterEntityManager entity_manager(registry);
     const uint64_t account_id = 9002;
     const uint64_t client_id = 12;
     role_store.BindClientAccount(client_id, account_id);
-    mir2::world::RoleRecord record;
+    mir2::logic::RoleRecord record;
     ASSERT_EQ(role_store.CreateRole(account_id, "Alice", 1, 0, &record),
               mir2::common::ErrorCode::kOk);
 
@@ -356,7 +356,7 @@ TEST(ProtocolIntegrationTest, CreateCharacterDuplicateNameEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, MoveSuccessEndToEnd) {
-    legend2::handlers::ClientRegistry registry;
+    mir2::logic::ClientRegistry registry;
     entt::registry ecs_registry;
     mir2::ecs::CharacterEntityManager character_manager(ecs_registry);
     const uint64_t client_id = 21;
@@ -431,7 +431,7 @@ TEST(ProtocolIntegrationTest, MoveSuccessEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, MoveOutOfBoundsEndToEnd) {
-    legend2::handlers::ClientRegistry registry;
+    mir2::logic::ClientRegistry registry;
     entt::registry ecs_registry;
     mir2::ecs::CharacterEntityManager character_manager(ecs_registry);
     const uint64_t client_id = 22;

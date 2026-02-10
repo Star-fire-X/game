@@ -3,8 +3,8 @@
  * @brief BOSS事件定义
  */
 
-#ifndef MIR2_ECS_EVENTS_BOSS_EVENTS_H
-#define MIR2_ECS_EVENTS_BOSS_EVENTS_H
+#ifndef MIR2_ECS_EVENTS_BOSS_EVENTS_H_
+#define MIR2_ECS_EVENTS_BOSS_EVENTS_H_
 
 #include <cstdint>
 #include <vector>
@@ -50,4 +50,4 @@ struct BossSpecialSkillEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // MIR2_ECS_EVENTS_BOSS_EVENTS_H
+#endif  // MIR2_ECS_EVENTS_BOSS_EVENTS_H_

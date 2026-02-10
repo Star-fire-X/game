@@ -15,15 +15,34 @@
 
 namespace mir2::client::skill {
 
+constexpr size_t kSkillManagerMaxSkills = 20;
+constexpr size_t kSkillManagerHotkeyCount = 8;
+
+/**
+ * @brief Skill manager interface for UI components.
+ */
+class ISkillManager {
+public:
+    virtual ~ISkillManager() = default;
+
+    virtual const ClientSkillTemplate* get_template(uint32_t skill_id) const = 0;
+    virtual const std::array<std::optional<ClientLearnedSkill>, kSkillManagerMaxSkills>&
+    get_learned_skills() const = 0;
+    virtual bool bind_hotkey(uint8_t slot, uint32_t skill_id) = 0;
+    virtual uint32_t get_skill_by_hotkey(uint8_t slot) const = 0;
+    virtual int64_t get_remaining_cooldown_ms(uint32_t skill_id, int64_t now_ms) const = 0;
+    virtual void update(int64_t now_ms) = 0;
+};
+
 /**
  * @brief Client skill manager.
  */
-class SkillManager {
+class SkillManager : public ISkillManager {
 public:
     /// Maximum learned skills.
-    static constexpr size_t kMaxSkills = 20;
+    static constexpr size_t kMaxSkills = kSkillManagerMaxSkills;
     /// Hotkey slots (F1-F8).
-    static constexpr size_t kHotkeyCount = 8;
+    static constexpr size_t kHotkeyCount = kSkillManagerHotkeyCount;
 
     SkillManager() = default;
 
@@ -53,7 +72,7 @@ public:
      * @brief Get a skill template.
      * @return Template pointer or nullptr.
      */
-    const ClientSkillTemplate* get_template(uint32_t skill_id) const;
+    const ClientSkillTemplate* get_template(uint32_t skill_id) const override;
 
     /**
      * @brief Get a learned skill.
@@ -63,7 +82,7 @@ public:
     /**
      * @brief Get all learned skills.
      */
-    const std::array<std::optional<ClientLearnedSkill>, kMaxSkills>& get_learned_skills() const {
+    const std::array<std::optional<ClientLearnedSkill>, kMaxSkills>& get_learned_skills() const override {
         return learned_skills_;
     }
 
@@ -77,7 +96,7 @@ public:
      * @param slot Hotkey slot (1-8).
      * @return true if bound.
      */
-    bool bind_hotkey(uint8_t slot, uint32_t skill_id);
+    bool bind_hotkey(uint8_t slot, uint32_t skill_id) override;
 
     /**
      * @brief Unbind a hotkey slot.
@@ -91,7 +110,7 @@ public:
      * @param slot Hotkey slot (1-8).
      * @return Skill ID or 0 if unbound.
      */
-    uint32_t get_skill_by_hotkey(uint8_t slot) const;
+    uint32_t get_skill_by_hotkey(uint8_t slot) const override;
 
     /**
      * @brief Check whether a skill cooldown is ready.
@@ -107,7 +126,7 @@ public:
      * @brief Get remaining cooldown time.
      * @return Remaining milliseconds.
      */
-    int64_t get_remaining_cooldown_ms(uint32_t skill_id, int64_t now_ms) const;
+    int64_t get_remaining_cooldown_ms(uint32_t skill_id, int64_t now_ms) const override;
 
     /**
      * @brief Start casting.
@@ -132,7 +151,7 @@ public:
     /**
      * @brief Update state (cleanup expired cooldowns).
      */
-    void update(int64_t now_ms);
+    void update(int64_t now_ms) override;
 
 private:
     std::unordered_map<uint32_t, ClientSkillTemplate> templates_;

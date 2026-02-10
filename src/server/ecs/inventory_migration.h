@@ -5,8 +5,8 @@
  * 提供 JSON <-> ECS 结构化组件的转换函数，支持批量迁移。
  */
 
-#ifndef LEGEND2_SERVER_ECS_INVENTORY_MIGRATION_H
-#define LEGEND2_SERVER_ECS_INVENTORY_MIGRATION_H
+#ifndef MIR2_SERVER_ECS_INVENTORY_MIGRATION_H_
+#define MIR2_SERVER_ECS_INVENTORY_MIGRATION_H_
 
 #include <string>
 #include <tuple>
@@ -31,4 +31,4 @@ void MigrateAllCharacters(entt::registry& registry);
 
 }  // namespace mir2::ecs::inventory
 
-#endif  // LEGEND2_SERVER_ECS_INVENTORY_MIGRATION_H
+#endif  // MIR2_SERVER_ECS_INVENTORY_MIGRATION_H_

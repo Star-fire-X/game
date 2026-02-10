@@ -123,7 +123,7 @@ TEST_F(TieredCacheTest, UpdateWithRetryBasic) {
     // 执行更新：增加 50
     bool success = cache_->UpdateWithRetry(
         "balance",
-        [](const std::optional<VersionedData>& current) {
+        [this](const std::optional<VersionedData>& current) {
             // 简单的模拟：直接返回新数据
             auto new_data = StringToBytes("150");
             auto ptr = std::make_shared<const std::vector<uint8_t>>(
@@ -151,7 +151,7 @@ TEST_F(TieredCacheTest, ConcurrentConflictDetection) {
     std::thread t1([this, &update1_success]() {
         update1_success = cache_->UpdateWithRetry(
             "key",
-            [](const std::optional<VersionedData>& current) {
+            [this](const std::optional<VersionedData>& current) {
                 auto new_data = StringToBytes("update1");
                 auto ptr = std::make_shared<const std::vector<uint8_t>>(
                     new_data.begin(), new_data.end());
@@ -163,7 +163,7 @@ TEST_F(TieredCacheTest, ConcurrentConflictDetection) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         update2_success = cache_->UpdateWithRetry(
             "key",
-            [](const std::optional<VersionedData>& current) {
+            [this](const std::optional<VersionedData>& current) {
                 auto new_data = StringToBytes("update2");
                 auto ptr = std::make_shared<const std::vector<uint8_t>>(
                     new_data.begin(), new_data.end());
@@ -402,7 +402,7 @@ TEST_F(TieredCacheTest, EndToEndIntegration) {
     // 3. 增加金币（UpdateWithRetry）
     bool gold_updated = cache_->UpdateWithRetry(
         kPlayerId + ":gold",
-        [](const std::optional<VersionedData>& current) {
+        [this](const std::optional<VersionedData>& current) {
             auto new_gold = StringToBytes("9999");
             auto ptr = std::make_shared<const std::vector<uint8_t>>(
                 new_gold.begin(), new_gold.end());

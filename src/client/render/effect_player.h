@@ -16,8 +16,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -129,7 +131,7 @@ private:
 
     SDLRenderer& renderer_;
     mir2::client::ResourceManager& resource_manager_;
-    std::vector<ActiveEffect> active_effects_;
+    std::deque<ActiveEffect> active_effects_;
     std::vector<ProjectileEffect> projectiles_;
     std::vector<DamageNumber> damage_numbers_;
     std::unordered_set<uint32_t> preloaded_effects_;

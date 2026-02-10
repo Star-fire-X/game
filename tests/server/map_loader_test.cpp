@@ -25,8 +25,12 @@ struct TileDef {
 
 class TempMapFile {
  public:
-  explicit TempMapFile(const std::string& filename)
-      : path_(std::filesystem::temp_directory_path() / filename) {}
+  explicit TempMapFile(const std::string& filename) {
+    const std::filesystem::path map_dir = std::filesystem::current_path() / "Map";
+    std::error_code ec;
+    std::filesystem::create_directories(map_dir, ec);
+    path_ = map_dir / filename;
+  }
 
   ~TempMapFile() { std::error_code ec; std::filesystem::remove(path_, ec); }
 
@@ -107,6 +111,41 @@ TEST(MapLoaderTest, LoadWalkability) {
   EXPECT_TRUE(map->IsWalkable(2, 1));
   EXPECT_FALSE(map->IsWalkable(-1, 0));
   EXPECT_FALSE(map->IsWalkable(0, 2));
+}
+
+TEST(MapLoaderTest, LoadFullWalkabilityMatchesLoadRules) {
+  constexpr int32_t kWidth = 3;
+  constexpr int32_t kHeight = 2;
+  std::vector<TileDef> tiles(static_cast<size_t>(kWidth * kHeight));
+  tiles[0].background = 0x8000;  // (0,0) blocked by background
+  tiles[1].object = 0x8000;      // (1,0) blocked by object
+  tiles[2].door_index = 0x81;    // (2,0) door exists
+  tiles[2].door_offset = 0x00;   // closed
+  tiles[5].door_index = 0x81;    // (2,1) door exists
+  tiles[5].door_offset = 0x80;   // open
+
+  TempMapFile temp = WriteTestMapFile(kWidth, kHeight, tiles);
+
+  mir2::game::map::MapLoader loader;
+  auto walkability_only = loader.Load(temp.path().string());
+  ASSERT_TRUE(walkability_only.has_value());
+
+  auto full = loader.LoadFull(temp.path().string());
+  ASSERT_TRUE(full.has_value());
+  EXPECT_EQ(full->width, kWidth);
+  EXPECT_EQ(full->height, kHeight);
+
+  for (int32_t y = 0; y < kHeight; ++y) {
+    for (int32_t x = 0; x < kWidth; ++x) {
+      EXPECT_EQ(full->IsWalkable(x, y), walkability_only->IsWalkable(x, y))
+          << "Mismatch at (" << x << "," << y << ")";
+    }
+  }
+
+  EXPECT_FALSE(full->IsWalkable(0, 0));
+  EXPECT_FALSE(full->IsWalkable(1, 0));
+  EXPECT_FALSE(full->IsWalkable(2, 0));
+  EXPECT_TRUE(full->IsWalkable(2, 1));
 }
 
 TEST(MapLoaderTest, RejectsInvalidFile) {

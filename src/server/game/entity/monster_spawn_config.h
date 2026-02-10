@@ -3,8 +3,8 @@
  * @brief 怪物刷新配置数据结构
  */
 
-#ifndef MIR2_GAME_ENTITY_MONSTER_SPAWN_CONFIG_H
-#define MIR2_GAME_ENTITY_MONSTER_SPAWN_CONFIG_H
+#ifndef MIR2_GAME_ENTITY_MONSTER_SPAWN_CONFIG_H_
+#define MIR2_GAME_ENTITY_MONSTER_SPAWN_CONFIG_H_
 
 #include <cstdint>
 #include "common/types.h"
@@ -43,4 +43,4 @@ struct DynamicSpawnEvent {
 
 }  // namespace mir2::game::entity
 
-#endif  // MIR2_GAME_ENTITY_MONSTER_SPAWN_CONFIG_H
+#endif  // MIR2_GAME_ENTITY_MONSTER_SPAWN_CONFIG_H_

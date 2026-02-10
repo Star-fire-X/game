@@ -27,11 +27,20 @@ bool ConfigManager::Load(const std::string& config_path) {
     server_config_.name = ReadOrDefault(server, "name", server_config_.name);
     server_config_.bind_ip = ReadOrDefault(server, "bind_ip", server_config_.bind_ip);
     server_config_.port = ReadOrDefault(server, "port", server_config_.port);
+    server_config_.udp_port = ReadOrDefault(server, "udp_port", server_config_.udp_port);
     server_config_.io_threads = ReadOrDefault(server, "io_threads", server_config_.io_threads);
     server_config_.max_connections = ReadOrDefault(server, "max_connections", server_config_.max_connections);
     server_config_.tick_interval_ms = ReadOrDefault(server, "tick_interval_ms", server_config_.tick_interval_ms);
     server_config_.heartbeat_timeout_ms =
         ReadOrDefault(server, "heartbeat_timeout_ms", server_config_.heartbeat_timeout_ms);
+    server_config_.login_ip_rate_limit_capacity = ReadOrDefault(
+        server,
+        "login_ip_rate_limit_capacity",
+        server_config_.login_ip_rate_limit_capacity);
+    server_config_.login_ip_rate_limit_refill_rate = ReadOrDefault(
+        server,
+        "login_ip_rate_limit_refill_rate",
+        server_config_.login_ip_rate_limit_refill_rate);
     server_config_.metrics_port = ReadOrDefault(server, "metrics_port", server_config_.metrics_port);
 
     const YAML::Node database = root["database"];
@@ -54,18 +63,11 @@ bool ConfigManager::Load(const std::string& config_path) {
     log_config_.max_size_mb = ReadOrDefault(log, "max_size_mb", log_config_.max_size_mb);
     log_config_.max_files = ReadOrDefault(log, "max_files", log_config_.max_files);
 
+    // 只解析 logic 服务配置（向后兼容：忽略旧的 world/game/db 字段）
     const YAML::Node services = root["services"];
-    const YAML::Node world = services["world"];
-    service_config_.world.host = ReadOrDefault(world, "host", service_config_.world.host);
-    service_config_.world.port = ReadOrDefault(world, "port", service_config_.world.port);
-
-    const YAML::Node game = services["game"];
-    service_config_.game.host = ReadOrDefault(game, "host", service_config_.game.host);
-    service_config_.game.port = ReadOrDefault(game, "port", service_config_.game.port);
-
-    const YAML::Node db = services["db"];
-    service_config_.db.host = ReadOrDefault(db, "host", service_config_.db.host);
-    service_config_.db.port = ReadOrDefault(db, "port", service_config_.db.port);
+    const YAML::Node logic = services["logic"];
+    service_config_.logic.host = ReadOrDefault(logic, "host", service_config_.logic.host);
+    service_config_.logic.port = ReadOrDefault(logic, "port", service_config_.logic.port);
 
     const YAML::Node ecs = root["ecs"];
     ecs_config_.world_registry_reserve =
@@ -79,6 +81,7 @@ bool ConfigManager::Load(const std::string& config_path) {
       }
     }
 
+    loaded_ = true;
     return true;
   } catch (const std::exception& ex) {
     std::cerr << "Config load failed: " << ex.what() << std::endl;

@@ -5,8 +5,8 @@
  * 用于禁止拷贝与赋值，确保对象的唯一性语义。
  */
 
-#ifndef MIR2_CORE_NON_COPYABLE_H
-#define MIR2_CORE_NON_COPYABLE_H
+#ifndef MIR2_CORE_NON_COPYABLE_H_
+#define MIR2_CORE_NON_COPYABLE_H_
 
 namespace mir2::core {
 
@@ -26,4 +26,4 @@ class NonCopyable {
 
 }  // namespace mir2::core
 
-#endif  // MIR2_CORE_NON_COPYABLE_H
+#endif  // MIR2_CORE_NON_COPYABLE_H_

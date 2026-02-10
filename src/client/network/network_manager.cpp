@@ -1,5 +1,7 @@
 #include "client/network/network_manager.h"
 
+#include "client/network/dual_channel_client.h"
+
 #include <utility>
 
 namespace mir2::client {
@@ -83,6 +85,15 @@ void NetworkManager::update() {
     if (disconnect_pending_.exchange(false)) {
         handle_disconnect();
     }
+}
+
+bool NetworkManager::reset_kcp_session() {
+    auto* dual_client = dynamic_cast<DualChannelClient*>(client_.get());
+    if (!dual_client) {
+        return false;
+    }
+    dual_client->reset_kcp_session();
+    return true;
 }
 
 void NetworkManager::wire_callbacks() {

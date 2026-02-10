@@ -1,8 +1,13 @@
 #include "scene/login_scene.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace mir2::scene {
+
+LoginFlowManager::LoginFlowManager()
+    : LoginFlowManager(Config{}) {
+}
 
 LoginFlowManager::LoginFlowManager(const Config& config)
     : config_(config) {
@@ -15,12 +20,14 @@ void LoginFlowManager::start_login(const std::string& username, const std::strin
 
     last_error_.reset();
     if (!validate_username(username)) {
-        set_error("用户名长度必须在3到32之间");
+        set_error("用户名须为" + std::to_string(Config::USERNAME_MIN_LENGTH) + "-" +
+                  std::to_string(Config::USERNAME_MAX_LENGTH) + "位字母、数字或下划线");
         set_state(LoginFlowState::FAILED);
         return;
     }
     if (!validate_password(password)) {
-        set_error("密码长度必须在6到64之间");
+        set_error("密码长度必须在" + std::to_string(Config::PASSWORD_MIN_LENGTH) + "到" +
+                  std::to_string(Config::PASSWORD_MAX_LENGTH) + "之间");
         set_state(LoginFlowState::FAILED);
         return;
     }
@@ -183,6 +190,15 @@ void LoginFlowManager::set_state(LoginFlowState new_state) {
     state_ = new_state;
     state_timer_ = 0.0f;
 
+    // 终态时清理敏感数据，防止内存残留
+    if (is_terminal()) {
+        if (!pending_password_.empty()) {
+            std::fill(pending_password_.begin(), pending_password_.end(), '\0');
+            pending_password_.clear();
+            pending_password_.shrink_to_fit();
+        }
+    }
+
     if (on_state_change_) {
         on_state_change_(old_state, new_state);
     }
@@ -198,8 +214,16 @@ void LoginFlowManager::set_error(const std::string& error) {
 
 bool LoginFlowManager::validate_username(const std::string& username) const {
     const size_t length = username.length();
-    return length >= Config::USERNAME_MIN_LENGTH &&
-           length <= Config::USERNAME_MAX_LENGTH;
+    if (length < Config::USERNAME_MIN_LENGTH || length > Config::USERNAME_MAX_LENGTH) {
+        return false;
+    }
+    // 只允许字母、数字和下划线
+    for (char c : username) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool LoginFlowManager::validate_password(const std::string& password) const {

@@ -1,122 +1,392 @@
-#include "handlers/npc/npc_command_handler.h"
+#include "logic/handlers/npc/npc_command_handler.h"
 
-#include <algorithm>
-#include <charconv>
-#include <cctype>
 #include <limits>
 #include <string>
+#include <utility>
 
+#include <nlohmann/json.hpp>
+
+#include "common/enums.h"
+#include "common/protocol/npc_message_codec.h"
 #include "ecs/components/character_components.h"
+#include "game/npc/npc_manager.h"
 #include "log/logger.h"
+#include "logic/response_sender.h"
 
-namespace mir2::handlers {
+namespace mir2::logic {
+
 namespace {
 
-constexpr int kMaxRandomAttempts = 64;
+constexpr int32_t kMaxNpcInteractDistanceTiles = 12;
+constexpr int64_t kMaxNpcInteractDistanceSquared =
+    static_cast<int64_t>(kMaxNpcInteractDistanceTiles) *
+    static_cast<int64_t>(kMaxNpcInteractDistanceTiles);
 
-std::string ToUpper(std::string_view value) {
-  std::string result(value.begin(), value.end());
-  std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch) {
-    return static_cast<char>(std::toupper(ch));
-  });
-  return result;
+struct PlayerContext {
+  uint64_t player_id = 0;
+  uint32_t map_id = 0;
+  mir2::common::Position position{};
+};
+
+bool ParseJsonObject(const uint8_t* payload,
+                     size_t payload_size,
+                     nlohmann::json* out) {
+  if (!payload || payload_size == 0 || !out) {
+    return false;
+  }
+
+  try {
+    *out = nlohmann::json::parse(payload, payload + payload_size);
+  } catch (const nlohmann::json::exception&) {
+    return false;
+  }
+
+  return out->is_object();
 }
 
-bool ParseInt32(std::string_view value, int32_t* out) {
+bool ReadUInt64(const nlohmann::json& j, const char* key, uint64_t* out) {
+  if (!out || !j.contains(key)) {
+    return false;
+  }
+  const auto& value = j.at(key);
+  if (!value.is_number_unsigned() && !value.is_number_integer()) {
+    return false;
+  }
+  const auto raw = value.get<uint64_t>();
+  *out = raw;
+  return true;
+}
+
+bool ReadUInt32(const nlohmann::json& j, const char* key, uint32_t* out) {
   if (!out) {
     return false;
   }
-  int32_t parsed = 0;
-  const char* start = value.data();
-  const char* end = start + value.size();
-  auto [ptr, ec] = std::from_chars(start, end, parsed);
-  if (ec != std::errc() || ptr != end) {
+  uint64_t temp = 0;
+  if (!ReadUInt64(j, key, &temp)) {
     return false;
   }
-  *out = parsed;
+  if (temp > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  *out = static_cast<uint32_t>(temp);
   return true;
+}
+
+bool ReadUInt8(const nlohmann::json& j, const char* key, uint8_t* out) {
+  if (!out) {
+    return false;
+  }
+  uint64_t temp = 0;
+  if (!ReadUInt64(j, key, &temp)) {
+    return false;
+  }
+  if (temp > std::numeric_limits<uint8_t>::max()) {
+    return false;
+  }
+  *out = static_cast<uint8_t>(temp);
+  return true;
+}
+
+std::vector<uint8_t> BuildNpcInteractRsp(uint64_t npc_id,
+                                         uint8_t result,
+                                         const std::string& npc_name,
+                                         uint8_t npc_type) {
+  nlohmann::json j;
+  j["version"] = mir2::common::kNpcCodecVersion;
+  j["npc_id"] = npc_id;
+  j["result"] = result;
+  if (!npc_name.empty()) {
+    j["npc_name"] = npc_name;
+  }
+  if (npc_type != 0) {
+    j["npc_type"] = npc_type;
+  }
+
+  const auto dumped = j.dump();
+  return std::vector<uint8_t>(dumped.begin(), dumped.end());
+}
+
+bool IsWithinNpcInteractionDistance(const mir2::common::Position& position,
+                                    int32_t npc_x,
+                                    int32_t npc_y) {
+  const int64_t dx = static_cast<int64_t>(position.x) - static_cast<int64_t>(npc_x);
+  const int64_t dy = static_cast<int64_t>(position.y) - static_cast<int64_t>(npc_y);
+  return (dx * dx + dy * dy) <= kMaxNpcInteractDistanceSquared;
+}
+
+bool TryResolvePlayerContext(const HandlerContext& ctx,
+                             entt::registry& fallback_registry,
+                             PlayerContext* out) {
+  if (!out || ctx.entity == entt::null) {
+    return false;
+  }
+
+  entt::registry* registry = ctx.registry != nullptr ? ctx.registry : &fallback_registry;
+  if (!registry || !registry->valid(ctx.entity)) {
+    return false;
+  }
+
+  const auto* identity = registry->try_get<ecs::CharacterIdentityComponent>(ctx.entity);
+  const auto* state = registry->try_get<ecs::CharacterStateComponent>(ctx.entity);
+  if (!identity || !state || identity->id == 0) {
+    return false;
+  }
+
+  out->player_id = identity->id;
+  out->map_id = state->map_id;
+  out->position = state->position;
+  return true;
+}
+
+bool ValidateNpcReachability(const PlayerContext& player_ctx,
+                             const game::npc::NpcData& npc_data) {
+  if (npc_data.map_id != player_ctx.map_id) {
+    return false;
+  }
+  return IsWithinNpcInteractionDistance(player_ctx.position, npc_data.x, npc_data.y);
 }
 
 }  // namespace
 
-NpcCommandHandler::NpcCommandHandler(entt::registry& registry,
+NpcCommandHandler::NpcCommandHandler(CoroutineExecutor& executor,
+                                     ResponseSender& response_sender,
+                                     entt::registry& registry,
                                      game::map::SceneManager& scene_manager)
-    : registry_(registry),
-      scene_manager_(scene_manager),
-      rng_(std::random_device{}()) {}
+    : executor_(executor),
+      response_sender_(response_sender),
+      registry_(registry),
+      scene_manager_(scene_manager) {}
 
-std::optional<game::map::TeleportCommand> NpcCommandHandler::HandleCommand(
-    entt::entity player,
-    std::string_view command,
-    const std::vector<std::string>& args) {
-  const std::string op = ToUpper(command);
-  if (op == "QA_MAPMOVE") {
-    return HandleMapMove(player, args);
+Task<void> NpcCommandHandler::HandleMessage(HandlerContext ctx,
+                                            uint16_t msg_id,
+                                            const uint8_t* payload,
+                                            size_t payload_size) {
+  switch (msg_id) {
+    case static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractReq):
+      co_await HandleNpcInteract(std::move(ctx), payload, payload_size);
+      break;
+    case static_cast<uint16_t>(mir2::common::MsgId::kNpcMenuSelect):
+      co_await HandleNpcMenuSelect(std::move(ctx), payload, payload_size);
+      break;
+    default:
+      SYSLOG_WARN("NpcCommandHandler unknown msg_id={} (client_id={})",
+                  msg_id, ctx.client_id);
+      break;
   }
-  if (op == "QA_MAPRANDOM") {
-    return HandleMapRandom(player);
-  }
-  return std::nullopt;
 }
 
-std::optional<game::map::TeleportCommand> NpcCommandHandler::HandleMapMove(
-    entt::entity player,
-    const std::vector<std::string>& args) {
-  if (args.size() < 3) {
-    SYSLOG_WARN("NpcCommandHandler: QA_MAPMOVE missing args");
-    return std::nullopt;
+Task<void> NpcCommandHandler::HandleNpcInteract(HandlerContext ctx,
+                                                const uint8_t* payload,
+                                                size_t payload_size) {
+  nlohmann::json j;
+  if (!ParseJsonObject(payload, payload_size, &j)) {
+    SYSLOG_WARN("NpcCommandHandler interact parse failed (client_id={})", ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
   }
 
-  int32_t map_id = 0;
-  int32_t x = 0;
-  int32_t y = 0;
-  if (!ParseInt32(args[0], &map_id) ||
-      !ParseInt32(args[1], &x) ||
-      !ParseInt32(args[2], &y)) {
-    SYSLOG_WARN("NpcCommandHandler: QA_MAPMOVE invalid args");
-    return std::nullopt;
+  uint32_t version = 0;
+  if (!ReadUInt32(j, "version", &version) ||
+      version != mir2::common::kNpcCodecVersion) {
+    SYSLOG_WARN("NpcCommandHandler interact invalid version (client_id={})",
+                ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
   }
 
-  return game::map::TeleportCommand{player, map_id, x, y};
+  uint64_t npc_id = 0;
+  uint64_t player_id = 0;
+  if (!ReadUInt64(j, "npc_id", &npc_id) ||
+      !ReadUInt64(j, "player_id", &player_id) ||
+      npc_id == 0 || player_id == 0) {
+    SYSLOG_WARN("NpcCommandHandler interact missing ids (client_id={})", ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
+  }
+
+  PlayerContext player_ctx;
+  if (!TryResolvePlayerContext(ctx, registry_, &player_ctx)) {
+    SYSLOG_WARN("NpcCommandHandler interact missing player context (client_id={})",
+                ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
+  }
+
+  if (player_id != player_ctx.player_id) {
+    SYSLOG_WARN("NpcCommandHandler interact player mismatch (client_id={}, claimed={}, actual={})",
+                ctx.client_id,
+                player_id,
+                player_ctx.player_id);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
+  }
+
+  auto npc_data_opt = game::npc::NpcManager::Instance().GetNpcData(npc_id);
+  if (!npc_data_opt) {
+    SYSLOG_WARN("NpcCommandHandler interact npc missing (client_id={}, npc_id={})",
+                ctx.client_id, npc_id);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
+  }
+
+  const auto& npc_data = *npc_data_opt;
+  if (!npc_data.enabled) {
+    SYSLOG_WARN("NpcCommandHandler interact npc disabled (client_id={}, npc_id={})",
+                ctx.client_id,
+                npc_id);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
+  }
+
+  if (!ValidateNpcReachability(player_ctx, npc_data)) {
+    SYSLOG_WARN(
+        "NpcCommandHandler interact out-of-range or map mismatch (client_id={}, player_id={}, "
+        "player_map={}, player_pos=({}, {}), npc_id={}, npc_map={}, npc_pos=({}, {}))",
+        ctx.client_id,
+        player_ctx.player_id,
+        player_ctx.map_id,
+        player_ctx.position.x,
+        player_ctx.position.y,
+        npc_id,
+        npc_data.map_id,
+        npc_data.x,
+        npc_data.y);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
+  }
+
+  auto rsp = BuildNpcInteractRsp(npc_id, 0, npc_data.name,
+                                 static_cast<uint8_t>(npc_data.type));
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+      std::move(rsp));
+
+  SYSLOG_DEBUG("NpcCommandHandler interact client_id={} npc_id={}",
+               ctx.client_id, npc_id);
 }
 
-std::optional<game::map::TeleportCommand> NpcCommandHandler::HandleMapRandom(
-    entt::entity player) {
-  auto* map = scene_manager_.GetMapByEntity(player);
-  if (!map) {
-    SYSLOG_WARN("NpcCommandHandler: QA_MAPRANDOM player not in map");
-    return std::nullopt;
+Task<void> NpcCommandHandler::HandleNpcMenuSelect(HandlerContext ctx,
+                                                  const uint8_t* payload,
+                                                  size_t payload_size) {
+  nlohmann::json j;
+  if (!ParseJsonObject(payload, payload_size, &j)) {
+    SYSLOG_WARN("NpcCommandHandler menu select parse failed (client_id={})", ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
   }
 
-  const int32_t width = map->GetMapWidth();
-  const int32_t height = map->GetMapHeight();
-  if (width <= 0 || height <= 0) {
-    SYSLOG_WARN("NpcCommandHandler: QA_MAPRANDOM invalid map bounds");
-    return std::nullopt;
+  uint32_t version = 0;
+  if (!ReadUInt32(j, "version", &version) ||
+      version != mir2::common::kNpcCodecVersion) {
+    SYSLOG_WARN("NpcCommandHandler menu select invalid version (client_id={})",
+                ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
   }
 
-  std::uniform_int_distribution<int32_t> dist_x(0, width - 1);
-  std::uniform_int_distribution<int32_t> dist_y(0, height - 1);
-
-  for (int attempt = 0; attempt < kMaxRandomAttempts; ++attempt) {
-    const int32_t x = dist_x(rng_);
-    const int32_t y = dist_y(rng_);
-    if (map->IsWalkable(x, y)) {
-      return game::map::TeleportCommand{player, map->GetMapId(), x, y};
-    }
+  uint64_t npc_id = 0;
+  uint8_t option_index = 0;
+  if (!ReadUInt64(j, "npc_id", &npc_id) ||
+      !ReadUInt8(j, "option_index", &option_index) ||
+      npc_id == 0) {
+    SYSLOG_WARN("NpcCommandHandler menu select invalid payload (client_id={})",
+                ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
   }
 
-  auto* state = registry_.try_get<ecs::CharacterStateComponent>(player);
-  if (state) {
-    return game::map::TeleportCommand{
-        player,
-        static_cast<int32_t>(state->map_id),
-        state->position.x,
-        state->position.y};
+  PlayerContext player_ctx;
+  if (!TryResolvePlayerContext(ctx, registry_, &player_ctx)) {
+    SYSLOG_WARN("NpcCommandHandler menu select missing player context (client_id={})",
+                ctx.client_id);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
   }
 
-  SYSLOG_WARN("NpcCommandHandler: QA_MAPRANDOM failed to find walkable tile");
-  return std::nullopt;
+  const auto npc_data_opt = game::npc::NpcManager::Instance().GetNpcData(npc_id);
+  if (!npc_data_opt || !npc_data_opt->enabled ||
+      !ValidateNpcReachability(player_ctx, *npc_data_opt)) {
+    SYSLOG_WARN(
+        "NpcCommandHandler menu select rejected (client_id={}, player_id={}, npc_id={}, "
+        "player_map={}, player_pos=({}, {}))",
+        ctx.client_id,
+        player_ctx.player_id,
+        npc_id,
+        player_ctx.map_id,
+        player_ctx.position.x,
+        player_ctx.position.y);
+    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+        std::move(rsp));
+    co_return;
+  }
+
+  SYSLOG_DEBUG("NpcCommandHandler menu select client_id={} npc_id={} option={}",
+               ctx.client_id, npc_id, static_cast<int>(option_index));
+  co_return;
 }
 
-}  // namespace mir2::handlers
+Task<void> NpcCommandHandler::SendNpcInteractResponse(HandlerContext ctx,
+                                                      uint64_t npc_id,
+                                                      uint8_t result,
+                                                      const std::string& npc_name,
+                                                      uint8_t npc_type) {
+  auto payload = BuildNpcInteractRsp(npc_id, result, npc_name, npc_type);
+  co_await response_sender_.SendAsync(
+      ctx.client_id,
+      static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+      std::move(payload));
+}
+
+}  // namespace mir2::logic

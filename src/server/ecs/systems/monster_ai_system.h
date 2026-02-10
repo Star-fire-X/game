@@ -5,11 +5,12 @@
  * 管理怪物的AI状态机、仇恨系统和行为逻辑
  */
 
-#ifndef MIR2_ECS_SYSTEMS_MONSTER_AI_SYSTEM_H
-#define MIR2_ECS_SYSTEMS_MONSTER_AI_SYSTEM_H
+#ifndef MIR2_ECS_SYSTEMS_MONSTER_AI_SYSTEM_H_
+#define MIR2_ECS_SYSTEMS_MONSTER_AI_SYSTEM_H_
 
 #include <entt/entt.hpp>
 
+#include <cstdint>
 #include <functional>
 
 #include "ecs/systems/combat_system.h"
@@ -70,7 +71,8 @@ private:
     void UpdateExplosiveAI(entt::registry& registry, entt::entity entity, float dt);
     void UpdatePoisonousAI(entt::registry& registry, entt::entity entity, float dt);
     void UpdateGuardAI(entt::registry& registry, entt::entity entity, float dt);
-    void UpdateBossCowKingAI(entt::registry& registry, entt::entity entity, float dt);
+    void UpdateBossCowKingAI(entt::registry& registry, entt::entity entity, float dt,
+                             int64_t current_time_ms);
 
     // 辅助方法
     void TransitionToState(entt::registry& registry, entt::entity entity, 
@@ -84,4 +86,4 @@ private:
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_SYSTEMS_MONSTER_AI_SYSTEM_H
+#endif  // MIR2_ECS_SYSTEMS_MONSTER_AI_SYSTEM_H_

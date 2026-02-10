@@ -3,8 +3,8 @@
  * @brief ECS 仓库系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H_
 
 #include <vector>
 
@@ -61,4 +61,4 @@ class StorageSystem : public System {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H_

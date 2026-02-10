@@ -20,7 +20,6 @@ namespace mir2::render {
 class Texture;
 
 // 引入公共类型定义
-using namespace mir2::common;
 
 /// 渲染器接口
 /// 定义渲染系统的基本功能
@@ -48,10 +47,10 @@ public:
     virtual void end_frame() = 0;
 
     /// 用指定颜色清除屏幕
-    virtual void clear(const Color& color = Color::black()) = 0;
+    virtual void clear(const mir2::common::Color& color = mir2::common::Color::black()) = 0;
 
     /// 获取窗口尺寸
-    virtual Size get_window_size() const = 0;
+    virtual mir2::common::Size get_window_size() const = 0;
 
     /// 设置逻辑渲染尺寸(用于分辨率缩放)
     virtual void set_logical_size(int width, int height) = 0;
@@ -63,25 +62,33 @@ public:
     virtual void draw_texture(const Texture& texture, int x, int y) = 0;
 
     /// 使用源矩形和目标矩形绘制纹理
-    virtual void draw_texture(const Texture& texture, const Rect& src, const Rect& dst) = 0;
+    virtual void draw_texture(const Texture& texture,
+                              const mir2::common::Rect& src,
+                              const mir2::common::Rect& dst) = 0;
 
     /// 绘制带偏移的精灵纹理
     virtual void draw_sprite(const Texture& texture, int x, int y, int offset_x, int offset_y) = 0;
 
     /// 绘制填充矩形
-    virtual void draw_rect(const Rect& rect, const Color& color) = 0;
+    virtual void draw_rect(const mir2::common::Rect& rect,
+                           const mir2::common::Color& color) = 0;
 
     /// 绘制矩形边框
-    virtual void draw_rect_outline(const Rect& rect, const Color& color) = 0;
+    virtual void draw_rect_outline(const mir2::common::Rect& rect,
+                                   const mir2::common::Color& color) = 0;
 
     /// 绘制线条
-    virtual void draw_line(int x1, int y1, int x2, int y2, const Color& color) = 0;
+    virtual void draw_line(int x1,
+                           int y1,
+                           int x2,
+                           int y2,
+                           const mir2::common::Color& color) = 0;
 
     /// 绘制点
-    virtual void draw_point(int x, int y, const Color& color) = 0;
+    virtual void draw_point(int x, int y, const mir2::common::Color& color) = 0;
 
     /// 设置绘制颜色
-    virtual void set_draw_color(const Color& color) = 0;
+    virtual void set_draw_color(const mir2::common::Color& color) = 0;
 
     /// 设置混合模式
     virtual void set_blend_mode(SDL_BlendMode mode) = 0;

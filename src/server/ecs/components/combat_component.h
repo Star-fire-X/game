@@ -3,8 +3,10 @@
  * @brief ECS 战斗组件定义
  */
 
-#ifndef LEGEND2_SERVER_ECS_COMBAT_COMPONENT_H
-#define LEGEND2_SERVER_ECS_COMBAT_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_COMBAT_COMPONENT_H_
+#define MIR2_SERVER_ECS_COMBAT_COMPONENT_H_
+
+#include <entt/entt.hpp>
 
 namespace mir2::ecs {
 
@@ -15,6 +17,7 @@ struct CombatComponent {
     float critical_chance = 0.05f;  ///< 暴击率
     float evasion_chance = 0.05f;   ///< 闪避率
     int attack_range = 1;           ///< 攻击范围（瓦片）
+    entt::entity target_entity = entt::null;  ///< 当前目标实体（null表示无目标）
 
     // 元素抗性
     int fire_resistance = 0;       ///< 火抗
@@ -25,4 +28,4 @@ struct CombatComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_COMBAT_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_COMBAT_COMPONENT_H_

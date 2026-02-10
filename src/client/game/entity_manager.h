@@ -127,6 +127,9 @@ private:
     template <typename Container>
     void query_range_impl(const Position& center, int radius, Container& result) const;
 
+    template <typename EntityPtr, typename Container>
+    void get_entities_in_view_impl(const mir2::render::Camera& camera, int padding, Container& result) const;
+
     GridCoord cell_for_position(const Position& position) const;
     void index_entity(uint64_t id, const Position& position);
     void unindex_entity(uint64_t id, const Position& position);

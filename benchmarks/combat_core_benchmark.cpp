@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-#include "server/combat/combat_core.h"
+#include "server/ecs/systems/combat_core.h"
 
 namespace {
 
@@ -82,8 +82,8 @@ static void BM_DamageCalculator_WithMiss(benchmark::State& state) {
 }
 
 static void BM_RangeChecker_InRange(benchmark::State& state) {
-    const legend2::Position attacker{10, 10};
-    const legend2::Position target{11, 10};
+    const mir2::common::Position attacker{10, 10};
+    const mir2::common::Position target{11, 10};
     const int range = 2;
 
     run_benchmark(state, [&]() {
@@ -92,8 +92,8 @@ static void BM_RangeChecker_InRange(benchmark::State& state) {
 }
 
 static void BM_RangeChecker_OutOfRange(benchmark::State& state) {
-    const legend2::Position attacker{0, 0};
-    const legend2::Position target{5, 5};
+    const mir2::common::Position attacker{0, 0};
+    const mir2::common::Position target{5, 5};
     const int range = 3;
 
     run_benchmark(state, [&]() {
@@ -102,8 +102,8 @@ static void BM_RangeChecker_OutOfRange(benchmark::State& state) {
 }
 
 static void BM_RangeChecker_Boundary(benchmark::State& state) {
-    const legend2::Position attacker{0, 0};
-    const legend2::Position target{3, 4};
+    const mir2::common::Position attacker{0, 0};
+    const mir2::common::Position target{3, 4};
     const int range = 5;
 
     run_benchmark(state, [&]() {

@@ -3,8 +3,8 @@
  * @brief 核心工具函数
  */
 
-#ifndef MIR2_CORE_UTILS_H
-#define MIR2_CORE_UTILS_H
+#ifndef MIR2_CORE_UTILS_H_
+#define MIR2_CORE_UTILS_H_
 
 #include <cstdint>
 #include <string>
@@ -26,4 +26,4 @@ std::string ToLower(const std::string& input);
 
 }  // namespace mir2::core
 
-#endif  // MIR2_CORE_UTILS_H
+#endif  // MIR2_CORE_UTILS_H_

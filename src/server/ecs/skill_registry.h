@@ -3,8 +3,8 @@
  * @brief 技能模板注册表
  */
 
-#ifndef LEGEND2_SERVER_ECS_SKILL_REGISTRY_H
-#define LEGEND2_SERVER_ECS_SKILL_REGISTRY_H
+#ifndef MIR2_SERVER_ECS_SKILL_REGISTRY_H_
+#define MIR2_SERVER_ECS_SKILL_REGISTRY_H_
 
 #include "ecs/components/skill_template_component.h"
 
@@ -57,4 +57,4 @@ private:
 
 } // namespace mir2::ecs
 
-#endif // LEGEND2_SERVER_ECS_SKILL_REGISTRY_H
+#endif // MIR2_SERVER_ECS_SKILL_REGISTRY_H_

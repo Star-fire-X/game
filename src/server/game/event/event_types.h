@@ -3,8 +3,8 @@
  * @brief 定时事件触发类型定义
  */
 
-#ifndef LEGEND2_SERVER_GAME_EVENT_EVENT_TYPES_H
-#define LEGEND2_SERVER_GAME_EVENT_EVENT_TYPES_H
+#ifndef MIR2_SERVER_GAME_EVENT_EVENT_TYPES_H_
+#define MIR2_SERVER_GAME_EVENT_EVENT_TYPES_H_
 
 #include <cstdint>
 
@@ -22,4 +22,4 @@ enum class EventTriggerType : uint8_t {
 
 }  // namespace legend2::game::event
 
-#endif  // LEGEND2_SERVER_GAME_EVENT_EVENT_TYPES_H
+#endif  // MIR2_SERVER_GAME_EVENT_EVENT_TYPES_H_

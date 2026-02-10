@@ -37,7 +37,13 @@ std::vector<mir2::common::Position> PathfindingHelper::FindPath(
     int32_t start_x, int32_t start_y,
     int32_t end_x, int32_t end_y,
     int32_t max_steps) {
+    return FindPathStraightLine(start_x, start_y, end_x, end_y, max_steps);
+}
 
+std::vector<mir2::common::Position> PathfindingHelper::FindPathStraightLine(
+    int32_t start_x, int32_t start_y,
+    int32_t end_x, int32_t end_y,
+    int32_t max_steps) {
     // 简化实现：直线路径（无障碍物检查）
     std::vector<mir2::common::Position> path;
     int32_t x = start_x, y = start_y;

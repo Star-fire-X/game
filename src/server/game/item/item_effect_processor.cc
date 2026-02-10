@@ -76,7 +76,6 @@ std::mt19937& ItemEffectRng() {
 constexpr int32_t kDefaultCastleMapId = 3;
 constexpr int32_t kDefaultCastleX = 330;
 constexpr int32_t kDefaultCastleY = 330;
-constexpr int32_t kRandomTeleportAttempts = 30;
 constexpr int64_t kSiegeRandomScrollCooldownMs = 10000;
 
 bool RollOneIn(int chance) {
@@ -85,37 +84,6 @@ bool RollOneIn(int chance) {
   }
   std::uniform_int_distribution<int> dist(1, chance);
   return dist(ItemEffectRng()) == 1;
-}
-
-std::optional<std::pair<int32_t, int32_t>> FindRandomWalkablePosition(
-    const map::MapInstance& map_instance) {
-  const int32_t width = map_instance.GetMapWidth();
-  const int32_t height = map_instance.GetMapHeight();
-  if (width <= 0 || height <= 0) {
-    return std::nullopt;
-  }
-
-  std::uniform_int_distribution<int32_t> dist_x(0, width - 1);
-  std::uniform_int_distribution<int32_t> dist_y(0, height - 1);
-
-  auto& rng = ItemEffectRng();
-  for (int32_t attempt = 0; attempt < kRandomTeleportAttempts; ++attempt) {
-    const int32_t x = dist_x(rng);
-    const int32_t y = dist_y(rng);
-    if (map_instance.IsWalkable(x, y)) {
-      return std::make_pair(x, y);
-    }
-  }
-
-  for (int32_t y = 0; y < height; ++y) {
-    for (int32_t x = 0; x < width; ++x) {
-      if (map_instance.IsWalkable(x, y)) {
-        return std::make_pair(x, y);
-      }
-    }
-  }
-
-  return std::nullopt;
 }
 
 int CountFreeInventorySlots(entt::registry& registry, entt::entity character) {
@@ -518,24 +486,21 @@ bool ItemEffectProcessor::ProcessRandomScroll(entt::entity character) {
       std::to_string(map->GetMapId()),
       static_cast<uint64_t>(state->last_random_scroll_time_ms),
       in_siege,
-      attributes_snapshot);
-  std::optional<map::TeleportCommand> final_command = command_opt;
-  if (!final_command) {
-    const auto random_pos = FindRandomWalkablePosition(*map);
-    if (!random_pos) {
-      return false;
-    }
-    final_command = map::TeleportCommand{
-        character, map->GetMapId(), random_pos->first, random_pos->second};
+      attributes_snapshot,
+      map->GetMapWidth(),
+      map->GetMapHeight(),
+      [map](int32_t x, int32_t y) { return map->IsWalkable(x, y); });
+  if (!command_opt) {
+    return false;
   }
 
   state->last_random_scroll_time_ms = now_ms;
 
   ecs::events::TeleportRequestEvent event;
-  event.entity = final_command->entity;
-  event.target_map_id = final_command->target_map_id;
-  event.target_x = final_command->target_x;
-  event.target_y = final_command->target_y;
+  event.entity = command_opt->entity;
+  event.target_map_id = command_opt->target_map_id;
+  event.target_x = command_opt->target_x;
+  event.target_y = command_opt->target_y;
   event_bus_.Publish(event);
   return true;
 }

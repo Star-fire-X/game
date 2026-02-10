@@ -251,9 +251,9 @@ Task<void> MovementHandler::HandleMove(HandlerContext ctx,
         if (result == mir2::common::ErrorCode::kOk) {
           character_manager_.SetPosition(static_cast<uint32_t>(entity_id), x, y, map_id);
           if (entity != entt::null) {
-            auto* current_map = scene_manager_.GetMapByEntity(entity);
-            if (!current_map ||
-                current_map->GetMapId() != static_cast<int32_t>(map_id)) {
+            const auto current_map_id = scene_manager_.TryGetEntityMapId(entity);
+            if (!current_map_id.has_value() ||
+                *current_map_id != static_cast<int32_t>(map_id)) {
               scene_manager_.AddEntityToMap(static_cast<int32_t>(map_id), entity, x, y);
             } else {
               scene_manager_.UpdateEntityPosition(entity, x, y);

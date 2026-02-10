@@ -10,6 +10,7 @@ set(LEGEND2_TEST_SOURCES
     server/combat_core_test.cpp
     server/ip_rate_limiter_test.cc
     server/gateway/connection_holder_test.cc
+    server/gateway/ring_buffer_test.cc
     server/network/kcp_session_test.cc
     server/conv_blacklist_test.cc
     server/network/kcp_server_test.cc
@@ -20,9 +21,11 @@ set(LEGEND2_TEST_SOURCES
     server/storage_engine/blocking_queue_test.cc
     server/storage_engine/rocksdb_cache_test.cc
     server/logic/coroutine_executor_test.cc
+    server/logic/coroutine_executor_counter_race_test.cc
     server/logic/mock_response_sender.cc
     server/logic/character_handler_test.cc
     server/logic/login_handler_test.cc
+    server/logic/storage_login_service_test.cc
     server/logic/chat_handler_test.cc
     server/guild/guild_handler_test.cc
     server/logic/npc_command_handler_test.cc
@@ -114,6 +117,7 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/world_test.cpp
     server/ecs/character_entity_manager_test.cpp
     server/ecs/registry_manager_test.cpp
+    server/ecs/pathfinding_helper_test.cpp
     server/ecs/movement_system_test.cpp
     server/ecs/combat_system_test.cpp
     server/ecs/effect_system_test.cc
@@ -144,6 +148,8 @@ set(LEGEND2_TEST_SOURCES
     server/map/map_event_manager_test.cpp
     server/map/scroll_teleport_test.cpp
     server/map/scene_manager_reload_test.cpp
+    server/map/map_instance_concurrency_test.cpp
+    server/map/scene_manager_concurrency_test.cpp
     server/movement_validator_test.cpp
     integration/scene_manager_test.cpp
     integration/cross_map_test.cpp

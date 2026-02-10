@@ -32,7 +32,18 @@ public:
      * @brief A*寻路算法（无障碍物检查，直线路径）
      * @return 路径点序列
      */
+    [[deprecated("Use FindPath(start, end, walkable_checker, max_steps) or "
+                 "FindPathStraightLine(start, end, max_steps).")]]
     static std::vector<mir2::common::Position> FindPath(
+        int32_t start_x, int32_t start_y,
+        int32_t end_x, int32_t end_y,
+        int32_t max_steps = 80);
+
+    /**
+     * @brief 直线路径（无障碍物检查）
+     * @return 路径点序列
+     */
+    static std::vector<mir2::common::Position> FindPathStraightLine(
         int32_t start_x, int32_t start_y,
         int32_t end_x, int32_t end_y,
         int32_t max_steps = 80);

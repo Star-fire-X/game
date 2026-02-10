@@ -57,3 +57,23 @@ TEST(MapInstanceWalkTest, ConcurrentReadsConsistent) {
 
   EXPECT_TRUE(ok.load());
 }
+
+TEST(MapInstanceWalkTest, TileDataWalkabilityIsSingleSourceOfTruth) {
+  MapTileData tile_data;
+  tile_data.width = 2;
+  tile_data.height = 2;
+  tile_data.tiles.assign(4, TileInfo{});
+  tile_data.walkable = {0, 0, 0, 0};
+
+  std::vector<uint8_t> fallback_walkability = {1, 1, 1, 1};
+  MapInstance map(3, 2, 2, AOIManager::kDefaultGridSize,
+                  std::move(fallback_walkability), std::move(tile_data));
+
+  // 当存在 tile_data 时，MapInstance 应该只使用 tile_data.walkable。
+  EXPECT_FALSE(map.IsWalkable(0, 0));
+  EXPECT_FALSE(map.IsWalkable(1, 1));
+
+  map.SetWalkable(1, 1, true);
+  EXPECT_TRUE(map.IsWalkable(1, 1));
+  EXPECT_FALSE(map.IsWalkable(0, 0));
+}

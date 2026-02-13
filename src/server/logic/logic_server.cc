@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include <flatbuffers/flatbuffers.h>
@@ -26,6 +27,9 @@
 #include "ecs/systems/effect_system.h"
 #include "ecs/systems/inventory_system.h"
 #include "ecs/systems/level_up_system.h"
+#include "ecs/systems/attribute_recalc_system.h"
+#include "ecs/systems/recovery_system.h"
+#include "ecs/systems/luck_system.h"
 #include "ecs/systems/monster_ai_system.h"
 #include "ecs/systems/monster_drop_system.h"
 #include "ecs/systems/skill_system.h"
@@ -72,17 +76,13 @@ WorldSystemBundle::WorldSystemBundle(WorldSystemBundle&&) noexcept = default;
 WorldSystemBundle& WorldSystemBundle::operator=(WorldSystemBundle&&) noexcept = default;
 
 namespace {
-constexpr auto kTickInterval = std::chrono::milliseconds(50);
 constexpr uint16_t kMetricsPort = 9091;
 constexpr uint32_t kDefaultChatAoiWidth = 1024;
 constexpr uint32_t kDefaultChatAoiHeight = 1024;
 constexpr const char* kMonsterDropTablePath = "config/tables/monsters.yaml";
-constexpr uint32_t kBackpressurePauseMs = 100;
-constexpr int64_t kBackpressureSignalCooldownMs = 100;
 constexpr size_t kBackpressureStateMaxEntries = 8192;
 constexpr size_t kBackpressurePruneBatchSize = 256;
 constexpr size_t kBackpressureStateHardCapEntries = 16384;
-constexpr size_t kPlayerMailboxMaxPending = 100;
 constexpr auto kExecutorDrainTimeout = std::chrono::seconds(10);
 constexpr const char* kMetricLegacyFallbackTotal =
     "logic.hot_event.legacy_fallback_total";
@@ -93,6 +93,50 @@ constexpr const char* kMetricQueueFullFallbackTotal =
 constexpr const char* kMetricMailboxBatchSize = "logic.mailbox.batch_size";
 constexpr const char* kMetricMailboxBatchPlayers = "logic.mailbox.batch_players";
 constexpr const char* kMetricMailboxOverflowTotal = "logic.mailbox.overflow_total";
+constexpr const char* kMetricMailboxGlobalSoftLimit = "logic.mailbox.global_soft_limit";
+constexpr const char* kMetricMailboxGlobalHardLimit = "logic.mailbox.global_hard_limit";
+constexpr const char* kMetricMailboxGlobalUtilization =
+    "logic.mailbox.global_pending_utilization";
+constexpr const char* kMetricMailboxGlobalOverflowTotal =
+    "logic.mailbox.global_overflow_total";
+constexpr const char* kMetricMailboxSoftBackpressureTotal =
+    "logic.mailbox.soft_backpressure_total";
+constexpr const char* kMetricMailboxHardBackpressureTotal =
+    "logic.mailbox.hard_backpressure_total";
+constexpr const char* kMetricBackpressureQueueFullSignalTotal =
+    "logic.backpressure.queue_full_signal_total";
+constexpr const char* kMetricMailboxSpawnRejectedNotAcceptingTotal =
+    "logic.mailbox.spawn_rejected_not_accepting_total";
+constexpr const char* kMetricMailboxSpawnRejectedOverLimitTotal =
+    "logic.mailbox.spawn_rejected_over_limit_total";
+constexpr const char* kMetricMailboxSpawnRejectedInvalidTaskTotal =
+    "logic.mailbox.spawn_rejected_invalid_task_total";
+constexpr const char* kMetricMailboxDroppedPendingTotal =
+    "logic.mailbox.spawn_rejected_dropped_pending_total";
+constexpr const char* kMetricTickDurationMs = "logic.tick.duration_ms";
+constexpr const char* kMetricTickIntervalConfiguredMs =
+    "logic.tick.interval_ms.configured";
+constexpr const char* kMetricTickOverrunTotal = "logic.tick.overrun_total";
+constexpr const char* kMetricHotDrainBudgetHitTotal =
+    "logic.hot_event.drain_budget_hit_total";
+constexpr const char* kMetricPrewarmSpawnRejectedNotAcceptingTotal =
+    "logic.prewarm.spawn_rejected_not_accepting_total";
+constexpr const char* kMetricPrewarmSpawnRejectedOverLimitTotal =
+    "logic.prewarm.spawn_rejected_over_limit_total";
+constexpr const char* kMetricPrewarmSpawnRejectedInvalidTaskTotal =
+    "logic.prewarm.spawn_rejected_invalid_task_total";
+constexpr const char* kMetricCoroutineTimeoutBackgroundInflight =
+    "logic.coroutine.timeout_background_inflight";
+constexpr const char* kMetricCoroutineHungScanTotal =
+    "logic.coroutine.hung_scan_total";
+constexpr const char* kMetricCoroutineDumpTotal =
+    "logic.coroutine.dump_total";
+constexpr const char* kMetricCoroutineHungThresholdMs =
+    "logic.coroutine.hung_threshold_ms";
+constexpr const char* kMetricCoroutineHungScanIntervalMs =
+    "logic.coroutine.hung_scan_interval_ms";
+constexpr const char* kMetricCoroutineDumpMaxEntries =
+    "logic.coroutine.dump_max_entries";
 
 constexpr std::array<uint16_t, 1> kLoginHandlerMsgIds = {
     static_cast<uint16_t>(common::MsgId::kLoginReq)};
@@ -161,16 +205,52 @@ bool IsAuthWhitelistedEvent(const events::HotEvent& event) {
   return IsAuthWhitelistedMsgId(event.msg_id);
 }
 
-bool ShouldFallbackOnQueueFull(uint16_t msg_id) {
-  // Heartbeat/chat are best-effort under overload. Other messages should take
-  // legacy fallback to avoid dropping critical gameplay/account operations.
+events::HotEventPriority ClassifyMsgPriority(uint16_t msg_id) {
   switch (static_cast<common::MsgId>(msg_id)) {
+    case common::MsgId::kLoginReq:
+    case common::MsgId::kLogout:
+    case common::MsgId::kCreateRoleReq:
+    case common::MsgId::kSelectRoleReq:
+    case common::MsgId::kRoleListReq:
+    case common::MsgId::kMoveReq:
+    case common::MsgId::kAttackReq:
+    case common::MsgId::kSkillReq:
+    case common::MsgId::kUseItemReq:
+    case common::MsgId::kDropItemReq:
+    case common::MsgId::kPickupItemReq:
+    case common::MsgId::kEquipReq:
+    case common::MsgId::kUnequipReq:
+    case common::MsgId::kNpcInteractReq:
+    case common::MsgId::kNpcMenuSelect:
+      return events::HotEventPriority::kCritical;
     case common::MsgId::kHeartbeat:
     case common::MsgId::kChatReq:
-      return false;
+      return events::HotEventPriority::kBestEffort;
     default:
-      return true;
+      return events::HotEventPriority::kNormal;
   }
+}
+
+events::HotEventPriority ResolveEventPriority(const events::HotEvent& event) {
+  const events::HotEventPriority hinted = events::GetHotEventPriority(event);
+  if (hinted != events::HotEventPriority::kNormal) {
+    return hinted;
+  }
+  return ClassifyMsgPriority(event.msg_id);
+}
+
+bool IsBestEffortEvent(const events::HotEvent& event) {
+  return ResolveEventPriority(event) == events::HotEventPriority::kBestEffort;
+}
+
+bool IsBestEffortMsgId(uint16_t msg_id) {
+  return ClassifyMsgPriority(msg_id) == events::HotEventPriority::kBestEffort;
+}
+
+bool ShouldFallbackOnQueueFull(uint16_t msg_id) {
+  // Best-effort messages are dropped under overload. Other messages fallback
+  // to legacy dispatch to avoid losing critical gameplay/account operations.
+  return !IsBestEffortMsgId(msg_id);
 }
 
 RoleRecord BuildRoleRecordFromSnapshot(const common::CharacterData& data,
@@ -255,6 +335,72 @@ bool LogicServer::Initialize(const std::string& config_path) {
         server_config.io_threads);
     server_config.io_threads = 1;
   }
+  if (server_config.tick_interval_ms <= 0) {
+    SYSLOG_WARN("LogicServer tick_interval_ms must be > 0, fallback to 50 (configured={})",
+                server_config.tick_interval_ms);
+    server_config.tick_interval_ms = 50;
+  }
+
+  tick_interval_ = std::chrono::milliseconds(server_config.tick_interval_ms);
+  hot_event_max_drain_per_tick_ = static_cast<size_t>(std::max(
+      server_config.hot_event_max_drain_per_tick, 1));
+  hot_event_max_drain_duration_per_tick_ = std::chrono::milliseconds(std::max(
+      server_config.hot_event_max_drain_ms_per_tick, 1));
+
+  player_mailbox_max_high_pending_ = static_cast<size_t>(std::max(
+      server_config.mailbox_player_max_high_pending, 1));
+  player_mailbox_max_low_pending_ = static_cast<size_t>(std::max(
+      server_config.mailbox_player_max_low_pending, 0));
+  player_mailbox_max_pending_total_ =
+      player_mailbox_max_high_pending_ + player_mailbox_max_low_pending_;
+
+  mailbox_high_priority_burst_ = static_cast<uint8_t>(std::clamp(
+      server_config.mailbox_high_priority_burst, 1, 255));
+  mailbox_overflow_kick_threshold_ = static_cast<uint8_t>(std::clamp(
+      server_config.mailbox_overflow_kick_threshold, 1, 255));
+
+  mailbox_global_pending_hard_limit_ = static_cast<size_t>(std::max(
+      server_config.mailbox_global_pending_hard_limit, 2));
+  const int configured_soft_limit = server_config.mailbox_global_pending_soft_limit;
+  if (configured_soft_limit < 0) {
+    mailbox_global_pending_soft_limit_ = (mailbox_global_pending_hard_limit_ * 3) / 4;
+  } else {
+    mailbox_global_pending_soft_limit_ = static_cast<size_t>(configured_soft_limit);
+  }
+  if (mailbox_global_pending_soft_limit_ == 0 ||
+      mailbox_global_pending_soft_limit_ >= mailbox_global_pending_hard_limit_) {
+    const size_t adjusted_soft_limit = std::clamp<size_t>(
+        mailbox_global_pending_soft_limit_,
+        static_cast<size_t>(1),
+        mailbox_global_pending_hard_limit_ - 1);
+    SYSLOG_WARN(
+        "LogicServer mailbox soft limit adjusted "
+        "(configured_soft={}, adjusted_soft={}, hard={})",
+        mailbox_global_pending_soft_limit_,
+        adjusted_soft_limit,
+        mailbox_global_pending_hard_limit_);
+    mailbox_global_pending_soft_limit_ = adjusted_soft_limit;
+  }
+
+  backpressure_pause_ms_ = static_cast<uint32_t>(std::max(
+      server_config.backpressure_pause_ms, 0));
+  backpressure_signal_cooldown_ms_ = static_cast<int64_t>(std::max(
+      server_config.backpressure_signal_cooldown_ms, 0));
+  mailbox_soft_backpressure_pause_ms_ = static_cast<uint32_t>(std::max(
+      server_config.mailbox_soft_backpressure_pause_ms, 0));
+  mailbox_hard_backpressure_pause_ms_ = static_cast<uint32_t>(std::max(
+      server_config.mailbox_hard_backpressure_pause_ms, 0));
+  mailbox_soft_backpressure_cooldown_ms_ = static_cast<int64_t>(std::max(
+      server_config.mailbox_soft_backpressure_cooldown_ms, 0));
+  mailbox_hard_backpressure_cooldown_ms_ = static_cast<int64_t>(std::max(
+      server_config.mailbox_hard_backpressure_cooldown_ms, 0));
+  coroutine_hung_threshold_ = std::chrono::milliseconds(
+      std::max(server_config.coroutine_hung_threshold_ms, 1));
+  coroutine_hung_scan_interval_ = std::chrono::milliseconds(
+      std::max(server_config.coroutine_hung_scan_interval_ms, 1));
+  coroutine_dump_max_entries_ = static_cast<size_t>(
+      std::clamp(server_config.coroutine_dump_max_entries, 1, 4096));
+
   if (!app_.Initialize(server_config)) {
     SYSLOG_ERROR("LogicServer application init failed");
     return false;
@@ -265,6 +411,28 @@ bool LogicServer::Initialize(const std::string& config_path) {
                 kMetricsPort, server_config.metrics_port);
   }
   monitor::Metrics::Instance().Init(kMetricsPort);
+  monitor::Metrics::Instance().SetGauge(monitor::Metrics::kMailboxPendingEvents, 0);
+  monitor::Metrics::Instance().SetGauge(monitor::Metrics::kMailboxActiveRunners, 0);
+  monitor::Metrics::Instance().SetGauge(
+      kMetricMailboxGlobalSoftLimit,
+      static_cast<double>(mailbox_global_pending_soft_limit_));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricMailboxGlobalHardLimit,
+      static_cast<double>(mailbox_global_pending_hard_limit_));
+  monitor::Metrics::Instance().SetGauge(kMetricMailboxGlobalUtilization, 0);
+  monitor::Metrics::Instance().SetGauge(kMetricCoroutineTimeoutBackgroundInflight, 0);
+  monitor::Metrics::Instance().SetGauge(
+      kMetricCoroutineHungThresholdMs,
+      static_cast<double>(coroutine_hung_threshold_.count()));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricCoroutineHungScanIntervalMs,
+      static_cast<double>(coroutine_hung_scan_interval_.count()));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricCoroutineDumpMaxEntries,
+      static_cast<double>(coroutine_dump_max_entries_));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickIntervalConfiguredMs, static_cast<double>(tick_interval_.count()));
+  monitor::Metrics::Instance().SetGauge(kMetricTickDurationMs, 0);
 
   registry_manager_ = &ecs::RegistryManager::Instance();
   if (!scene_manager_) {
@@ -274,6 +442,9 @@ bool LogicServer::Initialize(const std::string& config_path) {
   network_ = std::make_unique<network::NetworkManager>(app_.GetIoContext());
 
   executor_ = std::make_unique<CoroutineExecutor>(app_.GetIoContext());
+  SYSLOG_INFO(
+      "Coroutine timeout semantics: timeout/cancel resumes awaiting coroutine early; "
+      "underlying blocking work is not force-cancelled");
   prewarm_manager_ = std::make_unique<PrewarmManager>(*executor_);
   prewarm_manager_->SetLoader(
       [this](const PrewarmEntry& entry) {
@@ -283,7 +454,12 @@ bool LogicServer::Initialize(const std::string& config_path) {
 
   io_context_ = &app_.GetIoContext();
   tick_timer_ = std::make_unique<asio::steady_timer>(*io_context_);
-  signal_set_ = std::make_unique<asio::signal_set>(*io_context_, SIGINT, SIGTERM);
+  signal_set_ = std::make_unique<asio::signal_set>(*io_context_);
+  signal_set_->add(SIGINT);
+  signal_set_->add(SIGTERM);
+#if defined(SIGUSR1)
+  signal_set_->add(SIGUSR1);
+#endif
   RegisterSignalHandlers();
 
   const auto& db_config = config::ConfigManager::Instance().GetDatabaseConfig();
@@ -404,7 +580,28 @@ void LogicServer::Shutdown() {
     const bool drained = executor_->DrainAndJoin(kExecutorDrainTimeout);
     if (!drained) {
       SYSLOG_WARN("LogicServer shutdown: coroutine executor drain timed out");
+      DumpActiveCoroutines("shutdown_drain_timeout");
     }
+  }
+
+  if (!player_mailboxes_.empty()) {
+    for (const auto& [client_id, mailbox] : player_mailboxes_) {
+      (void)client_id;
+      for (const auto& event : mailbox.high_priority_events) {
+        if (hot_event_pipeline_ && event.var_ref.length > 0) {
+          hot_event_pipeline_->ReleaseVarPayload(event);
+        }
+      }
+      for (const auto& event : mailbox.low_priority_events) {
+        if (hot_event_pipeline_ && event.var_ref.length > 0) {
+          hot_event_pipeline_->ReleaseVarPayload(event);
+        }
+      }
+    }
+    player_mailboxes_.clear();
+    mailbox_pending_events_total_ = 0;
+    mailbox_active_runners_ = 0;
+    PublishMailboxQueueMetrics();
   }
 
   // Flush dirty character data before tearing down registries.
@@ -464,7 +661,8 @@ void LogicServer::StartTick() {
 
   const auto now = std::chrono::steady_clock::now();
   last_tick_time_ = now;
-  next_tick_time_ = now + kTickInterval;
+  next_tick_time_ = now + tick_interval_;
+  next_coroutine_scan_time_ = now + coroutine_hung_scan_interval_;
   ScheduleNextTick();
 }
 
@@ -486,13 +684,94 @@ void LogicServer::OnTick(const asio::error_code& ec) {
   const std::chrono::duration<float> delta = now - last_tick_time_;
   last_tick_time_ = now;
 
+  const auto tick_start = std::chrono::steady_clock::now();
   Tick(delta.count());
+  const auto tick_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - tick_start);
+  const double tick_elapsed_ms = static_cast<double>(tick_elapsed.count()) / 1000.0;
+  monitor::Metrics::Instance().SetGauge(kMetricTickDurationMs, tick_elapsed_ms);
+  if (tick_elapsed > tick_interval_) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricTickOverrunTotal);
+  }
 
-  next_tick_time_ += kTickInterval;
+  MaybeScanHungCoroutines(now);
+
+  next_tick_time_ += tick_interval_;
   if (next_tick_time_ < now) {
-    next_tick_time_ = now + kTickInterval;
+    next_tick_time_ = now + tick_interval_;
   }
   ScheduleNextTick();
+}
+
+void LogicServer::MaybeScanHungCoroutines(std::chrono::steady_clock::time_point now) {
+  if (!executor_) {
+    return;
+  }
+  if (now < next_coroutine_scan_time_) {
+    return;
+  }
+
+  next_coroutine_scan_time_ = now + coroutine_hung_scan_interval_;
+  monitor::Metrics::Instance().IncrementCounter(kMetricCoroutineHungScanTotal);
+
+  const auto hung = executor_->DetectHungCoroutines(
+      coroutine_hung_threshold_, coroutine_dump_max_entries_);
+  if (hung.empty()) {
+    return;
+  }
+
+  SYSLOG_WARN("LogicServer detected {} hung coroutines (threshold={}ms)",
+              hung.size(),
+              coroutine_hung_threshold_.count());
+  for (const auto& snapshot : hung) {
+    SYSLOG_WARN(
+        "Coroutine hung id={} trace_id={} name={} msg_id={} client_id={} "
+        "status={} suspended_for_ms={} age_ms={} state_reason={}",
+        snapshot.coroutine_id,
+        snapshot.trace_id,
+        snapshot.name,
+        snapshot.msg_id,
+        snapshot.client_id,
+        ToString(snapshot.status),
+        snapshot.suspended_for_ms,
+        snapshot.age_ms,
+        snapshot.last_state_reason);
+  }
+
+  DumpActiveCoroutines("hung_detected");
+}
+
+void LogicServer::DumpActiveCoroutines(const char* reason) const {
+  if (!executor_) {
+    return;
+  }
+
+  const auto snapshots =
+      executor_->SnapshotActiveCoroutines(coroutine_dump_max_entries_);
+  monitor::Metrics::Instance().IncrementCounter(kMetricCoroutineDumpTotal);
+
+  SYSLOG_WARN("Coroutine dump reason={} active={} showing={}",
+              reason == nullptr ? "unknown" : reason,
+              executor_->ActiveCoroutineCount(),
+              snapshots.size());
+  for (const auto& snapshot : snapshots) {
+    SYSLOG_WARN(
+        "Coroutine dump id={} trace_id={} name={} msg_id={} client_id={} "
+        "status={} age_ms={} since_last_state_ms={} suspended_for_ms={} "
+        "resume_count={} suspend_count={} state_reason={}",
+        snapshot.coroutine_id,
+        snapshot.trace_id,
+        snapshot.name,
+        snapshot.msg_id,
+        snapshot.client_id,
+        ToString(snapshot.status),
+        snapshot.age_ms,
+        snapshot.since_last_state_ms,
+        snapshot.suspended_for_ms,
+        snapshot.resume_count,
+        snapshot.suspend_count,
+        snapshot.last_state_reason);
+  }
 }
 
 void LogicServer::RegisterHandlers() {
@@ -548,10 +827,9 @@ void LogicServer::RegisterHandlers() {
                                                     client_registry_,
                                                     *role_store_);
   }
-  if (executor_ && response_sender_ && registry_manager_ && role_store_ && !character_handler_) {
+  if (response_sender_ && registry_manager_ && role_store_ && !character_handler_) {
     auto& character_manager = registry_manager_->GetCharacterManager();
-    character_handler_ = std::make_unique<CharacterHandler>(*executor_,
-                                                            *response_sender_,
+    character_handler_ = std::make_unique<CharacterHandler>(*response_sender_,
                                                             character_manager,
                                                             *role_store_,
                                                             client_registry_);
@@ -612,9 +890,7 @@ void LogicServer::RegisterHandlers() {
 
   if (executor_ && response_sender_ && default_registry && chat_aoi &&
       player_presence_service_ && !chat_handler_) {
-    chat_handler_ = std::make_unique<ChatHandler>(*executor_,
-                                                  *response_sender_,
-                                                  client_registry_,
+    chat_handler_ = std::make_unique<ChatHandler>(*response_sender_,
                                                   *player_presence_service_,
                                                   *chat_aoi,
                                                   *default_registry);
@@ -638,29 +914,39 @@ void LogicServer::RegisterHandlers() {
                                                                *scene_manager_);
   }
 
-  if (executor_ && response_sender_ && registry_manager_ && scene_manager_ &&
-      !movement_handler_) {
+  if (response_sender_ && registry_manager_ && scene_manager_ && role_store_ &&
+      default_registry && !movement_handler_) {
     auto& character_manager = registry_manager_->GetCharacterManager();
-    movement_handler_ = std::make_unique<MovementHandler>(*executor_,
-                                                          *response_sender_,
+    const auto& server_config = config::ConfigManager::Instance().GetServerConfig();
+    MovementHandler::AntiCheatConfig anti_cheat_config{
+        std::max(server_config.movement_speed_violation_severity, 0),
+        std::max(server_config.movement_teleport_violation_severity, 0)};
+    movement_handler_ = std::make_unique<MovementHandler>(*response_sender_,
                                                           client_registry_,
                                                           character_manager,
                                                           *scene_manager_,
+                                                          *default_registry,
                                                           default_map_id,
                                                           MovementValidator::Config(),
                                                           teleport_system,
-                                                          &gate_manager_);
+                                                          &gate_manager_,
+                                                          role_store_.get(),
+                                                          anti_cheat_config);
   }
 
   if (handler_registry_) {
     auto register_direct_table =
-        [this](const auto& msg_ids, HandlerRegistry::HandlerFunc handler) {
+        [this](const auto& msg_ids,
+               const char* handler_name,
+               HandlerRegistry::HandlerFunc handler) {
           for (const uint16_t msg_id : msg_ids) {
-            handler_registry_->RegisterHandler(msg_id, handler);
+            handler_registry_->RegisterHandler(
+                msg_id, handler, handler_name == nullptr ? "" : handler_name);
           }
         };
     auto register_msg_aware_table =
         [this](const auto& msg_ids,
+               const char* handler_name,
                std::function<Task<void>(HandlerContext, uint16_t, const uint8_t*, size_t)>
                    handler) {
           for (const uint16_t msg_id : msg_ids) {
@@ -670,13 +956,15 @@ void LogicServer::RegisterHandlers() {
                                   const uint8_t* payload,
                                   size_t payload_size) {
                   return handler(std::move(ctx), msg_id, payload, payload_size);
-                });
+                },
+                handler_name == nullptr ? "" : handler_name);
           }
         };
 
     if (login_handler_) {
       register_direct_table(
           kLoginHandlerMsgIds,
+          "login_handler",
           [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
             return login_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
@@ -684,6 +972,7 @@ void LogicServer::RegisterHandlers() {
     if (movement_handler_) {
       register_direct_table(
           kMovementHandlerMsgIds,
+          "movement_handler",
           [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
             return movement_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
@@ -691,6 +980,7 @@ void LogicServer::RegisterHandlers() {
     if (attack_handler_) {
       register_direct_table(
           kAttackHandlerMsgIds,
+          "attack_handler",
           [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
             return attack_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
@@ -698,6 +988,7 @@ void LogicServer::RegisterHandlers() {
     if (skill_handler_) {
       register_direct_table(
           kSkillHandlerMsgIds,
+          "skill_handler",
           [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
             return skill_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
@@ -705,6 +996,7 @@ void LogicServer::RegisterHandlers() {
     if (character_handler_) {
       register_direct_table(
           kCharacterHandlerMsgIds,
+          "character_handler",
           [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
             return character_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
@@ -712,6 +1004,7 @@ void LogicServer::RegisterHandlers() {
     if (chat_handler_) {
       register_direct_table(
           kChatHandlerMsgIds,
+          "chat_handler",
           [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
             return chat_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
@@ -719,23 +1012,23 @@ void LogicServer::RegisterHandlers() {
     if (item_handler_) {
       register_direct_table(
           kItemHandlerMsgIds,
+          "item_handler",
           [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
             return item_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
     }
     if (guild_handler_) {
-      register_msg_aware_table(
+      register_direct_table(
           kGuildHandlerMsgIds,
-          [this](HandlerContext ctx,
-                 uint16_t msg_id,
-                 const uint8_t* payload,
-                 size_t payload_size) {
-            return guild_handler_->HandleMessage(std::move(ctx), msg_id, payload, payload_size);
+          "guild_handler",
+          [this](HandlerContext ctx, const uint8_t* payload, size_t payload_size) {
+            return guild_handler_->HandleMessage(std::move(ctx), payload, payload_size);
           });
     }
     if (npc_command_handler_) {
       register_msg_aware_table(
           kNpcHandlerMsgIds,
+          "npc_command_handler",
           [this](HandlerContext ctx,
                  uint16_t msg_id,
                  const uint8_t* payload,
@@ -754,7 +1047,8 @@ void LogicServer::RegisterHandlers() {
                         ctx.msg_id,
                         ctx.client_id);
             co_return;
-          });
+          },
+          std::string("placeholder_") + binding.name);
     }
   }
 
@@ -834,38 +1128,10 @@ void LogicServer::DispatchHotEvent(const events::HotEvent& event) {
     return;
   }
 
-  if (!executor_ || event.client_id == 0) {
-    if (hot_event_pipeline_ && event.var_ref.length > 0) {
-      hot_event_pipeline_->ReleaseVarPayload(event);
-    }
-    return;
-  }
-
-  bool start_runner = false;
-  bool overflow = false;
-  auto& mailbox = player_mailboxes_[event.client_id];
-  if (mailbox.pending_events.size() >= kPlayerMailboxMaxPending) {
-    overflow = true;
-  } else {
-    mailbox.pending_events.push_back(event);
-    if (!mailbox.executing) {
-      mailbox.executing = true;
-      start_runner = true;
-    }
-  }
-
-  if (overflow) {
-    monitor::Metrics::Instance().IncrementCounter(kMetricMailboxOverflowTotal);
-    if (hot_event_pipeline_ && event.var_ref.length > 0) {
-      hot_event_pipeline_->ReleaseVarPayload(event);
-    }
-    KickMailboxOverflow(event.client_id);
-    return;
-  }
-
-  if (start_runner) {
-    executor_->Spawn(RunPlayerMailbox(event.client_id));
-  }
+  std::vector<events::HotEvent> one_event;
+  one_event.reserve(1);
+  one_event.push_back(event);
+  DispatchHotEventsBatch(std::move(one_event));
 }
 
 void LogicServer::DispatchHotEventsBatch(std::vector<events::HotEvent> events) {
@@ -902,62 +1168,166 @@ void LogicServer::DispatchHotEventsBatch(std::vector<events::HotEvent> events) {
     return;
   }
 
-  std::unordered_map<uint64_t, std::vector<events::HotEvent>> grouped_events;
-  grouped_events.reserve(events.size());
-
-  std::vector<events::HotEvent> overflow_events;
-  overflow_events.reserve(events.size() / 4 + 1);
-
-  for (const auto& event : events) {
-    if (event.client_id == 0) {
-      overflow_events.push_back(event);
-      continue;
-    }
-    grouped_events[event.client_id].push_back(event);
-  }
-
-  monitor::Metrics::Instance().SetGauge(
-      kMetricMailboxBatchPlayers, static_cast<double>(grouped_events.size()));
-
-  std::vector<uint64_t> runners_to_start;
-  runners_to_start.reserve(grouped_events.size());
-
-  for (auto& [client_id, batch] : grouped_events) {
-    bool start_runner = false;
-    size_t accepted = 0;
-    auto& mailbox = player_mailboxes_[client_id];
-    const size_t pending = mailbox.pending_events.size();
-    const size_t available =
-        pending >= kPlayerMailboxMaxPending ? 0 : (kPlayerMailboxMaxPending - pending);
-    accepted = std::min(available, batch.size());
-    for (size_t i = 0; i < accepted; ++i) {
-      mailbox.pending_events.push_back(batch[i]);
-    }
-    if (accepted > 0 && !mailbox.executing) {
-      mailbox.executing = true;
-      start_runner = true;
-    }
-
-    if (start_runner) {
-      runners_to_start.push_back(client_id);
-    }
-    for (size_t i = accepted; i < batch.size(); ++i) {
-      overflow_events.push_back(batch[i]);
-    }
-  }
-
-  for (const auto& event : overflow_events) {
-    monitor::Metrics::Instance().IncrementCounter(kMetricMailboxOverflowTotal);
+  auto release_payload = [this](const events::HotEvent& event) {
     if (hot_event_pipeline_ && event.var_ref.length > 0) {
       hot_event_pipeline_->ReleaseVarPayload(event);
     }
-    if (event.client_id != 0) {
-      KickMailboxOverflow(event.client_id);
+  };
+
+  std::unordered_set<uint64_t> batch_clients;
+  batch_clients.reserve(events.size());
+  std::unordered_set<uint64_t> runners_to_start;
+  runners_to_start.reserve(events.size());
+  std::unordered_set<uint64_t> hard_backpressure_clients;
+  hard_backpressure_clients.reserve(events.size());
+  std::unordered_set<uint64_t> soft_backpressure_clients;
+  soft_backpressure_clients.reserve(events.size());
+  std::unordered_set<uint64_t> kick_clients;
+  kick_clients.reserve(events.size());
+
+  for (const auto& event : events) {
+    if (event.client_id == 0) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricMailboxOverflowTotal);
+      release_payload(event);
+      continue;
+    }
+
+    batch_clients.insert(event.client_id);
+
+    auto [it, inserted] = player_mailboxes_.try_emplace(event.client_id);
+    auto& mailbox = it->second;
+    const bool best_effort = IsBestEffortEvent(event);
+    bool accepted = false;
+    bool dropped_due_global = false;
+
+    auto drop_low_priority_pending = [&]() -> bool {
+      if (mailbox.low_priority_events.empty()) {
+        return false;
+      }
+      const events::HotEvent dropped = mailbox.low_priority_events.front();
+      mailbox.low_priority_events.pop_front();
+      release_payload(dropped);
+      if (mailbox_pending_events_total_ > 0) {
+        --mailbox_pending_events_total_;
+      }
+      monitor::Metrics::Instance().IncrementCounter(kMetricMailboxOverflowTotal);
+      return true;
+    };
+
+    if (!best_effort) {
+      if (mailbox_pending_events_total_ >= mailbox_global_pending_hard_limit_) {
+        if (!drop_low_priority_pending()) {
+          dropped_due_global = true;
+        }
+      }
+      if (!dropped_due_global &&
+          (mailbox.high_priority_events.size() >= player_mailbox_max_high_pending_ ||
+           (mailbox.high_priority_events.size() +
+            mailbox.low_priority_events.size()) >= player_mailbox_max_pending_total_)) {
+        if (!drop_low_priority_pending()) {
+          // No low-priority queue to sacrifice; handled as overflow below.
+        }
+      }
+
+      if (!dropped_due_global &&
+          mailbox_pending_events_total_ < mailbox_global_pending_hard_limit_ &&
+          mailbox.high_priority_events.size() < player_mailbox_max_high_pending_ &&
+          (mailbox.high_priority_events.size() +
+           mailbox.low_priority_events.size()) < player_mailbox_max_pending_total_) {
+        mailbox.high_priority_events.push_back(event);
+        ++mailbox_pending_events_total_;
+        mailbox.consecutive_overflow_count = 0;
+        accepted = true;
+      } else if (!accepted) {
+        // Queue still full after low-priority drops, keep as overflow.
+      }
+    } else {
+      if (mailbox_pending_events_total_ >= mailbox_global_pending_hard_limit_) {
+        dropped_due_global = true;
+      } else if (mailbox.low_priority_events.size() >= player_mailbox_max_low_pending_ ||
+                 (mailbox.high_priority_events.size() +
+                  mailbox.low_priority_events.size()) >=
+                     player_mailbox_max_pending_total_) {
+        // Low-priority event is dropped under per-player pressure.
+      } else {
+        mailbox.low_priority_events.push_back(event);
+        ++mailbox_pending_events_total_;
+        mailbox.consecutive_overflow_count = 0;
+        accepted = true;
+      }
+    }
+
+    if (!accepted) {
+      release_payload(event);
+      monitor::Metrics::Instance().IncrementCounter(kMetricMailboxOverflowTotal);
+
+      if (dropped_due_global) {
+        monitor::Metrics::Instance().IncrementCounter(kMetricMailboxGlobalOverflowTotal);
+        monitor::Metrics::Instance().IncrementCounter(kMetricMailboxHardBackpressureTotal);
+        hard_backpressure_clients.insert(event.client_id);
+      } else if (best_effort) {
+        monitor::Metrics::Instance().IncrementCounter(kMetricMailboxSoftBackpressureTotal);
+        soft_backpressure_clients.insert(event.client_id);
+      } else {
+        monitor::Metrics::Instance().IncrementCounter(kMetricMailboxHardBackpressureTotal);
+        hard_backpressure_clients.insert(event.client_id);
+        if (mailbox.consecutive_overflow_count <
+            std::numeric_limits<uint8_t>::max()) {
+          ++mailbox.consecutive_overflow_count;
+        }
+        if (mailbox.consecutive_overflow_count >=
+            mailbox_overflow_kick_threshold_) {
+          kick_clients.insert(event.client_id);
+        }
+      }
+
+      if (inserted && !mailbox.executing && mailbox.high_priority_events.empty() &&
+          mailbox.low_priority_events.empty()) {
+        player_mailboxes_.erase(it);
+      }
+      continue;
+    }
+
+    if (!mailbox.executing) {
+      mailbox.executing = true;
+      mailbox.high_priority_budget = mailbox_high_priority_burst_;
+      ++mailbox_active_runners_;
+      runners_to_start.insert(event.client_id);
+    }
+
+    if (mailbox_pending_events_total_ >= mailbox_global_pending_soft_limit_) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricMailboxSoftBackpressureTotal);
+      soft_backpressure_clients.insert(event.client_id);
     }
   }
 
-  for (uint64_t client_id : runners_to_start) {
-    executor_->Spawn(RunPlayerMailbox(client_id));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricMailboxBatchPlayers, static_cast<double>(batch_clients.size()));
+
+  PublishMailboxQueueMetrics();
+
+  for (const uint64_t client_id : runners_to_start) {
+    executor_->SpawnOrDrop(
+        RunPlayerMailbox(client_id),
+        [this, client_id](SpawnResult reason) {
+          HandleMailboxSpawnRejected(client_id, reason);
+        });
+  }
+
+  for (const uint64_t client_id : kick_clients) {
+    KickMailboxOverflow(client_id);
+  }
+
+  for (const uint64_t client_id : hard_backpressure_clients) {
+    (void)MaybeSendBackpressurePause(client_id,
+                                     mailbox_hard_backpressure_pause_ms_,
+                                     mailbox_hard_backpressure_cooldown_ms_);
+  }
+
+  for (const uint64_t client_id : soft_backpressure_clients) {
+    (void)MaybeSendBackpressurePause(client_id,
+                                     mailbox_soft_backpressure_pause_ms_,
+                                     mailbox_soft_backpressure_cooldown_ms_);
   }
 }
 
@@ -967,15 +1337,195 @@ Task<void> LogicServer::RunPlayerMailbox(uint64_t client_id) {
     if (it == player_mailboxes_.end()) {
       co_return;
     }
-    if (it->second.pending_events.empty()) {
+    auto& mailbox = it->second;
+    if (mailbox.high_priority_events.empty() &&
+        mailbox.low_priority_events.empty()) {
+      if (it->second.executing && mailbox_active_runners_ > 0) {
+        --mailbox_active_runners_;
+      }
       it->second.executing = false;
       player_mailboxes_.erase(it);
+      PublishMailboxQueueMetrics();
       co_return;
     }
-    events::HotEvent next_event = it->second.pending_events.front();
-    it->second.pending_events.pop_front();
+
+    events::HotEvent next_event{};
+    if (!mailbox.high_priority_events.empty() &&
+        (mailbox.low_priority_events.empty() ||
+         mailbox.high_priority_budget > 0)) {
+      next_event = mailbox.high_priority_events.front();
+      mailbox.high_priority_events.pop_front();
+      if (!mailbox.low_priority_events.empty() &&
+          mailbox.high_priority_budget > 0) {
+        --mailbox.high_priority_budget;
+      }
+    } else if (!mailbox.low_priority_events.empty()) {
+      next_event = mailbox.low_priority_events.front();
+      mailbox.low_priority_events.pop_front();
+      mailbox.high_priority_budget = mailbox_high_priority_burst_;
+    } else {
+      continue;
+    }
+
+    if (mailbox_pending_events_total_ > 0) {
+      --mailbox_pending_events_total_;
+    }
+    PublishMailboxQueueMetrics();
     co_await ExecuteQueuedEvent(next_event);
   }
+}
+
+void LogicServer::HandleMailboxSpawnRejected(uint64_t client_id, SpawnResult reason) {
+  auto it = player_mailboxes_.find(client_id);
+  if (it == player_mailboxes_.end()) {
+    return;
+  }
+
+  size_t dropped = 0;
+  for (const auto& event : it->second.high_priority_events) {
+    if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    ++dropped;
+  }
+  for (const auto& event : it->second.low_priority_events) {
+    if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    ++dropped;
+  }
+  if (it->second.executing && mailbox_active_runners_ > 0) {
+    --mailbox_active_runners_;
+  }
+  if (dropped >= mailbox_pending_events_total_) {
+    mailbox_pending_events_total_ = 0;
+  } else {
+    mailbox_pending_events_total_ -= dropped;
+  }
+  player_mailboxes_.erase(it);
+
+  monitor::Metrics::Instance().IncrementCounter(monitor::Metrics::kMailboxSpawnRejectedTotal);
+  monitor::Metrics::Instance().IncrementCounter(kMetricMailboxDroppedPendingTotal,
+                                                static_cast<uint64_t>(dropped));
+  switch (reason) {
+    case SpawnResult::kNotAccepting:
+      monitor::Metrics::Instance().IncrementCounter(
+          kMetricMailboxSpawnRejectedNotAcceptingTotal);
+      break;
+    case SpawnResult::kOverLimit:
+      monitor::Metrics::Instance().IncrementCounter(
+          kMetricMailboxSpawnRejectedOverLimitTotal);
+      break;
+    case SpawnResult::kInvalidTask:
+      monitor::Metrics::Instance().IncrementCounter(
+          kMetricMailboxSpawnRejectedInvalidTaskTotal);
+      break;
+    case SpawnResult::kSpawned:
+      break;
+  }
+
+  PublishMailboxQueueMetrics();
+  if (reason == SpawnResult::kOverLimit) {
+    KickMailboxOverflow(client_id);
+  }
+
+  SYSLOG_WARN(
+      "LogicServer mailbox runner rejected client_id={} reason={} dropped_pending={}",
+      client_id,
+      ToString(reason),
+      dropped);
+}
+
+void LogicServer::PublishMailboxQueueMetrics() const {
+  monitor::Metrics::Instance().SetGauge(
+      monitor::Metrics::kMailboxPendingEvents,
+      static_cast<double>(mailbox_pending_events_total_));
+  monitor::Metrics::Instance().SetGauge(
+      monitor::Metrics::kMailboxActiveRunners,
+      static_cast<double>(mailbox_active_runners_));
+  const double utilization =
+      mailbox_global_pending_hard_limit_ == 0
+          ? 0.0
+          : static_cast<double>(std::min(mailbox_pending_events_total_,
+                                         mailbox_global_pending_hard_limit_)) /
+                static_cast<double>(mailbox_global_pending_hard_limit_);
+  monitor::Metrics::Instance().SetGauge(kMetricMailboxGlobalUtilization, utilization);
+}
+
+bool LogicServer::TryReserveBackpressureSignal(uint64_t client_id,
+                                               int64_t now_ms,
+                                               int64_t cooldown_ms) {
+  if (client_id == 0) {
+    return false;
+  }
+
+  const int64_t effective_cooldown = std::max<int64_t>(0, cooldown_ms);
+  bool should_signal = false;
+  {
+    std::lock_guard<std::mutex> lock(backpressure_mutex_);
+    auto& until = backpressure_until_ms_[client_id];
+    if (now_ms >= until) {
+      until = now_ms + effective_cooldown;
+      should_signal = true;
+    }
+    PruneBackpressureStateLocked(now_ms);
+  }
+  return should_signal;
+}
+
+void LogicServer::PruneBackpressureStateLocked(int64_t now_ms) {
+  if (backpressure_until_ms_.size() <= kBackpressureStateMaxEntries) {
+    return;
+  }
+
+  size_t scanned = 0;
+  size_t trimmed = 0;
+  for (auto it = backpressure_until_ms_.begin();
+       it != backpressure_until_ms_.end() &&
+       scanned < kBackpressurePruneBatchSize;) {
+    ++scanned;
+    if (it->second <= now_ms) {
+      it = backpressure_until_ms_.erase(it);
+      ++trimmed;
+    } else {
+      ++it;
+    }
+  }
+
+  if (backpressure_until_ms_.size() > kBackpressureStateHardCapEntries) {
+    size_t forced_trim = 0;
+    while (backpressure_until_ms_.size() > kBackpressureStateMaxEntries &&
+           forced_trim < kBackpressurePruneBatchSize &&
+           !backpressure_until_ms_.empty()) {
+      backpressure_until_ms_.erase(backpressure_until_ms_.begin());
+      ++forced_trim;
+    }
+    trimmed += forced_trim;
+  }
+
+  if (trimmed > 0) {
+    SYSLOG_DEBUG("LogicServer trimmed backpressure state entries={} remaining={}",
+                 trimmed,
+                 backpressure_until_ms_.size());
+  }
+}
+
+bool LogicServer::MaybeSendBackpressurePause(uint64_t client_id,
+                                             uint32_t duration_ms,
+                                             int64_t cooldown_ms) {
+  if (client_id == 0 || duration_ms == 0) {
+    return false;
+  }
+  auto session = GetGatewaySession();
+  if (!session) {
+    return false;
+  }
+  const int64_t now_ms = network::TcpSession::NowMs();
+  if (!TryReserveBackpressureSignal(client_id, now_ms, cooldown_ms)) {
+    return false;
+  }
+  SendBackpressurePause(session, client_id, duration_ms);
+  return true;
 }
 
 Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
@@ -1245,51 +1795,10 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
     SYSLOG_WARN("LogicServer hot queue full, dropping non-critical msg_id={} client_id={}",
                 routed.msg_id,
                 routed.client_id);
-    const int64_t now_ms = network::TcpSession::NowMs();
-    bool should_signal = false;
-    {
-      std::lock_guard<std::mutex> lock(backpressure_mutex_);
-      auto& until = backpressure_until_ms_[routed.client_id];
-      if (now_ms >= until) {
-        until = now_ms + kBackpressureSignalCooldownMs;
-        should_signal = true;
-      }
-
-      if (backpressure_until_ms_.size() > kBackpressureStateMaxEntries) {
-        size_t scanned = 0;
-        size_t trimmed = 0;
-        for (auto it = backpressure_until_ms_.begin();
-             it != backpressure_until_ms_.end() &&
-             scanned < kBackpressurePruneBatchSize;) {
-          ++scanned;
-          if (it->second <= now_ms) {
-            it = backpressure_until_ms_.erase(it);
-            ++trimmed;
-          } else {
-            ++it;
-          }
-        }
-
-        if (backpressure_until_ms_.size() > kBackpressureStateHardCapEntries) {
-          size_t forced_trim = 0;
-          while (backpressure_until_ms_.size() > kBackpressureStateMaxEntries &&
-                 forced_trim < kBackpressurePruneBatchSize &&
-                 !backpressure_until_ms_.empty()) {
-            backpressure_until_ms_.erase(backpressure_until_ms_.begin());
-            ++forced_trim;
-          }
-          trimmed += forced_trim;
-        }
-
-        if (trimmed > 0) {
-          SYSLOG_DEBUG("LogicServer trimmed backpressure state entries={} remaining={}",
-                       trimmed,
-                       backpressure_until_ms_.size());
-        }
-      }
-    }
-    if (should_signal) {
-      SendBackpressurePause(session, routed.client_id, kBackpressurePauseMs);
+    if (MaybeSendBackpressurePause(routed.client_id,
+                                   backpressure_pause_ms_,
+                                   backpressure_signal_cooldown_ms_)) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricBackpressureQueueFullSignalTotal);
     }
     return;
   }
@@ -1323,7 +1832,16 @@ bool LogicServer::DispatchRoutedMessageLegacy(uint64_t client_id,
 
   auto context = BuildHandlerContext(client_id);
   const uint8_t* raw = payload.empty() ? nullptr : payload.data();
-  return handler_registry_->DispatchMessage(context, msg_id, raw, payload.size());
+  const SpawnResult spawn_result =
+      handler_registry_->DispatchMessage(context, msg_id, raw, payload.size());
+  if (spawn_result != SpawnResult::kSpawned) {
+    SYSLOG_WARN("LogicServer legacy dispatch rejected client_id={} msg_id={} reason={}",
+                client_id,
+                msg_id,
+                ToString(spawn_result));
+    return false;
+  }
+  return true;
 }
 
 void LogicServer::SendBackpressurePause(const std::shared_ptr<network::TcpSession>& session,
@@ -1410,10 +1928,36 @@ void LogicServer::HandleContextRestoreResponse(
     return;
   }
 
-  if (!executor_->Spawn(RunPrewarm(std::move(entries)))) {
-    prewarm_running_.store(false);
-    SYSLOG_WARN("LogicServer prewarm skipped: coroutine executor is not accepting tasks");
-  }
+  const uint32_t prewarm_total = static_cast<uint32_t>(entries.size());
+  executor_->SpawnOrDrop(
+      RunPrewarm(std::move(entries)),
+      [this, prewarm_total](SpawnResult reason) {
+        prewarm_running_.store(false);
+        monitor::Metrics::Instance().IncrementCounter(
+            monitor::Metrics::kPrewarmSpawnRejectedTotal);
+        switch (reason) {
+          case SpawnResult::kNotAccepting:
+            monitor::Metrics::Instance().IncrementCounter(
+                kMetricPrewarmSpawnRejectedNotAcceptingTotal);
+            break;
+          case SpawnResult::kOverLimit:
+            monitor::Metrics::Instance().IncrementCounter(
+                kMetricPrewarmSpawnRejectedOverLimitTotal);
+            break;
+          case SpawnResult::kInvalidTask:
+            monitor::Metrics::Instance().IncrementCounter(
+                kMetricPrewarmSpawnRejectedInvalidTaskTotal);
+            break;
+          case SpawnResult::kSpawned:
+            break;
+        }
+
+        SYSLOG_WARN("LogicServer prewarm skipped: spawn rejected reason={}",
+                    ToString(reason));
+        SendLogicReady(0, 0);
+        SYSLOG_INFO("LogicServer prewarm reject fallback: report ready total={} restored=0",
+                    prewarm_total);
+      });
 }
 
 Task<void> LogicServer::RunPrewarm(std::vector<PrewarmEntry> entries) {
@@ -1607,6 +2151,15 @@ void LogicServer::OnSignal(const asio::error_code& ec, int signal) {
     return;
   }
 
+#if defined(SIGUSR1)
+  if (signal == SIGUSR1) {
+    SYSLOG_INFO("LogicServer received SIGUSR1, dumping active coroutines");
+    DumpActiveCoroutines("SIGUSR1");
+    RegisterSignalHandlers();
+    return;
+  }
+#endif
+
   SYSLOG_INFO("LogicServer received signal {}, shutting down...", signal);
   RequestStop();
 }
@@ -1647,6 +2200,9 @@ WorldSystemBundle& LogicServer::EnsureWorldSystems(uint32_t map_id,
     world.CreateSystem<ecs::InventorySystem>();
     world.CreateSystem<ecs::TradeSystem>();
     world.CreateSystem<ecs::LevelUpSystem>(world.Registry(), world.GetEventBus());
+    world.CreateSystem<ecs::AttributeRecalcSystem>(world.Registry(), world.GetEventBus());
+    world.CreateSystem<ecs::RecoverySystem>();
+    world.CreateSystem<ecs::LuckSystem>();
     if (!scene_manager_) {
       scene_manager_ = std::make_unique<game::map::SceneManager>();
     }
@@ -1699,11 +2255,26 @@ void LogicServer::Tick(float delta_time) {
   if (hot_event_pipeline_) {
     std::size_t drained = 0;
     std::vector<events::HotEvent> drained_events;
-    drained_events.reserve(256);
+    drained_events.reserve(std::min<size_t>(hot_event_max_drain_per_tick_, 512));
+    const auto drain_start = std::chrono::steady_clock::now();
+    bool budget_hit = false;
     events::HotEvent event{};
-    while (hot_event_pipeline_->TryDequeue(&event)) {
+    while (drained < hot_event_max_drain_per_tick_ &&
+           hot_event_pipeline_->TryDequeue(&event)) {
       drained_events.push_back(event);
       ++drained;
+      if (std::chrono::steady_clock::now() - drain_start >=
+          hot_event_max_drain_duration_per_tick_) {
+        budget_hit = hot_event_pipeline_->ApproxSize() > 0;
+        break;
+      }
+    }
+    if (!budget_hit && drained >= hot_event_max_drain_per_tick_ &&
+        hot_event_pipeline_->ApproxSize() > 0) {
+      budget_hit = true;
+    }
+    if (budget_hit) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricHotDrainBudgetHitTotal);
     }
     DispatchHotEventsBatch(std::move(drained_events));
     hot_event_pipeline_->ObserveDrain(drained);

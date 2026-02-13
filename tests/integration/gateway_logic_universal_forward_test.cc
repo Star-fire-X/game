@@ -30,6 +30,7 @@
 #include "client/network/dual_channel_client.h"
 #include "common/enums.h"
 #include "common/internal_message_helper.h"
+#include "common/network/i_channel.h"
 #include "chat_generated.h"
 #include "combat_generated.h"
 #include "game_generated.h"
@@ -680,6 +681,7 @@ TEST_F(GatewayLogicUniversalForwardTest, PerformanceUnder5000Connections) {
         gateway_->HandleForwardMessage(
             sessions[static_cast<size_t>(i)],
             static_cast<uint16_t>(MsgId::kMoveReq),
+            mir2::common::ChannelType::kTcp,
             payload);
       }
     });

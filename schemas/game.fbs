@@ -106,3 +106,13 @@ table StateSync {
   player: PlayerInfo;
   entities: [EntitySnapshot];
 }
+
+table BonusPointReq {
+  attribute_name: string;  // "dc", "mc", "sc", "ac", "mac", "hp", "mp", "hit", "speed"
+  action: ubyte = 0;       // 0=allocate, 1=reset
+}
+
+table BonusPointRsp {
+  code: ErrorCode;
+  remaining: int;
+}

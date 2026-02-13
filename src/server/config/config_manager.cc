@@ -33,6 +33,82 @@ bool ConfigManager::Load(const std::string& config_path) {
     server_config_.tick_interval_ms = ReadOrDefault(server, "tick_interval_ms", server_config_.tick_interval_ms);
     server_config_.heartbeat_timeout_ms =
         ReadOrDefault(server, "heartbeat_timeout_ms", server_config_.heartbeat_timeout_ms);
+    server_config_.hot_event_max_drain_per_tick = ReadOrDefault(
+        server,
+        "hot_event_max_drain_per_tick",
+        server_config_.hot_event_max_drain_per_tick);
+    server_config_.hot_event_max_drain_ms_per_tick = ReadOrDefault(
+        server,
+        "hot_event_max_drain_ms_per_tick",
+        server_config_.hot_event_max_drain_ms_per_tick);
+    server_config_.mailbox_player_max_high_pending = ReadOrDefault(
+        server,
+        "mailbox_player_max_high_pending",
+        server_config_.mailbox_player_max_high_pending);
+    server_config_.mailbox_player_max_low_pending = ReadOrDefault(
+        server,
+        "mailbox_player_max_low_pending",
+        server_config_.mailbox_player_max_low_pending);
+    server_config_.mailbox_high_priority_burst = ReadOrDefault(
+        server,
+        "mailbox_high_priority_burst",
+        server_config_.mailbox_high_priority_burst);
+    server_config_.mailbox_overflow_kick_threshold = ReadOrDefault(
+        server,
+        "mailbox_overflow_kick_threshold",
+        server_config_.mailbox_overflow_kick_threshold);
+    server_config_.mailbox_global_pending_hard_limit = ReadOrDefault(
+        server,
+        "mailbox_global_pending_hard_limit",
+        server_config_.mailbox_global_pending_hard_limit);
+    server_config_.mailbox_global_pending_soft_limit = ReadOrDefault(
+        server,
+        "mailbox_global_pending_soft_limit",
+        server_config_.mailbox_global_pending_soft_limit);
+    server_config_.backpressure_pause_ms = ReadOrDefault(
+        server,
+        "backpressure_pause_ms",
+        server_config_.backpressure_pause_ms);
+    server_config_.backpressure_signal_cooldown_ms = ReadOrDefault(
+        server,
+        "backpressure_signal_cooldown_ms",
+        server_config_.backpressure_signal_cooldown_ms);
+    server_config_.mailbox_soft_backpressure_pause_ms = ReadOrDefault(
+        server,
+        "mailbox_soft_backpressure_pause_ms",
+        server_config_.mailbox_soft_backpressure_pause_ms);
+    server_config_.mailbox_hard_backpressure_pause_ms = ReadOrDefault(
+        server,
+        "mailbox_hard_backpressure_pause_ms",
+        server_config_.mailbox_hard_backpressure_pause_ms);
+    server_config_.mailbox_soft_backpressure_cooldown_ms = ReadOrDefault(
+        server,
+        "mailbox_soft_backpressure_cooldown_ms",
+        server_config_.mailbox_soft_backpressure_cooldown_ms);
+    server_config_.mailbox_hard_backpressure_cooldown_ms = ReadOrDefault(
+        server,
+        "mailbox_hard_backpressure_cooldown_ms",
+        server_config_.mailbox_hard_backpressure_cooldown_ms);
+    server_config_.coroutine_hung_threshold_ms = ReadOrDefault(
+        server,
+        "coroutine_hung_threshold_ms",
+        server_config_.coroutine_hung_threshold_ms);
+    server_config_.coroutine_hung_scan_interval_ms = ReadOrDefault(
+        server,
+        "coroutine_hung_scan_interval_ms",
+        server_config_.coroutine_hung_scan_interval_ms);
+    server_config_.coroutine_dump_max_entries = ReadOrDefault(
+        server,
+        "coroutine_dump_max_entries",
+        server_config_.coroutine_dump_max_entries);
+    server_config_.movement_speed_violation_severity = ReadOrDefault(
+        server,
+        "movement_speed_violation_severity",
+        server_config_.movement_speed_violation_severity);
+    server_config_.movement_teleport_violation_severity = ReadOrDefault(
+        server,
+        "movement_teleport_violation_severity",
+        server_config_.movement_teleport_violation_severity);
     server_config_.login_ip_rate_limit_capacity = ReadOrDefault(
         server,
         "login_ip_rate_limit_capacity",

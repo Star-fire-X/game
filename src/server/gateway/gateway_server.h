@@ -7,8 +7,9 @@
 #define MIR2_GATEWAY_GATEWAY_SERVER_H_
 
 #include <atomic>
+#include <cstdint>
+#include <deque>
 #include <memory>
-#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -17,7 +18,6 @@
 
 #include "core/application.h"
 #include "gateway/connection_holder.h"
-#include "gateway/message_router.h"
 #include "network/tcp_client.h"
 #include "network/dual_channel_manager.h"
 #include "security/rate_limiter.h"
@@ -55,19 +55,32 @@ class GatewayServer {
                        const std::vector<uint8_t>& payload);
   void HandleForwardMessage(const std::shared_ptr<network::TcpSession>& session,
                             uint16_t msg_id,
+                            mir2::common::ChannelType channel,
                             const std::vector<uint8_t>& payload);
   bool ConnectLogicService();
   void StartAsyncConnect();
   bool IsLogicConnected() const;
   bool ConnectToLogicService();
   void ScheduleReconnect(int retry_count);
-  void ForwardToLogic(uint64_t client_id, uint16_t msg_id,
+  bool ForwardToLogic(uint64_t client_id, uint16_t msg_id,
                       const std::vector<uint8_t>& payload);
   void NotifyClientDisconnected(uint64_t client_id);
   void OnLogicPacket(const network::Packet& packet);
   void HandleBackpressureControl(const std::vector<uint8_t>& payload);
   void ResumeBackpressuredSessions(int64_t now_ms);
   std::vector<uint8_t> BuildContextRestoreResponse(uint32_t request_id) const;
+  struct PendingDisconnectEvent {
+    uint64_t client_id = 0;
+    uint64_t sequence = 0;
+    int64_t first_seen_ms = 0;
+    int64_t next_retry_ms = 0;
+    uint32_t retry_count = 0;
+  };
+  void EnqueueDisconnectEvent(uint64_t client_id, int64_t now_ms);
+  void ProcessDisconnectRetryQueue(int64_t now_ms);
+  bool TrySendDisconnectEvent(const PendingDisconnectEvent& event);
+  void TrimExpiredDisconnectEvents(int64_t now_ms);
+  void UpdateHoldingMetrics();
   void EnterHoldingState();
   void EnterRestoringState();
   void EnterFlushingState();
@@ -87,10 +100,11 @@ class GatewayServer {
   std::unordered_map<uint64_t, std::unique_ptr<ConnectionHolder>> connection_holders_;
   std::unordered_map<uint64_t, int64_t> connection_connected_at_ms_;
   std::unordered_map<uint64_t, int64_t> client_backpressure_until_ms_;
+  std::deque<PendingDisconnectEvent> pending_disconnect_events_;
+  uint64_t next_disconnect_sequence_ = 1;
   mir2::security::RateLimiter login_ip_rate_limiter_{
       {.capacity = 5, .refill_rate = 1}};
-  std::shared_mutex reconnect_mutex_;
-  bool logic_reconnecting_ = false;
+  std::atomic<bool> logic_reconnecting_{false};
   std::atomic<bool> shutting_down_{false};
   float stale_route_cleanup_elapsed_sec_ = 0.0f;
   ConnectionHolder::State holder_state_ = ConnectionHolder::State::FORWARDING;

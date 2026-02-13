@@ -524,6 +524,7 @@ if(TARGET SDL2::SDL2)
         ${CMAKE_SOURCE_DIR}/src/client/ui/hud/status_bar.cc
         ${CMAKE_SOURCE_DIR}/src/client/ui/hud/player_info_panel.cc
         ${CMAKE_SOURCE_DIR}/src/client/ui/hud/hud_container.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/ui_renderer.cc
     )
 
     target_link_libraries(client_hud_tests PRIVATE
@@ -546,6 +547,7 @@ if(TARGET SDL2::SDL2)
         client/ui/inventory/inventory_panel_test.cc
         ${CMAKE_SOURCE_DIR}/src/client/ui/inventory/inventory_panel.cc
         ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
+        ${CMAKE_SOURCE_DIR}/src/client/ui/ui_renderer.cc
     )
 
     target_link_libraries(client_inventory_tests PRIVATE
@@ -569,6 +571,7 @@ if(TARGET SDL2::SDL2)
         client/ui/equipment/equipment_panel_test.cc
         ${CMAKE_SOURCE_DIR}/src/client/ui/equipment/equipment_panel.cc
         ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
+        ${CMAKE_SOURCE_DIR}/src/client/ui/ui_renderer.cc
     )
 
     target_link_libraries(client_equipment_tests PRIVATE
@@ -592,6 +595,7 @@ if(TARGET SDL2::SDL2)
         client/ui/chat/chat_panel_test.cc
         ${CMAKE_SOURCE_DIR}/src/client/ui/chat/chat_panel.cc
         ${CMAKE_SOURCE_DIR}/src/client/handlers/chat_handler.cpp
+        ${CMAKE_SOURCE_DIR}/src/client/ui/ui_renderer.cc
     )
 
     target_link_libraries(client_chat_panel_tests PRIVATE
@@ -614,6 +618,7 @@ if(TARGET SDL2::SDL2)
     add_executable(client_minimap_tests
         client/ui/minimap/minimap_widget_test.cc
         ${CMAKE_SOURCE_DIR}/src/client/ui/minimap/minimap_widget.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/ui_renderer.cc
     )
 
     target_link_libraries(client_minimap_tests PRIVATE

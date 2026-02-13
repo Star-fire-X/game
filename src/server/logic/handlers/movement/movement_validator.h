@@ -38,11 +38,23 @@ class MovementValidator {
    * @brief 配置项
    */
   struct Config {
+    enum class DistanceMetric : uint8_t {
+      kEuclidean = 0,
+      kChebyshev = 1,
+      kManhattan = 2,
+      kStepBased = 3
+    };
+
     int max_steps;
     float speed_tolerance;
+    DistanceMetric distance_metric;
 
-    Config(int max_steps = 10, float speed_tolerance = 1.2f)
-        : max_steps(max_steps), speed_tolerance(speed_tolerance) {}
+    Config(int max_steps = 10,
+           float speed_tolerance = 1.2f,
+           DistanceMetric distance_metric = DistanceMetric::kEuclidean)
+        : max_steps(max_steps),
+          speed_tolerance(speed_tolerance),
+          distance_metric(distance_metric) {}
   };
 
   /**

@@ -27,6 +27,7 @@ class RoleStore {
   std::optional<uint64_t> GetAccountId(uint64_t client_id) const;
   void BindClientRole(uint64_t client_id, uint64_t player_id);
   std::optional<uint64_t> GetRoleId(uint64_t client_id) const;
+  std::optional<uint64_t> GetClientIdByRoleId(uint64_t player_id) const;
   void UnbindClient(uint64_t client_id);
 
   std::vector<RoleRecord> GetRoles(uint64_t account_id) const;
@@ -51,6 +52,7 @@ class RoleStore {
   mutable std::mutex mutex_;
   std::unordered_map<uint64_t, uint64_t> client_accounts_;
   std::unordered_map<uint64_t, uint64_t> client_roles_;
+  std::unordered_map<uint64_t, uint64_t> role_clients_;  // reverse mapping: role_id -> client_id
   std::unordered_map<uint64_t, std::vector<RoleRecord>> account_roles_;
   std::unordered_map<std::string, size_t> role_name_ref_count_;
 };

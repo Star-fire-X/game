@@ -35,43 +35,33 @@ struct CharacterIdentityComponent {
  * @brief 角色属性组件
  */
 struct CharacterAttributesComponent {
-    int level = 1;        ///< 等级
-    int experience = 0;   ///< 当前经验值
-    int hp = 0;           ///< 当前HP
-    int max_hp = 0;       ///< 最大HP
-    int mp = 0;           ///< 当前MP
-    int max_mp = 0;       ///< 最大MP
-    int inc_health = 0;   ///< 渐进恢复累计HP
-    int inc_spell = 0;    ///< 渐进恢复累计MP
+    int level = 1;            ///< 等级
+    int64_t experience = 0;   ///< 当前经验值（int64支持高等级大经验值）
+    int hp = 0;               ///< 当前HP
+    int max_hp = 0;           ///< 最大HP
+    int mp = 0;               ///< 当前MP
+    int max_mp = 0;           ///< 最大MP
+    int inc_health = 0;       ///< 渐进恢复累计HP
+    int inc_spell = 0;        ///< 渐进恢复累计MP
     bool next_free_curse_item = false; ///< 下次脱装备可解除诅咒
-    int attack = 0;       ///< 物理攻击
-    int defense = 0;      ///< 物理防御
-    int magic_attack = 0; ///< 魔法攻击
-    int magic_defense = 0;///< 魔法防御
-    int speed = 0;        ///< 移动/攻速
-    int gold = 0;         ///< 金币数量
-    int luck = 0;         ///< 幸运值
-    int pk_level = 0;     ///< PK等级(>=2 红名)
-    int hit_plus = 0;     ///< 力量加成
-    uint8_t life_attrib = 0; ///< 生命属性(0=普通,1=不死)
-    int anti_poison = 0;  ///< 抗毒
-    int anti_magic = 0;   ///< 反魔法
-    int sc = 0;           ///< 精神力（道士）
-
-    /// 获取升到下一级所需经验
-    int GetExpForNextLevel() const {
-        const int base_exp = 100;
-        const int max_level = 255;
-
-        // 防止溢出
-        if (level >= max_level) {
-            return INT_MAX;
-        }
-
-        // 使用 int64_t 计算防止中间结果溢出
-        int64_t exp = static_cast<int64_t>(base_exp) * level * level;
-        return exp > INT_MAX ? INT_MAX : static_cast<int>(exp);
-    }
+    int attack = 0;           ///< 物理攻击
+    int defense = 0;          ///< 物理防御
+    int magic_attack = 0;     ///< 魔法攻击
+    int magic_defense = 0;    ///< 魔法防御
+    int speed = 0;            ///< 移动/攻速
+    int gold = 0;             ///< 金币数量
+    int luck = 0;             ///< 幸运值（装备幸运）
+    int pk_level = 0;         ///< PK等级(>=2 红名)
+    int hit_plus = 0;         ///< 力量加成
+    uint8_t life_attrib = 0;  ///< 生命属性(0=普通,1=不死)
+    int anti_poison = 0;      ///< 抗毒
+    int anti_magic = 0;       ///< 反魔法
+    int sc = 0;               ///< 精神力（道士）
+    int body_luck = 0;        ///< BodyLuck 幸运值（升级+100，每tick衰减）
+    int max_weight = 0;       ///< 最大负重
+    int max_wear_weight = 0;  ///< 最大穿戴负重
+    int max_hand_weight = 0;  ///< 最大腕力（手持物品重量上限）
+    int bonus_remaining = 0;  ///< 可用奖励点数（未分配的）
 };
 
 /**

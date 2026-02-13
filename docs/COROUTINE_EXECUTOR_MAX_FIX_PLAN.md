@@ -1,6 +1,6 @@
 # Coroutine Executor 可执行迭代计划
 
-最后更新: 2026-02-09
+最后更新: 2026-02-11
 
 范围: `CoroutineExecutor` / `Task` / `LogicServer` / `HandlerRegistry` / `PrewarmManager`
 
@@ -191,17 +191,26 @@
 
 ### P2（结构优化）
 
-1. [ ] 合并 `Task<T>` / `Task<void>`，抽 `promise_base`，引入 Awaitable Concepts 约束。
-2. [ ] 指标解耦：`IMetricsSink` 注入。
-3. [ ] 高频 timer 分配优化（状态内嵌或对象池）。
-4. [ ] 原子内存序显式化。
-5. [ ] `noexcept` 审计。
-6. [ ] 执行器文档补全。
-7. [ ] 协程饥饿检测（长时间不挂起告警）。
+1. [x] 合并 `Task<T>` / `Task<void>`，抽 `promise_base`，引入 Awaitable Concepts 约束。
+2. [x] 指标解耦：`IMetricsSink` 注入。
+3. [x] 高频 timer 分配优化（状态内嵌或对象池）。
+4. [x] 原子内存序显式化。
+5. [x] `noexcept` 审计。
+6. [x] 执行器文档补全。
+7. [x] 协程饥饿检测（长时间不挂起告警）。
 
 ### P3（工程化保障）
 
-1. [ ] CI 加 ASAN/TSAN 任务。
-2. [ ] 压测基准：协程风暴/超时风暴/关停风暴。
-3. [ ] 发布门禁：P0/P1 测试与指标阈值强制通过。
-4. [ ] `thread_local` 协程兼容性审计与清单化整改建议。
+1. [x] CI 加 ASAN/TSAN 任务（`.github/workflows/sanitizers.yml`）。
+2. [x] 压测基准：协程风暴/超时风暴/关停风暴。
+3. [x] 发布门禁：P0/P1 测试与指标阈值强制通过（`.github/workflows/coroutine-release-gate.yml`）。
+4. [x] `thread_local` 协程兼容性审计与清单化整改建议。
+
+### 2026-02-11 本轮落地产物
+
+1. `P2-1`: `src/server/logic/task.h`
+2. `P2-3`: `src/server/logic/coroutine_executor.h`, `src/server/logic/coroutine_executor.cc`
+3. `P2-5`: `src/server/logic/task.h`, `src/server/logic/coroutine_executor.cc`, `docs/coroutine_executor_engineering_guide.md`
+4. `P2-6`: `docs/coroutine_executor_engineering_guide.md`
+5. `P3-2`: `benchmarks/coroutine_executor_stress_benchmark.cpp`, `benchmarks/CMakeLists.txt`
+6. `P3-4`: `docs/thread_local_coroutine_compat_audit.md`

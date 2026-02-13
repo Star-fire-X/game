@@ -17,7 +17,7 @@ table CharacterSnapshot {
   magic_attack:int;
   magic_defense:int;
   speed:int;
-  experience:int;
+  experience:long;
   gold:int;
   map_id:uint;
   pos_x:int;
@@ -27,6 +27,20 @@ table CharacterSnapshot {
   skills_data:[ubyte];
   created_at:long;
   last_login:long;
+  body_luck:int = 0;
+  bonus_remaining:int = 0;
+  bonus_dc:int = 0;
+  bonus_mc:int = 0;
+  bonus_sc:int = 0;
+  bonus_ac:int = 0;
+  bonus_mac:int = 0;
+  bonus_hp:int = 0;
+  bonus_mp:int = 0;
+  bonus_hit:int = 0;
+  bonus_speed:int = 0;
+  max_weight:int = 0;
+  max_wear_weight:int = 0;
+  max_hand_weight:int = 0;
 }
 
 root_type CharacterSnapshot;

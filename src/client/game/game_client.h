@@ -59,6 +59,8 @@ class EffectHandler;
 class SystemHandler;
 class NpcHandler;
 class SkillHandler;
+class ItemHandler;
+class ChatHandler;
 } // namespace mir2::game::handlers
 
 namespace mir2::client {
@@ -74,6 +76,26 @@ namespace mir2::ui {
 class NpcDialogUI;
 class UIManager;
 } // namespace mir2::ui
+
+namespace mir2::ui::hud {
+class HudContainer;
+} // namespace mir2::ui::hud
+
+namespace mir2::ui::inventory {
+class InventoryPanel;
+} // namespace mir2::ui::inventory
+
+namespace mir2::ui::equipment {
+class EquipmentPanel;
+} // namespace mir2::ui::equipment
+
+namespace mir2::ui::chat {
+class ChatPanel;
+} // namespace mir2::ui::chat
+
+namespace mir2::ui::minimap {
+class MinimapWidget;
+} // namespace mir2::ui::minimap
 
 namespace mir2::ui::skill {
 class SkillBar;
@@ -342,6 +364,8 @@ private:
     std::unique_ptr<handlers::SystemHandler> system_handler_;
     std::unique_ptr<handlers::NpcHandler> npc_handler_;
     std::shared_ptr<handlers::SkillHandler> skill_handler_;
+    std::shared_ptr<handlers::ItemHandler> item_handler_;
+    std::shared_ptr<handlers::ChatHandler> chat_handler_;
     
     // Rendering subsystems
     std::unique_ptr<MapRenderer> map_renderer_;
@@ -353,6 +377,13 @@ private:
     LoginFlowManager login_flow_;
     std::unique_ptr<UIManager> ui_manager_;
     std::unique_ptr<NpcDialogUI> npc_dialog_ui_;
+
+    // HUD and gameplay UI
+    std::unique_ptr<ui::hud::HudContainer> hud_container_;
+    std::unique_ptr<ui::inventory::InventoryPanel> inventory_panel_;
+    std::unique_ptr<ui::equipment::EquipmentPanel> equipment_panel_;
+    std::unique_ptr<ui::chat::ChatPanel> chat_panel_;
+    std::unique_ptr<ui::minimap::MinimapWidget> minimap_widget_;
 
     // Skill system
     std::unique_ptr<client::skill::SkillManager> skill_manager_;

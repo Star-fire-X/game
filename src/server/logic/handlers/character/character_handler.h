@@ -24,15 +24,13 @@ class SelectRoleReq;
 
 namespace mir2::logic {
 
-class CoroutineExecutor;
 class ResponseSender;
 class RoleStore;
 class ClientRegistry;
 
 class CharacterHandler {
  public:
-  CharacterHandler(CoroutineExecutor& executor,
-                   ResponseSender& response_sender,
+  CharacterHandler(ResponseSender& response_sender,
                    mir2::ecs::CharacterEntityManager& entity_manager,
                    RoleStore& role_store,
                    ClientRegistry& client_registry);
@@ -45,7 +43,6 @@ class CharacterHandler {
   Task<void> HandleSelectRole(HandlerContext ctx, const mir2::proto::SelectRoleReq* req);
   Task<void> HandleLogout(HandlerContext ctx);
 
-  CoroutineExecutor& executor_;
   ResponseSender& response_sender_;
   mir2::ecs::CharacterEntityManager& entity_manager_;
   RoleStore& role_store_;

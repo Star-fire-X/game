@@ -30,28 +30,27 @@ class TeleportSystem;
 
 namespace mir2::game::map {
 class GateManager;
+class MapInstance;
 class SceneManager;
 }  // namespace mir2::game::map
 
 namespace mir2::logic {
 
-class CoroutineExecutor;
 class ResponseSender;
+class RoleStore;
 
 class MovementHandler {
  public:
-  MovementHandler(CoroutineExecutor& executor,
-                  ResponseSender& response_sender,
-                  ClientRegistry& registry,
-                  mir2::ecs::CharacterEntityManager& character_manager,
-                  mir2::game::map::SceneManager& scene_manager,
-                  uint32_t default_map_id = 1,
-                  MovementValidator::Config validator_config =
-                      MovementValidator::Config(),
-                  mir2::ecs::TeleportSystem* teleport_system = nullptr,
-                  mir2::game::map::GateManager* gate_manager = nullptr);
-  MovementHandler(CoroutineExecutor& executor,
-                  ResponseSender& response_sender,
+  struct AntiCheatConfig {
+    int speed_violation_severity;
+    int teleport_violation_severity;
+
+    constexpr AntiCheatConfig(int speed = 10, int teleport = 5)
+        : speed_violation_severity(speed),
+          teleport_violation_severity(teleport) {}
+  };
+
+  MovementHandler(ResponseSender& response_sender,
                   ClientRegistry& registry,
                   mir2::ecs::CharacterEntityManager& character_manager,
                   mir2::game::map::SceneManager& scene_manager,
@@ -60,7 +59,9 @@ class MovementHandler {
                   MovementValidator::Config validator_config =
                       MovementValidator::Config(),
                   mir2::ecs::TeleportSystem* teleport_system = nullptr,
-                  mir2::game::map::GateManager* gate_manager = nullptr);
+                  mir2::game::map::GateManager* gate_manager = nullptr,
+                  RoleStore* role_store = nullptr,
+                  AntiCheatConfig anti_cheat_config = AntiCheatConfig());
 
   Task<void> HandleMessage(HandlerContext ctx, const uint8_t* payload, size_t payload_size);
   Task<void> HandleHot(HandlerContext ctx, int32_t target_x, int32_t target_y);
@@ -75,19 +76,24 @@ class MovementHandler {
   Task<void> BroadcastEntityMove(uint64_t entity_id,
                                  int x,
                                  int y,
-                                 uint8_t direction);
+                                 uint8_t direction,
+                                 const std::vector<uint64_t>& recipient_client_ids);
+  std::vector<uint64_t> ResolveAoiRecipients(const mir2::game::map::MapInstance& map,
+                                             entt::entity self,
+                                             entt::registry& registry) const;
   void RecordMoveViolation(uint64_t player_id,
                            mir2::common::ErrorCode code,
                            int64_t timestamp_ms);
 
-  CoroutineExecutor& executor_;
   ResponseSender& response_sender_;
   ClientRegistry& client_registry_;
   mir2::ecs::CharacterEntityManager& character_manager_;
   mir2::game::map::SceneManager& scene_manager_;
-  entt::registry* ecs_registry_ = nullptr;
+  entt::registry& ecs_registry_;
   mir2::ecs::TeleportSystem* teleport_system_ = nullptr;
   mir2::game::map::GateManager* gate_manager_ = nullptr;
+  RoleStore* role_store_ = nullptr;
+  AntiCheatConfig anti_cheat_config_;
   uint32_t default_map_id_;
   MovementValidator::Config validator_config_;
   std::unordered_map<uint64_t, int64_t> last_move_time_ms_;

@@ -27,6 +27,8 @@ namespace mir2::logic {
 struct HandlerContext {
   uint64_t client_id = 0;
   uint16_t msg_id = 0;
+  uint64_t trace_id = 0;
+  uint64_t coroutine_id = 0;
   entt::entity entity = entt::null;
   uint32_t entity_version = 0;
 

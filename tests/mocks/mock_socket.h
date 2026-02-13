@@ -54,6 +54,13 @@ class MockSocket : public SocketAdapter {
   bool ShutdownCalled() const { return shutdown_called_; }
 
   void async_read_some(const asio::mutable_buffer& buffer, IoHandler handler) override {
+    if (closed_) {
+      asio::post(executor_, [handler = std::move(handler)]() {
+        handler(asio::error::operation_aborted, 0);
+      });
+      return;
+    }
+
     if (read_error_once_) {
       const auto error = read_error_;
       read_error_once_ = false;
@@ -87,11 +94,13 @@ class MockSocket : public SocketAdapter {
 
   void shutdown(asio::ip::tcp::socket::shutdown_type /*type*/, asio::error_code& ec) override {
     shutdown_called_ = true;
+    CancelPendingRead(asio::error::operation_aborted);
     ec.clear();
   }
 
   void close(asio::error_code& ec) override {
     closed_ = true;
+    CancelPendingRead(asio::error::operation_aborted);
     ec.clear();
   }
 
@@ -108,6 +117,17 @@ class MockSocket : public SocketAdapter {
     std::size_t size = 0;
     IoHandler handler;
   };
+
+  void CancelPendingRead(const asio::error_code& error) {
+    if (!pending_read_) {
+      return;
+    }
+    auto handler = std::move(pending_read_->handler);
+    pending_read_.reset();
+    asio::post(executor_, [handler = std::move(handler), error]() mutable {
+      handler(error, 0);
+    });
+  }
 
   void TryFulfillPendingRead() {
     if (!pending_read_) {

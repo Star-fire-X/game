@@ -69,19 +69,25 @@ TEST(GatewayErrorHandlingTest, ServerConfig_DefaultLoginIpRateLimitValues) {
   config::ServerConfig defaults;
   EXPECT_EQ(defaults.login_ip_rate_limit_capacity, 5);
   EXPECT_EQ(defaults.login_ip_rate_limit_refill_rate, 1);
+  EXPECT_EQ(defaults.movement_speed_violation_severity, 10);
+  EXPECT_EQ(defaults.movement_teleport_violation_severity, 5);
 }
 
 TEST(GatewayErrorHandlingTest, LoadConfig_LoginIpRateLimitFieldsParsed) {
   const auto path = WriteTempConfig(
       "server:\n"
       "  login_ip_rate_limit_capacity: 12\n"
-      "  login_ip_rate_limit_refill_rate: 3\n",
+      "  login_ip_rate_limit_refill_rate: 3\n"
+      "  movement_speed_violation_severity: 20\n"
+      "  movement_teleport_violation_severity: 9\n",
       "login_ip_limit");
   ASSERT_TRUE(config::ConfigManager::Instance().Load(path));
 
   const auto& config = config::ConfigManager::Instance().GetServerConfig();
   EXPECT_EQ(config.login_ip_rate_limit_capacity, 12);
   EXPECT_EQ(config.login_ip_rate_limit_refill_rate, 3);
+  EXPECT_EQ(config.movement_speed_violation_severity, 20);
+  EXPECT_EQ(config.movement_teleport_violation_severity, 9);
 
   std::filesystem::remove(path);
 }

@@ -26,6 +26,7 @@
 #include <asio.hpp>
 
 #include "common/enums.h"
+#include "common/protocol/message_codec.h"
 #include "integration/performance_report_generator.h"
 #include "integration/test_helpers.h"
 
@@ -57,7 +58,6 @@ constexpr size_t kRttSamples = 100;
 constexpr size_t kRecoverySamples = 100;
 constexpr size_t kCombatSamples = 100;
 constexpr size_t kThroughputMessages = 10000;
-constexpr size_t kPayloadSizeBytes = 1024;
 
 constexpr double kRttP95TargetMs = 50.0;
 constexpr double kRttP99TargetMs = 80.0;
@@ -68,10 +68,42 @@ constexpr double kConcurrentSuccessTarget = 0.95;
 constexpr double kCpuTargetPercent = 80.0;
 constexpr double kMemoryTargetMb = 500.0;
 
-std::vector<uint8_t> BuildPayload(size_t size, uint8_t seed) {
-  std::vector<uint8_t> payload(size);
-  for (size_t i = 0; i < size; ++i) {
-    payload[i] = static_cast<uint8_t>(seed + i);
+std::vector<uint8_t> BuildMoveReqPayload(int32_t x, int32_t y) {
+  mir2::common::MessageCodecStatus status = mir2::common::MessageCodecStatus::kOk;
+  mir2::common::MoveRequest request{};
+  request.target_x = x;
+  request.target_y = y;
+  auto payload = mir2::common::EncodeMoveRequest(request, &status);
+  if (status != mir2::common::MessageCodecStatus::kOk) {
+    return {};
+  }
+  return payload;
+}
+
+std::vector<uint8_t> BuildAttackReqPayload(uint64_t target_id) {
+  mir2::common::MessageCodecStatus status = mir2::common::MessageCodecStatus::kOk;
+  mir2::common::AttackRequest request{};
+  request.target_id = target_id;
+  request.target_type = mir2::proto::EntityType::MONSTER;
+  auto payload = mir2::common::EncodeAttackRequest(request, &status);
+  if (status != mir2::common::MessageCodecStatus::kOk) {
+    return {};
+  }
+  return payload;
+}
+
+std::vector<uint8_t> BuildAttackRspPayload(uint64_t attacker_id, uint64_t target_id) {
+  mir2::common::MessageCodecStatus status = mir2::common::MessageCodecStatus::kOk;
+  mir2::common::AttackResponse response{};
+  response.code = mir2::proto::ErrorCode::ERR_OK;
+  response.attacker_id = attacker_id;
+  response.target_id = target_id;
+  response.damage = 10;
+  response.target_hp = 90;
+  response.target_dead = false;
+  auto payload = mir2::common::EncodeAttackResponse(response, &status);
+  if (status != mir2::common::MessageCodecStatus::kOk) {
+    return {};
   }
   return payload;
 }
@@ -329,7 +361,9 @@ TEST_F(KcpPerformanceTest, RttBenchmark) {
 
   PerformanceMonitor monitor;
   for (size_t i = 0; i < kRttSamples; ++i) {
-    const auto payload = BuildPayload(8, static_cast<uint8_t>(i));
+    const auto payload = BuildMoveReqPayload(static_cast<int32_t>(i % 200),
+                                             static_cast<int32_t>((i * 3) % 200));
+    ASSERT_FALSE(payload.empty());
     const auto start = Clock::now();
 
     client_->send(kMoveMsgId, payload);
@@ -436,7 +470,9 @@ TEST_F(KcpLossyPerformanceTest, PacketLossRecoveryBenchmark) {
 
   PerformanceMonitor monitor;
   for (size_t i = 0; i < kRecoverySamples; ++i) {
-    const auto payload = BuildPayload(12, static_cast<uint8_t>(i));
+    const auto payload = BuildMoveReqPayload(static_cast<int32_t>((i + 10) % 200),
+                                             static_cast<int32_t>((i * 5) % 200));
+    ASSERT_FALSE(payload.empty());
     const auto start = Clock::now();
 
     client_->send(kMoveMsgId, payload);
@@ -471,7 +507,8 @@ TEST_F(KcpPerformanceTest, ThroughputBenchmark) {
     }
   });
 
-  const auto payload = BuildPayload(kPayloadSizeBytes, 0x5A);
+  const auto payload = BuildMoveReqPayload(88, 66);
+  ASSERT_FALSE(payload.empty());
 
   const auto start = Clock::now();
   for (size_t i = 0; i < kThroughputMessages; ++i) {
@@ -490,7 +527,7 @@ TEST_F(KcpPerformanceTest, ThroughputBenchmark) {
   const double msg_per_sec = elapsed > 0.0
                                  ? static_cast<double>(kThroughputMessages) / elapsed
                                  : 0.0;
-  const double total_mb = (static_cast<double>(kPayloadSizeBytes) *
+  const double total_mb = (static_cast<double>(payload.size()) *
                            static_cast<double>(kThroughputMessages)) /
                           (1024.0 * 1024.0);
   const double mb_per_sec = elapsed > 0.0 ? total_mb / elapsed : 0.0;
@@ -511,22 +548,28 @@ TEST_F(KcpPerformanceTest, CombatLatencyBenchmark) {
 
   ASSERT_TRUE(EstablishDualChannel());
 
+  server_->SetRoute(kAttackReqId, ChannelType::kKcp);
   server_->SetRoute(kAttackRspId, ChannelType::kKcp);
-  client_->set_route(kAttackReqId, ChannelType::kTcp);
+  client_->set_route(kAttackReqId, ChannelType::kKcp);
 
   server_->RegisterHandler(
       kAttackReqId,
       [this](const std::shared_ptr<mir2::network::TcpSession>& session,
-             const std::vector<uint8_t>& payload) {
+             const std::vector<uint8_t>& /*payload*/) {
         if (!session || !server_) {
           return;
         }
-        server_->Send(session->GetSessionId(), kAttackRspId, payload);
+        auto rsp_payload = BuildAttackRspPayload(1001, 2002);
+        if (rsp_payload.empty()) {
+          return;
+        }
+        server_->Send(session->GetSessionId(), kAttackRspId, rsp_payload);
       });
 
   PerformanceMonitor monitor;
   for (size_t i = 0; i < kCombatSamples; ++i) {
-    const auto payload = BuildPayload(16, static_cast<uint8_t>(i));
+    const auto payload = BuildAttackReqPayload(10000 + i);
+    ASSERT_FALSE(payload.empty());
     const auto start = Clock::now();
 
     client_->send(kAttackReqId, payload);

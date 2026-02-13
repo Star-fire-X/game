@@ -23,6 +23,12 @@ enum class HotEventType : uint8_t {
   kGeneric = 6,
 };
 
+enum class HotEventPriority : uint8_t {
+  kNormal = 0,
+  kCritical = 1,
+  kBestEffort = 2,
+};
+
 struct MoveHotData {
   int32_t target_x = 0;
   int32_t target_y = 0;
@@ -69,6 +75,29 @@ struct alignas(64) HotEvent {
   HotEventData data;
   VarRef var_ref;
 };
+
+constexpr uint8_t kHotEventPriorityMask = 0x03;
+
+inline void SetHotEventPriority(HotEvent* event, HotEventPriority priority) {
+  if (!event) {
+    return;
+  }
+  event->flags = static_cast<uint8_t>(
+      (event->flags & ~kHotEventPriorityMask) |
+      (static_cast<uint8_t>(priority) & kHotEventPriorityMask));
+}
+
+inline HotEventPriority GetHotEventPriority(const HotEvent& event) {
+  switch (event.flags & kHotEventPriorityMask) {
+    case static_cast<uint8_t>(HotEventPriority::kCritical):
+      return HotEventPriority::kCritical;
+    case static_cast<uint8_t>(HotEventPriority::kBestEffort):
+      return HotEventPriority::kBestEffort;
+    case static_cast<uint8_t>(HotEventPriority::kNormal):
+    default:
+      return HotEventPriority::kNormal;
+  }
+}
 
 static_assert(sizeof(HotEventData) == 16, "HotEventData must stay compact.");
 static_assert(sizeof(HotEvent) == 64, "HotEvent must fit in one cache line.");

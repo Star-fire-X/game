@@ -51,7 +51,18 @@ const char* CategoryName(LogCategory category) {
   }
 }
 
+thread_local TraceLogContext g_trace_context{};
+
 }  // namespace
+
+TraceLogContext GetCurrentTraceLogContext() noexcept {
+  return g_trace_context;
+}
+
+void SetCurrentTraceLogContext(uint64_t trace_id, uint64_t coroutine_id) noexcept {
+  g_trace_context.trace_id = trace_id;
+  g_trace_context.coroutine_id = coroutine_id;
+}
 
 bool Logger::Initialize(const std::string& log_path, const std::string& level,
                         int max_size_mb, int max_files) {

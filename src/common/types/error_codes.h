@@ -28,6 +28,11 @@ enum class ErrorCode : uint16_t {
     kInvalidAction = 400,
     kTargetNotFound = 401,
     kTargetOutOfRange = 402,
+    kDecodeInvalidMsgId = 420,
+    kDecodeInvalidPayload = 421,
+    kDecodeMissingField = 422,
+    kDecodeStringTooLong = 423,
+    kDecodeValueOutOfRange = 424,
     kNoParty = 410,
     kTargetRefused = 411,
     kInvalidPath = 403,
@@ -94,6 +99,11 @@ inline const char* error_code_to_string(ErrorCode code) {
         case ErrorCode::kInvalidAction: return "Invalid action";
         case ErrorCode::kTargetNotFound: return "Target not found";
         case ErrorCode::kTargetOutOfRange: return "Target out of range";
+        case ErrorCode::kDecodeInvalidMsgId: return "Decode invalid message id";
+        case ErrorCode::kDecodeInvalidPayload: return "Decode invalid payload";
+        case ErrorCode::kDecodeMissingField: return "Decode missing field";
+        case ErrorCode::kDecodeStringTooLong: return "Decode string too long";
+        case ErrorCode::kDecodeValueOutOfRange: return "Decode value out of range";
         case ErrorCode::kNoParty: return "No party";
         case ErrorCode::kTargetRefused: return "Target refused";
         case ErrorCode::kInvalidPath: return "Invalid path";

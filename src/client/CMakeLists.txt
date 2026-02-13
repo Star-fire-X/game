@@ -132,6 +132,20 @@ add_executable(legend2_client
     ui/skill/cast_bar.h
     ui/skill/skill_target_indicator.cc
     ui/skill/skill_target_indicator.h
+    ui/inventory/inventory_panel.cc
+    ui/inventory/inventory_panel.h
+    ui/equipment/equipment_panel.cc
+    ui/equipment/equipment_panel.h
+    ui/hud/status_bar.cc
+    ui/hud/status_bar.h
+    ui/hud/player_info_panel.cc
+    ui/hud/player_info_panel.h
+    ui/hud/hud_container.cc
+    ui/hud/hud_container.h
+    ui/chat/chat_panel.cc
+    ui/chat/chat_panel.h
+    ui/minimap/minimap_widget.cc
+    ui/minimap/minimap_widget.h
     ui/states/login_screen_state.h
     ui/states/login_state_interface.h
     ui/states/login_state_helpers.cc
@@ -172,6 +186,10 @@ add_executable(legend2_client
     handlers/effect_handler.h
     handlers/system_handler.cpp
     handlers/system_handler.h
+    handlers/item_handler.cpp
+    handlers/item_handler.h
+    handlers/chat_handler.cpp
+    handlers/chat_handler.h
 
     # Network module
     network/message_dispatcher.cpp
@@ -202,6 +220,7 @@ target_link_libraries(legend2_client PRIVATE
     legend2_common
     yaml-cpp::yaml-cpp
     flatbuffers::flatbuffers
+    spdlog::spdlog
     asio
     $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
     SDL2::SDL2

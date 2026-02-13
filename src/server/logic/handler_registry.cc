@@ -1,17 +1,62 @@
 #include "logic/handler_registry.h"
 
 #include <chrono>
+#include <cctype>
+#include <cstring>
 #include <memory>
+#include <string>
 #include <utility>
-#include <vector>
 
 #include "logic/coroutine_executor.h"
+#include "log/logger.h"
 #include "monitor/metrics.h"
 
 namespace mir2::logic {
 namespace {
 
-Task<void> RunMeasuredTask(std::shared_ptr<std::vector<uint8_t>> payload_copy,
+constexpr const char* kMetricHandlerSpawnRejectedTotal =
+    "logic.handler.spawn_rejected_total";
+
+std::string BuildDefaultHandlerName(uint16_t msg_id) {
+  return "msg_" + std::to_string(msg_id);
+}
+
+std::string NormalizeHandlerKey(std::string name) {
+  if (name.empty()) {
+    return "unknown";
+  }
+  for (char& ch : name) {
+    const unsigned char value = static_cast<unsigned char>(ch);
+    if (std::isalnum(value)) {
+      ch = static_cast<char>(std::tolower(value));
+    } else {
+      ch = '_';
+    }
+  }
+  return name;
+}
+
+struct PayloadCopy {
+  std::unique_ptr<uint8_t[]> bytes;
+  size_t size = 0;
+
+  const uint8_t* Data() const noexcept {
+    return size == 0 ? nullptr : bytes.get();
+  }
+};
+
+PayloadCopy CopyPayload(const uint8_t* payload, size_t payload_size) {
+  PayloadCopy copy;
+  if (payload == nullptr || payload_size == 0) {
+    return copy;
+  }
+  copy.bytes = std::make_unique<uint8_t[]>(payload_size);
+  std::memcpy(copy.bytes.get(), payload, payload_size);
+  copy.size = payload_size;
+  return copy;
+}
+
+Task<void> RunMeasuredTask(PayloadCopy payload_copy,
                            Task<void> task,
                            std::chrono::steady_clock::time_point start) {
   auto keep_payload_alive = std::move(payload_copy);
@@ -34,46 +79,76 @@ Task<void> RunMeasuredTask(std::shared_ptr<std::vector<uint8_t>> payload_copy,
 }  // namespace
 
 HandlerRegistry::HandlerRegistry(CoroutineExecutor& executor)
-    : executor_(executor) {}
+    : executor_(executor), handlers_(kHandlerTableSize) {}
 
-void HandlerRegistry::RegisterHandler(uint16_t msg_id, HandlerFunc handler) {
-  handlers_[msg_id] = std::move(handler);
+void HandlerRegistry::RegisterHandler(uint16_t msg_id,
+                                      HandlerFunc handler,
+                                      std::string handler_name) {
+  HandlerEntry entry;
+  entry.handler = std::move(handler);
+  entry.name = handler_name.empty() ? BuildDefaultHandlerName(msg_id)
+                                    : std::move(handler_name);
+  entry.handler_key = NormalizeHandlerKey(entry.name);
+  handlers_[msg_id] = std::move(entry);
 }
 
-bool HandlerRegistry::DispatchMessage(const HandlerContext& context,
-                                      uint16_t msg_id,
-                                      const uint8_t* payload,
-                                      size_t payload_size) const {
+SpawnResult HandlerRegistry::DispatchMessage(const HandlerContext& context,
+                                             uint16_t msg_id,
+                                             const uint8_t* payload,
+                                             size_t payload_size) const {
   Task<void> task(Task<void>::Handle{});
-  if (!CreateTask(context, msg_id, payload, payload_size, &task)) {
-    return false;
+  CoroutineMetadata metadata;
+  if (!CreateTask(context, msg_id, payload, payload_size, &task, &metadata)) {
+    return SpawnResult::kInvalidTask;
   }
-  return executor_.Spawn(std::move(task));
+
+  const uint64_t client_id = context.client_id;
+  const uint64_t trace_id = metadata.trace_id;
+  return executor_.SpawnOrDrop(
+      std::move(task),
+      [client_id, msg_id, trace_id](SpawnResult reason) {
+        monitor::Metrics::Instance().IncrementCounter(kMetricHandlerSpawnRejectedTotal);
+        SYSLOG_WARN("HandlerRegistry dropped task client_id={} msg_id={} trace_id={} reason={}",
+                    client_id,
+                    msg_id,
+                    trace_id,
+                    ToString(reason));
+      },
+      std::move(metadata));
 }
 
 bool HandlerRegistry::CreateTask(const HandlerContext& context,
                                  uint16_t msg_id,
                                  const uint8_t* payload,
                                  size_t payload_size,
-                                 Task<void>* out_task) const {
+                                 Task<void>* out_task,
+                                 CoroutineMetadata* out_metadata) const {
   if (!out_task) {
     return false;
   }
 
-  auto it = handlers_.find(msg_id);
-  if (it == handlers_.end() || !it->second) {
+  const HandlerEntry& entry = handlers_[msg_id];
+  if (!entry.handler) {
     return false;
   }
 
-  auto payload_copy = std::make_shared<std::vector<uint8_t>>();
-  if (payload && payload_size > 0) {
-    payload_copy->assign(payload, payload + payload_size);
-  }
+  PayloadCopy payload_copy = CopyPayload(payload, payload_size);
 
   const auto start = std::chrono::steady_clock::now();
   HandlerContext dispatch_context = context;
   dispatch_context.msg_id = msg_id;
-  auto task = it->second(dispatch_context, payload_copy->data(), payload_copy->size());
+  if (dispatch_context.trace_id == 0) {
+    dispatch_context.trace_id = executor_.AllocateTraceId();
+  }
+  auto task = entry.handler(dispatch_context, payload_copy.Data(), payload_copy.size);
+  if (out_metadata != nullptr) {
+    out_metadata->trace_id = dispatch_context.trace_id;
+    out_metadata->name = "handler." + entry.name;
+    out_metadata->source = "handler_registry";
+    out_metadata->handler_key = entry.handler_key;
+    out_metadata->msg_id = msg_id;
+    out_metadata->client_id = dispatch_context.client_id;
+  }
   *out_task = RunMeasuredTask(std::move(payload_copy), std::move(task), start);
   return true;
 }

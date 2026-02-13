@@ -15,9 +15,10 @@
 #include "core/singleton.h"
 
 #if defined(LEGEND2_ENABLE_PROMETHEUS)
+#include <prometheus/exposer.h>
+
 namespace prometheus {
 class Counter;
-class Exposer;
 class Gauge;
 class Histogram;
 class Registry;
@@ -61,6 +62,13 @@ class Metrics : public core::Singleton<Metrics> {
   static constexpr const char* kDispatchLatency = "mir2_dispatch_latency_us";
   static constexpr const char* kErrors = "mir2_errors_total";
   static constexpr const char* kHandlerLatency = "logic.handler.latency_ms";
+  static constexpr const char* kMailboxPendingEvents = "logic.mailbox.pending_events";
+  static constexpr const char* kMailboxActiveRunners = "logic.mailbox.active_runners";
+  static constexpr const char* kMailboxSpawnRejectedTotal =
+      "logic.mailbox.spawn_rejected_total";
+  static constexpr const char* kLoginSpawnRejectedTotal = "logic.login.spawn_rejected_total";
+  static constexpr const char* kPrewarmSpawnRejectedTotal =
+      "logic.prewarm.spawn_rejected_total";
 
  private:
   Metrics() = default;

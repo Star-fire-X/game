@@ -24,6 +24,20 @@ namespace {
 
 constexpr size_t kMaxChatLength = 256;
 
+/// Extract character ID from HandlerContext.
+/// Returns nullopt if context is invalid or entity has no identity component.
+std::optional<uint64_t> GetCharacterId(const HandlerContext& ctx,
+                                       entt::registry& registry) {
+  if (ctx.entity == entt::null || !registry.valid(ctx.entity)) {
+    return std::nullopt;
+  }
+  const auto* identity = registry.try_get<ecs::CharacterIdentityComponent>(ctx.entity);
+  if (!identity) {
+    return std::nullopt;
+  }
+  return identity->id;
+}
+
 std::optional<entt::entity> FindOnlineCharacterEntity(entt::registry& registry,
                                                        uint64_t character_id) {
   auto view = registry.view<ecs::CharacterIdentityComponent, ecs::CharacterStateComponent>();
@@ -75,15 +89,11 @@ std::vector<uint8_t> BuildChatRsp(mir2::common::ErrorCode code) {
 
 }  // namespace
 
-ChatHandler::ChatHandler(CoroutineExecutor& executor,
-                         ResponseSender& response_sender,
-                         ClientRegistry& registry,
+ChatHandler::ChatHandler(ResponseSender& response_sender,
                          PlayerPresenceService& player_presence_service,
                          mir2::game::map::AOIManager& aoi_mgr,
                          entt::registry& ecs_registry)
-    : executor_(executor),
-      response_sender_(response_sender),
-      client_registry_(registry),
+    : response_sender_(response_sender),
       aoi_mgr_(aoi_mgr),
       ecs_registry_(ecs_registry),
       chat_service_(std::make_unique<mir2::game::chat::ChatService>(
@@ -128,11 +138,7 @@ Task<void> ChatHandler::HandleMessage(HandlerContext ctx,
     co_return;
   }
 
-  if (content.size() > 1 && content[0] == '@') {
-    co_await HandleHot(std::move(ctx), req->channel(), req->target_id(), content);
-    co_return;
-  }
-
+  // HandleHot will check for '@' commands internally
   co_await HandleHot(std::move(ctx), req->channel(), req->target_id(), content);
 }
 
@@ -181,30 +187,44 @@ Task<void> ChatHandler::HandleHot(HandlerContext ctx,
 }
 
 Task<void> ChatHandler::HandleWorldChat(HandlerContext ctx, const std::string& content) {
+  auto character_id = GetCharacterId(ctx, ecs_registry_);
+  if (!character_id.has_value()) {
+    SYSLOG_WARN("ChatHandler world chat invalid context (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
   const auto dispatches =
-      chat_service_->SendNormalChat(ctx.client_id, content, aoi_mgr_);
+      chat_service_->SendNormalChat(*character_id, content, aoi_mgr_);
   co_await SendChatDispatches(static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
                               dispatches);
   co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
 
-  SYSLOG_DEBUG("ChatHandler world chat sender={} count={}",
-               ctx.client_id, dispatches.size());
+  SYSLOG_DEBUG("ChatHandler world chat character_id={} count={}",
+               *character_id, dispatches.size());
 }
 
 Task<void> ChatHandler::HandlePrivateChat(HandlerContext ctx,
                                           uint64_t target_id,
                                           const std::string& content) {
+  auto character_id = GetCharacterId(ctx, ecs_registry_);
+  if (!character_id.has_value()) {
+    SYSLOG_WARN("ChatHandler private chat invalid context (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
   if (!FindOnlineCharacterEntity(ecs_registry_, target_id).has_value()) {
-    SYSLOG_WARN("ChatHandler private target offline (client_id={}, target_id={})",
-                ctx.client_id, target_id);
+    SYSLOG_WARN("ChatHandler private target offline (character_id={}, target_id={})",
+                *character_id, target_id);
     co_await SendChatResponse(ctx, mir2::common::ErrorCode::kTargetNotFound);
     co_return;
   }
 
-  auto dispatches = chat_service_->SendWhisper(ctx.client_id, target_id, content);
+  auto dispatches = chat_service_->SendWhisper(*character_id, target_id, content);
   if (dispatches.empty()) {
-    SYSLOG_WARN("ChatHandler private chat refused (client_id={}, target_id={})",
-                ctx.client_id, target_id);
+    SYSLOG_WARN("ChatHandler private chat refused (character_id={}, target_id={})",
+                *character_id, target_id);
     co_await SendChatResponse(ctx, mir2::common::ErrorCode::kTargetRefused);
     co_return;
   }
@@ -213,14 +233,21 @@ Task<void> ChatHandler::HandlePrivateChat(HandlerContext ctx,
                               dispatches);
   co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
 
-  SYSLOG_DEBUG("ChatHandler private chat sender={} target={} count={}",
-               ctx.client_id, target_id, dispatches.size());
+  SYSLOG_DEBUG("ChatHandler private chat character_id={} target={} count={}",
+               *character_id, target_id, dispatches.size());
 }
 
 Task<void> ChatHandler::HandleTeamChat(HandlerContext ctx, const std::string& content) {
-  auto dispatches = chat_service_->SendTeamChat(ctx.client_id, content);
+  auto character_id = GetCharacterId(ctx, ecs_registry_);
+  if (!character_id.has_value()) {
+    SYSLOG_WARN("ChatHandler team chat invalid context (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  auto dispatches = chat_service_->SendTeamChat(*character_id, content);
   if (dispatches.empty()) {
-    SYSLOG_WARN("ChatHandler team chat no party (client_id={})", ctx.client_id);
+    SYSLOG_WARN("ChatHandler team chat no party (character_id={})", *character_id);
     co_await SendChatResponse(ctx, mir2::common::ErrorCode::kNoParty);
     co_return;
   }
@@ -229,24 +256,38 @@ Task<void> ChatHandler::HandleTeamChat(HandlerContext ctx, const std::string& co
                               dispatches);
   co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
 
-  SYSLOG_DEBUG("ChatHandler team chat sender={} count={}",
-               ctx.client_id, dispatches.size());
+  SYSLOG_DEBUG("ChatHandler team chat character_id={} count={}",
+               *character_id, dispatches.size());
 }
 
 Task<void> ChatHandler::HandleAreaChat(HandlerContext ctx, const std::string& content) {
-  const auto dispatches = chat_service_->SendAreaChat(ctx.client_id, content);
+  auto character_id = GetCharacterId(ctx, ecs_registry_);
+  if (!character_id.has_value()) {
+    SYSLOG_WARN("ChatHandler area chat invalid context (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  const auto dispatches = chat_service_->SendAreaChat(*character_id, content);
   co_await SendChatDispatches(static_cast<uint16_t>(mir2::common::MsgId::kAreaChat),
                               dispatches);
   co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
 
-  SYSLOG_DEBUG("ChatHandler area chat sender={} count={}",
-               ctx.client_id, dispatches.size());
+  SYSLOG_DEBUG("ChatHandler area chat character_id={} count={}",
+               *character_id, dispatches.size());
 }
 
 Task<void> ChatHandler::HandleGuildChat(HandlerContext ctx, const std::string& content) {
-  auto dispatches = chat_service_->SendGuildChat(ctx.client_id, content);
+  auto character_id = GetCharacterId(ctx, ecs_registry_);
+  if (!character_id.has_value()) {
+    SYSLOG_WARN("ChatHandler guild chat invalid context (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  auto dispatches = chat_service_->SendGuildChat(*character_id, content);
   if (dispatches.empty()) {
-    SYSLOG_WARN("ChatHandler guild chat unavailable (client_id={})", ctx.client_id);
+    SYSLOG_WARN("ChatHandler guild chat unavailable (character_id={})", *character_id);
     co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
     co_return;
   }
@@ -255,18 +296,27 @@ Task<void> ChatHandler::HandleGuildChat(HandlerContext ctx, const std::string& c
                               dispatches);
   co_await SendChatResponse(ctx, mir2::common::ErrorCode::kOk);
 
-  SYSLOG_DEBUG("ChatHandler guild chat sender={} count={}",
-               ctx.client_id, dispatches.size());
+  SYSLOG_DEBUG("ChatHandler guild chat character_id={} count={}",
+               *character_id, dispatches.size());
 }
 
 Task<void> ChatHandler::HandleChatCommand(HandlerContext ctx, const std::string& content) {
-  auto sender_entity = FindOnlineCharacterEntity(ecs_registry_, ctx.client_id);
-  if (!sender_entity.has_value()) {
-    SYSLOG_WARN("ChatHandler command missing player (client_id={})", ctx.client_id);
+  // Use ctx.entity directly instead of finding it
+  if (ctx.entity == entt::null || !ecs_registry_.valid(ctx.entity)) {
+    SYSLOG_WARN("ChatHandler command invalid entity (client_id={})", ctx.client_id);
     co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
     co_return;
   }
-  auto& chat_pref = EnsureChatPreference(ecs_registry_, *sender_entity);
+
+  // Get character ID for comparison in block command
+  auto character_id = GetCharacterId(ctx, ecs_registry_);
+  if (!character_id.has_value()) {
+    SYSLOG_WARN("ChatHandler command missing character identity (client_id={})", ctx.client_id);
+    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+
+  auto& chat_pref = EnsureChatPreference(ecs_registry_, ctx.entity);
 
   size_t space_pos = content.find(' ');
   std::string cmd = (space_pos != std::string::npos)
@@ -280,7 +330,7 @@ Task<void> ChatHandler::HandleChatCommand(HandlerContext ctx, const std::string&
 
   if (cmd == "block" && !arg.empty()) {
     auto target_id = FindOnlineCharacterIdByName(ecs_registry_, arg);
-    if (target_id.has_value() && *target_id != ctx.client_id) {
+    if (target_id.has_value() && *target_id != *character_id) {
       if (chat_pref.AddBlock(static_cast<uint32_t>(*target_id))) {
         result = mir2::common::ErrorCode::kOk;
       }
@@ -322,8 +372,8 @@ Task<void> ChatHandler::HandleChatCommand(HandlerContext ctx, const std::string&
   }
 
   co_await SendChatResponse(ctx, result);
-  SYSLOG_DEBUG("ChatHandler command={} result={} client_id={}",
-               cmd, static_cast<uint16_t>(result), ctx.client_id);
+  SYSLOG_DEBUG("ChatHandler command={} result={} character_id={}",
+               cmd, static_cast<uint16_t>(result), *character_id);
 }
 
 Task<void> ChatHandler::SendChatResponse(HandlerContext ctx, mir2::common::ErrorCode code) {

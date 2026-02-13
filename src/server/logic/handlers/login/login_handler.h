@@ -55,6 +55,7 @@ class LoginHandler {
 
  private:
   Task<void> HandleLogin(HandlerContext ctx, const mir2::common::LoginRequest& req);
+  [[nodiscard]]
   Task<LoginResult> AwaitLogin(const std::string& username, const std::string& password);
 
   CoroutineExecutor& executor_;

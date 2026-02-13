@@ -50,13 +50,16 @@ bool RingBuffer::Push(uint16_t msg_id,
   header.msg_id = msg_id;
   header.channel_type = static_cast<uint8_t>(channel);
 
-  if (!WriteBytes(reinterpret_cast<const uint8_t*>(&header), kHeaderSize)) {
+  // Keep Push transactional: either the whole record is committed or nothing is.
+  const size_t original_head = head_;
+  const size_t original_tail = tail_;
+  const size_t original_used = used_;
+  if (!WriteBytes(reinterpret_cast<const uint8_t*>(&header), kHeaderSize) ||
+      (!payload.empty() && !WriteBytes(payload.data(), payload.size()))) {
+    head_ = original_head;
+    tail_ = original_tail;
+    used_ = original_used;
     return false;
-  }
-  if (!payload.empty()) {
-    if (!WriteBytes(payload.data(), payload.size())) {
-      return false;
-    }
   }
   return true;
 }

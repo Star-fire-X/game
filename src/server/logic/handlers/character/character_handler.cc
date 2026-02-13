@@ -11,6 +11,7 @@
 #include "common/character_data.h"
 #include "common/enums.h"
 #include "ecs/character_entity_manager.h"
+#include "ecs/components/character_components.h"
 #include "game_generated.h"
 #include "logic/services/client_registry.h"
 #include "log/logger.h"
@@ -64,16 +65,14 @@ std::vector<uint8_t> BuildSelectRoleRsp(mir2::proto::ErrorCode code, uint64_t pl
 }
 
 std::vector<uint8_t> BuildEnterGameRsp(mir2::proto::ErrorCode code,
-                                       const RoleRecord* role) {
+                                       const RoleRecord* role,
+                                       int hp = 100, int max_hp = 100,
+                                       int mp = 50, int max_mp = 50) {
   flatbuffers::FlatBufferBuilder builder;
   flatbuffers::Offset<mir2::proto::PlayerInfo> player_offset = 0;
 
   if (role) {
     const auto name_offset = builder.CreateString(role->name);
-    const int hp = 100;
-    const int max_hp = 100;
-    const int mp = 50;
-    const int max_mp = 50;
     player_offset = mir2::proto::CreatePlayerInfo(
         builder, role->player_id, name_offset,
         static_cast<mir2::proto::Profession>(role->profession),
@@ -143,13 +142,11 @@ bool TryToCharacterGender(mir2::proto::Gender gender, mir2::common::Gender* out)
 
 }  // namespace
 
-CharacterHandler::CharacterHandler(CoroutineExecutor& executor,
-                                   ResponseSender& response_sender,
+CharacterHandler::CharacterHandler(ResponseSender& response_sender,
                                    mir2::ecs::CharacterEntityManager& entity_manager,
                                    RoleStore& role_store,
                                    ClientRegistry& client_registry)
-    : executor_(executor),
-      response_sender_(response_sender),
+    : response_sender_(response_sender),
       entity_manager_(entity_manager),
       role_store_(role_store),
       client_registry_(client_registry) {}
@@ -157,14 +154,13 @@ CharacterHandler::CharacterHandler(CoroutineExecutor& executor,
 Task<void> CharacterHandler::HandleMessage(HandlerContext ctx,
                                            const uint8_t* payload,
                                            size_t payload_size) {
+  // Allow empty payload only for kLogout message
   if (!payload || payload_size == 0) {
-    if (static_cast<mir2::common::MsgId>(ctx.msg_id) == mir2::common::MsgId::kLogout) {
-      co_await HandleLogout(std::move(ctx));
+    if (static_cast<mir2::common::MsgId>(ctx.msg_id) != mir2::common::MsgId::kLogout) {
+      SYSLOG_WARN("CharacterHandler empty payload for msg_id={} (client_id={})",
+                  ctx.msg_id, ctx.client_id);
       co_return;
     }
-    SYSLOG_WARN("CharacterHandler empty payload for msg_id={} (client_id={})",
-                ctx.msg_id, ctx.client_id);
-    co_return;
   }
 
   switch (static_cast<mir2::common::MsgId>(ctx.msg_id)) {
@@ -265,7 +261,7 @@ Task<void> CharacterHandler::HandleRoleList(HandlerContext ctx,
       static_cast<uint16_t>(mir2::common::MsgId::kRoleListRsp),
       std::move(response_payload));
 
-  SYSLOG_DEBUG("CharacterHandler RoleList account={} count={}", account_id, roles.size());
+  SYSLOG_INFO("CharacterHandler RoleList account_id={} count={}", account_id, roles.size());
 }
 
 Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
@@ -276,7 +272,21 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
 
   const std::string name = req->name() ? req->name()->str() : "";
   const auto account_id_opt = role_store_.GetAccountId(ctx.client_id);
-  const uint64_t account_id = account_id_opt.value_or(0);
+
+  if (!account_id_opt.has_value() || *account_id_opt == 0) {
+    SYSLOG_WARN("CharacterHandler CreateRole unauthenticated client_id={} name={}",
+                ctx.client_id,
+                name);
+    auto response_payload = BuildCreateRoleRsp(
+        mir2::proto::ErrorCode::ERR_ACCOUNT_NOT_FOUND, 0);
+    co_await response_sender_.SendAsync(
+        ctx.client_id,
+        static_cast<uint16_t>(mir2::common::MsgId::kCreateRoleRsp),
+        std::move(response_payload));
+    co_return;
+  }
+
+  const uint64_t account_id = *account_id_opt;
 
   mir2::common::CharacterClass character_class;
   mir2::common::Gender character_gender;
@@ -318,7 +328,13 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
 
   if (code == mir2::common::ErrorCode::kOk) {
     if (record.player_id > std::numeric_limits<uint32_t>::max()) {
-      role_store_.RemoveRole(account_id, record.player_id);
+      SYSLOG_ERROR("CharacterHandler CreateRole player_id={} exceeds uint32_t max, rolling back",
+                   record.player_id);
+      const bool removed = role_store_.RemoveRole(account_id, record.player_id);
+      if (!removed) {
+        SYSLOG_ERROR("CharacterHandler CreateRole failed to rollback player_id={} account_id={}",
+                     record.player_id, account_id);
+      }
       code = mir2::common::ErrorCode::kUnknown;
       record.player_id = 0;
     }
@@ -328,7 +344,13 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
     entt::entity entity = entity_manager_.CreateFromRequest(
         static_cast<uint32_t>(record.player_id), create_request);
     if (entity == entt::null) {
-      role_store_.RemoveRole(account_id, record.player_id);
+      SYSLOG_ERROR("CharacterHandler CreateRole entity creation failed for player_id={}, rolling back",
+                   record.player_id);
+      const bool removed = role_store_.RemoveRole(account_id, record.player_id);
+      if (!removed) {
+        SYSLOG_ERROR("CharacterHandler CreateRole failed to rollback player_id={} account_id={}",
+                     record.player_id, account_id);
+      }
       code = mir2::common::ErrorCode::kUnknown;
       record.player_id = 0;
     }
@@ -341,8 +363,13 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
       static_cast<uint16_t>(mir2::common::MsgId::kCreateRoleRsp),
       std::move(response_payload));
 
-  SYSLOG_DEBUG("CharacterHandler CreateRole name={} player_id={} code={}",
-               name, record.player_id, static_cast<int>(code));
+  if (code == mir2::common::ErrorCode::kOk) {
+    SYSLOG_INFO("CharacterHandler CreateRole success account_id={} name={} player_id={}",
+                account_id, name, record.player_id);
+  } else {
+    SYSLOG_WARN("CharacterHandler CreateRole failed account_id={} name={} code={}",
+                account_id, name, static_cast<int>(code));
+  }
 }
 
 Task<void> CharacterHandler::HandleSelectRole(HandlerContext ctx,
@@ -393,15 +420,38 @@ Task<void> CharacterHandler::HandleSelectRole(HandlerContext ctx,
     role_store_.BindClientRole(ctx.client_id, player_id);
   }
 
-  // Send EnterGameRsp.
+  // Send EnterGameRsp with real HP/MP values if available.
+  int hp = 100, max_hp = 100, mp = 50, max_mp = 50;  // Default fallback values
+  if (can_login) {
+    const auto entity_opt = entity_manager_.TryGet(static_cast<uint32_t>(player_id));
+    if (entity_opt) {
+      const auto* registry = entity_manager_.TryGetRegistry(static_cast<uint32_t>(player_id));
+      if (registry && registry->valid(*entity_opt)) {
+        const auto* attributes = registry->try_get<mir2::ecs::CharacterAttributesComponent>(*entity_opt);
+        if (attributes) {
+          hp = attributes->hp;
+          max_hp = attributes->max_hp;
+          mp = attributes->mp;
+          max_mp = attributes->max_mp;
+        }
+      }
+    }
+  }
+
   const RoleRecord* role_ptr = can_login ? &role_opt.value() : nullptr;
-  auto enter_payload = BuildEnterGameRsp(code, role_ptr);
+  auto enter_payload = BuildEnterGameRsp(code, role_ptr, hp, max_hp, mp, max_mp);
   co_await response_sender_.SendAsync(
       ctx.client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kEnterGameRsp),
       std::move(enter_payload));
 
-  SYSLOG_DEBUG("CharacterHandler SelectRole player_id={} found={}", player_id, found);
+  if (can_login) {
+    SYSLOG_INFO("CharacterHandler SelectRole success player_id={} account_id={} hp={}/{} mp={}/{}",
+                player_id, account_id, hp, max_hp, mp, max_mp);
+  } else {
+    SYSLOG_WARN("CharacterHandler SelectRole failed player_id={} found={} player_id_fits={}",
+                player_id, found, player_id_fits);
+  }
 }
 
 Task<void> CharacterHandler::HandleLogout(HandlerContext ctx) {

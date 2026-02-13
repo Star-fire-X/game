@@ -9,6 +9,25 @@ server:
   max_connections: 5000
   tick_interval_ms: 50
   heartbeat_timeout_ms: 30000
+  hot_event_max_drain_per_tick: 2048
+  hot_event_max_drain_ms_per_tick: 5
+  mailbox_player_max_high_pending: 100
+  mailbox_player_max_low_pending: 64
+  mailbox_high_priority_burst: 4
+  mailbox_overflow_kick_threshold: 3
+  mailbox_global_pending_hard_limit: 20000
+  mailbox_global_pending_soft_limit: -1
+  backpressure_pause_ms: 100
+  backpressure_signal_cooldown_ms: 100
+  mailbox_soft_backpressure_pause_ms: 100
+  mailbox_hard_backpressure_pause_ms: 300
+  mailbox_soft_backpressure_cooldown_ms: 100
+  mailbox_hard_backpressure_cooldown_ms: 25
+  coroutine_hung_threshold_ms: 5000
+  coroutine_hung_scan_interval_ms: 500
+  coroutine_dump_max_entries: 64
+  movement_speed_violation_severity: 10
+  movement_teleport_violation_severity: 5
 
 database:
   host: "127.0.0.1"

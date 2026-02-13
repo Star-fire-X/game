@@ -20,6 +20,13 @@
 #include "client/handlers/movement_handler.h"
 #include "client/handlers/npc_handler.h"
 #include "client/handlers/system_handler.h"
+#include "client/handlers/item_handler.h"
+#include "client/handlers/chat_handler.h"
+#include "client/ui/hud/hud_container.h"
+#include "client/ui/inventory/inventory_panel.h"
+#include "client/ui/equipment/equipment_panel.h"
+#include "client/ui/chat/chat_panel.h"
+#include "client/ui/minimap/minimap_widget.h"
 #include "client/network/network_manager.h"
 #include "client/resource/async_loader.h"
 #include "client/game/movement_controller.h"
@@ -38,6 +45,8 @@
 #include "login_generated.h"
 #include "game_generated.h"
 #include "combat_generated.h"
+#include "item_generated.h"
+#include "chat_generated.h"
 #include "system_generated.h"
 #include <algorithm>
 #include <filesystem>
@@ -312,6 +321,63 @@ bool GameClient::initialize(const ClientConfig& config) {
     gameplay_screen->set_id("gameplay");
     gameplay_screen->set_bounds({0, 0, config_.window_width, config_.window_height});
     gameplay_screen->add_child(std::make_shared<NpcDialogWidget>(npc_dialog_ui_.get()));
+    // Create HUD container
+    hud_container_ = std::make_unique<ui::hud::HudContainer>();
+    hud_container_->set_screen_size(config_.window_width, config_.window_height);
+    gameplay_screen->add_child(std::shared_ptr<ui::hud::HudContainer>(hud_container_.get(), [](ui::hud::HudContainer*){}));
+
+    // Create inventory panel
+    inventory_panel_ = std::make_unique<ui::inventory::InventoryPanel>();
+    inventory_panel_->set_visible(false);
+    inventory_panel_->on_item_use = [this](int slot) {
+        if (!is_connected() || !network_manager_ || slot < 0) return;
+        flatbuffers::FlatBufferBuilder builder;
+        auto req = mir2::proto::CreateUseItemReq(builder, static_cast<uint16_t>(slot), 0);
+        builder.Finish(req);
+        network_manager_->send_message(mir2::common::MsgId::kUseItemReq, build_payload(builder));
+    };
+    inventory_panel_->on_item_drop = [this](int slot) {
+        if (!is_connected() || !network_manager_ || slot < 0) return;
+        flatbuffers::FlatBufferBuilder builder;
+        auto req = mir2::proto::CreateDropItemReq(builder, static_cast<uint16_t>(slot), 0, 1);
+        builder.Finish(req);
+        network_manager_->send_message(mir2::common::MsgId::kDropItemReq, build_payload(builder));
+    };
+    gameplay_screen->add_child(std::shared_ptr<ui::inventory::InventoryPanel>(inventory_panel_.get(), [](ui::inventory::InventoryPanel*){}));
+
+    // Create equipment panel
+    equipment_panel_ = std::make_unique<ui::equipment::EquipmentPanel>();
+    equipment_panel_->set_visible(false);
+    equipment_panel_->on_unequip = [this](uint8_t slot) {
+        if (!is_connected() || !network_manager_) return;
+        flatbuffers::FlatBufferBuilder builder;
+        auto req = mir2::proto::CreateUnequipReq(builder, static_cast<uint16_t>(slot));
+        builder.Finish(req);
+        network_manager_->send_message(mir2::common::MsgId::kUnequipReq, build_payload(builder));
+    };
+    gameplay_screen->add_child(std::shared_ptr<ui::equipment::EquipmentPanel>(equipment_panel_.get(), [](ui::equipment::EquipmentPanel*){}));
+
+    // Create chat panel
+    chat_panel_ = std::make_unique<ui::chat::ChatPanel>();
+    chat_panel_->set_bounds({10, config_.window_height - 210, 400, 200});
+    chat_panel_->set_visible(true);
+    chat_panel_->on_send_message = [this](handlers::ChatChannel channel, const std::string& text) {
+        if (!is_connected() || !network_manager_ || text.empty()) return;
+        flatbuffers::FlatBufferBuilder builder;
+        auto text_offset = builder.CreateString(text);
+        auto req = mir2::proto::CreateChatReq(builder,
+            static_cast<mir2::proto::ChatChannel>(channel), text_offset, 0);
+        builder.Finish(req);
+        network_manager_->send_message(mir2::common::MsgId::kChatReq, build_payload(builder));
+    };
+    gameplay_screen->add_child(std::shared_ptr<ui::chat::ChatPanel>(chat_panel_.get(), [](ui::chat::ChatPanel*){}));
+
+    // Create minimap
+    minimap_widget_ = std::make_unique<ui::minimap::MinimapWidget>();
+    minimap_widget_->set_bounds({config_.window_width - 170, 10, 160, 160});
+    minimap_widget_->set_visible(true);
+    gameplay_screen->add_child(std::shared_ptr<ui::minimap::MinimapWidget>(minimap_widget_.get(), [](ui::minimap::MinimapWidget*){}));
+
     ui_manager_->register_screen("gameplay", gameplay_screen);
     ui_manager_->set_active_screen("gameplay");
 
@@ -365,6 +431,15 @@ bool GameClient::initialize(const ClientConfig& config) {
             if (auto* screen = ui_manager_->get_screen("gameplay")) {
                 screen->set_bounds({0, 0, width, height});
             }
+        }
+        if (hud_container_) {
+            hud_container_->set_screen_size(width, height);
+        }
+        if (chat_panel_) {
+            chat_panel_->set_bounds({10, height - 210, 400, 200});
+        }
+        if (minimap_widget_) {
+            minimap_widget_->set_bounds({width - 170, 10, 160, 160});
         }
     };
     input_callbacks.dispatch_event = [this](const SDL_Event& event) {
@@ -508,6 +583,14 @@ void GameClient::shutdown() {
     skill_executor_.reset();
     skill_manager_.reset();
     skill_handler_.reset();
+    item_handler_.reset();
+    chat_handler_.reset();
+
+    minimap_widget_.reset();
+    chat_panel_.reset();
+    equipment_panel_.reset();
+    inventory_panel_.reset();
+    hud_container_.reset();
     
     effect_player_.reset();
     audio_manager_.reset();
@@ -1039,6 +1122,71 @@ void GameClient::setup_network_handlers() {
     handlers::NpcHandler::Callbacks npc_callbacks;
     npc_callbacks.event_dispatcher = &event_dispatcher_;
     npc_handler_ = std::make_unique<handlers::NpcHandler>(std::move(npc_callbacks));
+
+    // Item handler
+    handlers::ItemHandler::Callbacks item_callbacks;
+    item_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    item_callbacks.on_inventory_update = [this](const std::vector<handlers::ClientInventoryItem>& items) {
+        if (inventory_panel_) {
+            inventory_panel_->update_items(items);
+        }
+    };
+    item_callbacks.on_use_item_response = [](mir2::proto::ErrorCode code, uint16_t, uint32_t, uint32_t) {
+        if (code != mir2::proto::ErrorCode::ERR_OK) {
+            std::cerr << "Use item failed: " << static_cast<uint16_t>(code) << std::endl;
+        }
+    };
+    item_callbacks.on_drop_item_response = [](mir2::proto::ErrorCode code, uint32_t, uint32_t) {
+        if (code != mir2::proto::ErrorCode::ERR_OK) {
+            std::cerr << "Drop item failed: " << static_cast<uint16_t>(code) << std::endl;
+        }
+    };
+    item_callbacks.on_equip_response = [this](mir2::proto::ErrorCode code, uint16_t slot, uint32_t item_id) {
+        if (code == mir2::proto::ErrorCode::ERR_OK && equipment_panel_) {
+            handlers::ClientInventoryItem item;
+            item.slot = slot;
+            item.item_id = item_id;
+            equipment_panel_->update_equipment(static_cast<uint8_t>(slot), item);
+        }
+    };
+    item_callbacks.on_unequip_response = [this](mir2::proto::ErrorCode code, uint16_t slot, uint32_t) {
+        if (code == mir2::proto::ErrorCode::ERR_OK && equipment_panel_) {
+            equipment_panel_->clear_slot(static_cast<uint8_t>(slot));
+        }
+    };
+    item_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Item handler parse error: " << error << std::endl;
+    };
+    item_handler_ = std::make_shared<handlers::ItemHandler>(std::move(item_callbacks));
+    item_handler_->BindHandlers(*network_manager_);
+
+    // Chat handler
+    handlers::ChatHandler::Callbacks chat_callbacks;
+    chat_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    chat_callbacks.on_chat_response = [](mir2::proto::ErrorCode code) {
+        if (code != mir2::proto::ErrorCode::ERR_OK) {
+            std::cerr << "Chat send failed: " << static_cast<uint16_t>(code) << std::endl;
+        }
+    };
+    chat_callbacks.on_chat_message = [this](const handlers::ChatMessageData& msg) {
+        if (chat_panel_) {
+            chat_panel_->add_message(msg);
+        }
+    };
+    chat_callbacks.on_system_message = [this](const std::string& message, int64_t timestamp) {
+        if (chat_panel_) {
+            handlers::ChatMessageData sys_msg;
+            sys_msg.channel = handlers::ChatChannel::kSystem;
+            sys_msg.content = message;
+            sys_msg.timestamp = timestamp;
+            chat_panel_->add_message(sys_msg);
+        }
+    };
+    chat_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Chat handler parse error: " << error << std::endl;
+    };
+    chat_handler_ = std::make_shared<handlers::ChatHandler>(std::move(chat_callbacks));
+    chat_handler_->BindHandlers(*network_manager_);
 
     handlers::HandlerRegistry::RegisterHandlers(*network_manager_);
 
@@ -1773,6 +1921,16 @@ void GameClient::enter_game() {
             if (map_renderer_) {
                 map_renderer_->set_map(map_system_->get_map_data());
             }
+
+            // Set minimap size from loaded map dimensions
+            if (minimap_widget_) {
+                const auto* map_data = map_system_->get_map_data();
+                if (map_data) {
+                    minimap_widget_->set_map_size(
+                        static_cast<float>(map_data->width),
+                        static_cast<float>(map_data->height));
+                }
+            }
         } else {
             std::cerr << "Failed to load map 0" << std::endl;
         }
@@ -1979,6 +2137,19 @@ void GameClient::update_playing(float delta_time) {
     }
 
     update_skill_system(delta_time);
+
+    // Update HUD from player stats
+    if (hud_container_ && player_) {
+        const auto& stats = player_->get_data().stats;
+        hud_container_->update_from_stats(stats, player_->get_name());
+    }
+
+    // Update minimap player position
+    if (minimap_widget_ && player_) {
+        minimap_widget_->set_player_position(
+            static_cast<float>(player_->get_position().x),
+            static_cast<float>(player_->get_position().y));
+    }
 
     if (ui_manager_) {
         ui_manager_->update(delta_time);

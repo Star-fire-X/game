@@ -117,9 +117,38 @@ void DualChannelManager::Stop() {
 }
 
 void DualChannelManager::RegisterHandler(uint16_t msg_id, MessageHandler handler) {
-  MessageHandler handler_copy = handler;
-  tcp_manager_->RegisterHandler(msg_id, std::move(handler));
-  kcp_dispatcher_.RegisterHandler(msg_id, std::move(handler_copy));
+  if (!handler) {
+    return;
+  }
+  RegisterChannelAwareHandler(
+      msg_id,
+      [handler = std::move(handler)](const std::shared_ptr<TcpSession>& session,
+                                     mir2::common::ChannelType,
+                                     const std::vector<uint8_t>& payload) {
+        handler(session, payload);
+      });
+}
+
+void DualChannelManager::RegisterChannelAwareHandler(
+    uint16_t msg_id, ChannelMessageHandler handler) {
+  if (!handler) {
+    return;
+  }
+
+  auto shared_handler =
+      std::make_shared<ChannelMessageHandler>(std::move(handler));
+  tcp_manager_->RegisterHandler(
+      msg_id,
+      [shared_handler](const std::shared_ptr<TcpSession>& session,
+                       const std::vector<uint8_t>& payload) {
+        (*shared_handler)(session, mir2::common::ChannelType::kTcp, payload);
+      });
+  kcp_dispatcher_.RegisterHandler(
+      msg_id,
+      [shared_handler](const std::shared_ptr<TcpSession>& session,
+                       const std::vector<uint8_t>& payload) {
+        (*shared_handler)(session, mir2::common::ChannelType::kKcp, payload);
+      });
 }
 
 void DualChannelManager::SetRoute(uint16_t msg_id, mir2::common::ChannelType channel) {

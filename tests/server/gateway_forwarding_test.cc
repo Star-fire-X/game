@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <asio/io_context.hpp>
+#include <flatbuffers/flatbuffers.h>
 
 #include <array>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +15,7 @@
 #include "common/enums.h"
 #include "common/internal_message_helper.h"
 #include "common/protocol/message_codec.h"
+#include "game_generated.h"
 #include "guild_generated.h"
 #include "network/message_dispatcher.h"
 #include "network/packet_codec.h"
@@ -162,7 +165,11 @@ bool DecodeSinglePacket(const std::vector<uint8_t>& bytes, network::Packet* out_
   if (bytes.empty() || !out_packet) {
     return false;
   }
-  return network::PacketCodec::Decode(bytes.data(), bytes.size(), out_packet) ==
+  if (network::PacketCodec::Decode(bytes.data(), bytes.size(), out_packet) ==
+      network::DecodeStatus::kOk) {
+    return true;
+  }
+  return network::PacketCodec::DecodeV2(bytes.data(), bytes.size(), out_packet) ==
          network::DecodeStatus::kOk;
 }
 
@@ -386,6 +393,150 @@ TEST(GatewayForwardingTest, GetLogicClientReturnsCorrectClient) {
   server.logic_client_ = std::move(logic_client.client);
 
   EXPECT_EQ(server.GetLogicClient(), raw_ptr);
+}
+
+TEST(GatewayForwardingTest, OversizedPayloadKicksAndDoesNotForward) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
+  auto* test_manager_ptr = test_manager.get();
+  auto kcp_server = std::make_unique<NullKcpServer>();
+  server.network_ = std::make_unique<network::DualChannelManager>(
+      io_context, std::move(test_manager), std::move(kcp_server));
+
+  auto logic_client = CreateMockClient(io_context);
+  auto* logic_socket = logic_client.socket;
+  server.logic_client_ = std::move(logic_client.client);
+  server.RegisterHandlers();
+
+  auto bundle = CreateSession(io_context, 8001);
+  test_manager_ptr->AddSession(bundle.session);
+  server.RegisterConnection(8001, bundle.session);
+
+  std::vector<uint8_t> payload(65 * 1024, 0x5A);
+  test_manager_ptr->Dispatch(bundle.session,
+                             static_cast<uint16_t>(common::MsgId::kAttackReq),
+                             payload);
+  DrainIoContext(io_context);
+
+  EXPECT_TRUE(logic_socket->GetWrites().empty());
+  const auto& client_writes = bundle.socket->GetWrites();
+  ASSERT_FALSE(client_writes.empty());
+
+  network::Packet packet{};
+  ASSERT_TRUE(DecodeSinglePacket(client_writes.front(), &packet));
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::MsgId::kKick));
+}
+
+TEST(GatewayForwardingTest, KcpMessagesDropDuringHoldingInsteadOfBuffering) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto bundle = CreateSession(io_context, 8101);
+  server.RegisterConnection(8101, bundle.session);
+
+  const std::vector<uint8_t> payload{1, 2, 3, 4};
+  server.HandleForwardMessage(bundle.session,
+                              static_cast<uint16_t>(common::MsgId::kAttackReq),
+                              common::ChannelType::kKcp,
+                              payload);
+
+  std::shared_lock<std::shared_mutex> lock(server.session_map_mutex_);
+  ASSERT_EQ(server.holder_state_, ConnectionHolder::State::HOLDING);
+  auto holder_it = server.connection_holders_.find(8101);
+  ASSERT_NE(holder_it, server.connection_holders_.end());
+  ASSERT_NE(holder_it->second, nullptr);
+  EXPECT_FALSE(holder_it->second->HasBufferedMessages());
+}
+
+TEST(GatewayForwardingTest, DisconnectNotificationQueuedAndReplayedAfterReconnect) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto logic_client = CreateMockClient(io_context);
+  auto* logic_socket = logic_client.socket;
+  server.logic_client_ = std::move(logic_client.client);
+  server.logic_client_->connected_.store(false);
+
+  auto bundle = CreateSession(io_context, 8201);
+  server.RegisterConnection(8201, bundle.session);
+  server.UnregisterSession(bundle.session);
+
+  EXPECT_EQ(logic_socket->GetWrites().size(), 0u);
+  EXPECT_EQ(server.pending_disconnect_events_.size(), 1u);
+
+  server.logic_client_->connected_.store(true);
+  server.ProcessDisconnectRetryQueue(network::TcpSession::NowMs());
+  DrainIoContext(io_context);
+
+  EXPECT_TRUE(server.pending_disconnect_events_.empty());
+  ASSERT_EQ(logic_socket->GetWrites().size(), 1u);
+
+  network::Packet packet{};
+  ASSERT_TRUE(DecodeSinglePacket(logic_socket->GetWrites().front(), &packet));
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage));
+
+  common::RoutedMessageData routed;
+  ASSERT_TRUE(common::ParseRoutedMessage(packet.payload, &routed));
+  EXPECT_EQ(routed.client_id, 8201u);
+  EXPECT_EQ(routed.msg_id, static_cast<uint16_t>(common::MsgId::kLogout));
+  EXPECT_TRUE(routed.payload.empty());
+}
+
+TEST(GatewayForwardingTest, EnterGameResponseUpdatesContextOnlyOnSuccess) {
+  asio::io_context io_context;
+  GatewayServer server;
+
+  auto test_manager = std::make_unique<TestNetworkManager>(io_context);
+  auto* test_manager_ptr = test_manager.get();
+  auto kcp_server = std::make_unique<NullKcpServer>();
+  server.network_ = std::make_unique<network::DualChannelManager>(
+      io_context, std::move(test_manager), std::move(kcp_server));
+
+  auto bundle = CreateSession(io_context, 8301);
+  test_manager_ptr->AddSession(bundle.session);
+  server.RegisterConnection(8301, bundle.session);
+
+  flatbuffers::FlatBufferBuilder fail_builder;
+  auto fail_player_name = fail_builder.CreateString("ignored_player");
+  auto fail_player = mir2::proto::CreatePlayerInfo(
+      fail_builder, 9876, fail_player_name, mir2::proto::Profession::WARRIOR,
+      1, 100, 100, 50, 50, 1, 10, 10, 0);
+  auto fail_rsp = mir2::proto::CreateEnterGameRsp(
+      fail_builder, mir2::proto::ErrorCode::ERR_ACCOUNT_NOT_FOUND, fail_player);
+  fail_builder.Finish(fail_rsp);
+  const uint8_t* fail_data = fail_builder.GetBufferPointer();
+  std::vector<uint8_t> fail_payload(fail_data, fail_data + fail_builder.GetSize());
+
+  network::Packet fail_packet{};
+  fail_packet.msg_id = static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage);
+  fail_packet.payload = common::BuildRoutedMessage(
+      8301,
+      static_cast<uint16_t>(common::MsgId::kEnterGameRsp),
+      fail_payload);
+  server.OnLogicPacket(fail_packet);
+  EXPECT_EQ(bundle.session->GetUserId(), 0u);
+
+  flatbuffers::FlatBufferBuilder ok_builder;
+  auto ok_player_name = ok_builder.CreateString("ok_player");
+  auto ok_player = mir2::proto::CreatePlayerInfo(
+      ok_builder, 12345, ok_player_name, mir2::proto::Profession::WARRIOR,
+      1, 100, 100, 50, 50, 1, 11, 12, 0);
+  auto ok_rsp = mir2::proto::CreateEnterGameRsp(
+      ok_builder, mir2::proto::ErrorCode::ERR_OK, ok_player);
+  ok_builder.Finish(ok_rsp);
+  const uint8_t* ok_data = ok_builder.GetBufferPointer();
+  std::vector<uint8_t> ok_payload(ok_data, ok_data + ok_builder.GetSize());
+
+  network::Packet ok_packet{};
+  ok_packet.msg_id = static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage);
+  ok_packet.payload = common::BuildRoutedMessage(
+      8301,
+      static_cast<uint16_t>(common::MsgId::kEnterGameRsp),
+      ok_payload);
+  server.OnLogicPacket(ok_packet);
+  EXPECT_EQ(bundle.session->GetUserId(), 12345u);
 }
 
 }  // namespace mir2::gateway

@@ -50,6 +50,21 @@ std::vector<uint8_t> SerializeCharacterSnapshot(const common::CharacterData& dat
   snapshot.add_skills_data(skills_vec);
   snapshot.add_created_at(data.created_at);
   snapshot.add_last_login(data.last_login);
+  // Growth system fields
+  snapshot.add_body_luck(data.stats.body_luck);
+  snapshot.add_bonus_remaining(data.stats.bonus_remaining);
+  snapshot.add_bonus_dc(data.stats.bonus_dc);
+  snapshot.add_bonus_mc(data.stats.bonus_mc);
+  snapshot.add_bonus_sc(data.stats.bonus_sc);
+  snapshot.add_bonus_ac(data.stats.bonus_ac);
+  snapshot.add_bonus_mac(data.stats.bonus_mac);
+  snapshot.add_bonus_hp(data.stats.bonus_hp);
+  snapshot.add_bonus_mp(data.stats.bonus_mp);
+  snapshot.add_bonus_hit(data.stats.bonus_hit);
+  snapshot.add_bonus_speed(data.stats.bonus_speed);
+  snapshot.add_max_weight(data.stats.max_weight);
+  snapshot.add_max_wear_weight(data.stats.max_wear_weight);
+  snapshot.add_max_hand_weight(data.stats.max_hand_weight);
 
   auto offset = snapshot.Finish();
   builder.Finish(offset);
@@ -94,6 +109,21 @@ std::optional<common::CharacterData> DeserializeCharacterSnapshot(
   data.stats.speed = snapshot->speed();
   data.stats.experience = snapshot->experience();
   data.stats.gold = snapshot->gold();
+  // Growth system fields (backward compatible — defaults to 0 for old data)
+  data.stats.body_luck = snapshot->body_luck();
+  data.stats.bonus_remaining = snapshot->bonus_remaining();
+  data.stats.bonus_dc = snapshot->bonus_dc();
+  data.stats.bonus_mc = snapshot->bonus_mc();
+  data.stats.bonus_sc = snapshot->bonus_sc();
+  data.stats.bonus_ac = snapshot->bonus_ac();
+  data.stats.bonus_mac = snapshot->bonus_mac();
+  data.stats.bonus_hp = snapshot->bonus_hp();
+  data.stats.bonus_mp = snapshot->bonus_mp();
+  data.stats.bonus_hit = snapshot->bonus_hit();
+  data.stats.bonus_speed = snapshot->bonus_speed();
+  data.stats.max_weight = snapshot->max_weight();
+  data.stats.max_wear_weight = snapshot->max_wear_weight();
+  data.stats.max_hand_weight = snapshot->max_hand_weight();
 
   data.map_id = snapshot->map_id();
   data.position.x = snapshot->pos_x();

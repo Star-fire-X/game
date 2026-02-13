@@ -35,6 +35,32 @@ bool IsTruthy(std::string_view value) {
          value == "on" || value == "ON";
 }
 
+HotEventPriority ClassifyMsgPriority(common::MsgId id) {
+  switch (id) {
+    case common::MsgId::kLoginReq:
+    case common::MsgId::kLogout:
+    case common::MsgId::kCreateRoleReq:
+    case common::MsgId::kSelectRoleReq:
+    case common::MsgId::kRoleListReq:
+    case common::MsgId::kMoveReq:
+    case common::MsgId::kAttackReq:
+    case common::MsgId::kSkillReq:
+    case common::MsgId::kUseItemReq:
+    case common::MsgId::kDropItemReq:
+    case common::MsgId::kPickupItemReq:
+    case common::MsgId::kEquipReq:
+    case common::MsgId::kUnequipReq:
+    case common::MsgId::kNpcInteractReq:
+    case common::MsgId::kNpcMenuSelect:
+      return HotEventPriority::kCritical;
+    case common::MsgId::kHeartbeat:
+    case common::MsgId::kChatReq:
+      return HotEventPriority::kBestEffort;
+    default:
+      return HotEventPriority::kNormal;
+  }
+}
+
 uint64_t NowMicroseconds() {
   const auto now = std::chrono::steady_clock::now().time_since_epoch();
   return static_cast<uint64_t>(
@@ -153,6 +179,7 @@ HotEventPipeline::BuildResult HotEventPipeline::TryBuildHotEvent(
   out_event->var_ref = VarRef{};
 
   const auto id = static_cast<common::MsgId>(msg_id);
+  SetHotEventPriority(out_event, ClassifyMsgPriority(id));
   switch (id) {
     case common::MsgId::kMoveReq: {
       common::MoveRequest request;

@@ -265,7 +265,7 @@ mir2::common::ErrorCode SkillSystem::learn_skill(entt::entity entity, uint32_t s
         return mir2::common::ErrorCode::INVALID_ACTION;
     }
 
-    if (identity->char_class != skill->required_class) {
+    if (!skill->is_universal && identity->char_class != skill->required_class) {
         return mir2::common::ErrorCode::CLASS_REQUIREMENT_NOT_MET;
     }
     if (attributes->level < skill->required_level) {
@@ -307,7 +307,7 @@ bool SkillSystem::can_learn_skill(entt::entity entity, uint32_t skill_id) const 
         return false;
     }
 
-    if (identity->char_class != skill->required_class) {
+    if (!skill->is_universal && identity->char_class != skill->required_class) {
         return false;
     }
     if (attributes->level < skill->required_level) {
@@ -484,6 +484,12 @@ SkillCastResult SkillSystem::cast_skill(entt::entity caster,
         event.result = result;
         event_bus_->Publish(event);
     }
+
+    // 施法成功后累加训练点（非延迟施法时）
+    if (result.success) {
+        add_training_points(caster, skill_id, 1);
+    }
+
     return result;
 }
 

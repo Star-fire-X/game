@@ -7,6 +7,7 @@ if(TARGET mir2_server_lib)
 
     # Character Handler
     character/character_handler.cc
+    character/bonus_point_handler.cc
 
     # Chat Handler
     chat/chat_handler.cc

@@ -12,6 +12,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,12 +25,14 @@
 #include "common/internal_message_helper.h"
 #include "common/protocol/packet_codec.h"
 #include "chat_generated.h"
+#include "system_generated.h"
 #include "ecs/registry_manager.h"
 #include "logic/coroutine_executor.h"
 #include "logic/events/hot_event.h"
 #include "logic/events/hot_event_pipeline.h"
 #include "logic/handler_registry.h"
 #include "logic/handlers/skill_handler.h"
+#include "logic/prewarm_manager.h"
 #include "logic/mock_response_sender.h"
 #include "mocks/mock_socket.h"
 #include "network/tcp_connection.h"
@@ -144,6 +147,26 @@ class PlayerMailboxCausalTest : public ::testing::Test {
   }
 
   void TearDown() override {
+    if (server_) {
+      std::shared_ptr<network::TcpSession> gateway_session;
+      {
+        std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+        gateway_session = server_->gateway_session_;
+        server_->gateway_session_.reset();
+      }
+
+      if (gateway_session) {
+        auto done = std::make_shared<std::promise<void>>();
+        auto done_future = done->get_future();
+        asio::post(io_context_, [this, session = std::move(gateway_session), done]() mutable {
+          session->Close();
+          // Drain one more executor turn to ensure close-triggered callbacks run.
+          asio::post(io_context_, [done]() mutable { done->set_value(); });
+        });
+        done_future.wait();
+      }
+    }
+
     if (work_guard_) {
       work_guard_->reset();
       work_guard_.reset();
@@ -226,6 +249,14 @@ class PlayerMailboxCausalTest : public ::testing::Test {
   std::unique_ptr<MockResponseSender> response_sender_;
   std::unique_ptr<LogicServer> server_;
 };
+
+Task<void> HoldExecutorSlot(mir2::logic::CoroutineExecutor* executor,
+                            std::shared_future<void> release_signal) {
+  co_await executor->Async([release_signal]() mutable {
+    release_signal.wait();
+  });
+  co_return;
+}
 
 // 同一玩家的 Equip 与 Skill 事件必须串行执行，Skill 不得早于 Equip 完成。
 TEST_F(PlayerMailboxCausalTest, EquipThenSkillIsStrictlySequential) {
@@ -540,6 +571,159 @@ TEST_F(PlayerMailboxCausalTest, ResponseSenderPrefersGatewaySessionWhenAvailable
   EXPECT_EQ(routed.client_id, client_id);
   EXPECT_EQ(routed.msg_id, msg_id);
   EXPECT_EQ(routed.payload, payload);
+}
+
+TEST_F(PlayerMailboxCausalTest, MailboxSpawnRejectCleansStateAndLaterEventsStillRun) {
+  ASSERT_NE(server_, nullptr);
+
+  server_->executor_ = std::make_unique<CoroutineExecutor>(io_context_, 1, 1);
+  server_->handler_registry_ = std::make_unique<HandlerRegistry>(*server_->executor_);
+
+  std::atomic<int> handled{0};
+  server_->handler_registry_->RegisterHandler(
+      static_cast<uint16_t>(mir2::common::MsgId::kEquipReq),
+      [&handled](HandlerContext, const uint8_t*, size_t) -> Task<void> {
+        handled.fetch_add(1, std::memory_order_relaxed);
+        co_return;
+      });
+
+  const uint64_t client_id = 45001;
+  server_->client_registry_.Track(client_id);
+
+  std::promise<void> hold_promise;
+  auto hold_signal = hold_promise.get_future().share();
+  ASSERT_TRUE(server_->executor_->Spawn(HoldExecutorSlot(server_->executor_.get(), hold_signal)));
+
+  events::HotEvent first_event{};
+  first_event.client_id = client_id;
+  first_event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  first_event.type = events::HotEventType::kGeneric;
+  DispatchHotEventOnIo(first_event);
+
+  auto mailbox_state_promise = std::make_shared<std::promise<bool>>();
+  auto mailbox_state_future = mailbox_state_promise->get_future();
+  asio::post(io_context_, [this, mailbox_state_promise, client_id]() mutable {
+    mailbox_state_promise->set_value(
+        server_->player_mailboxes_.find(client_id) != server_->player_mailboxes_.end());
+  });
+  EXPECT_FALSE(mailbox_state_future.get());
+  EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
+
+  hold_promise.set_value();
+  const auto drain_deadline = std::chrono::steady_clock::now() + 2s;
+  while (std::chrono::steady_clock::now() < drain_deadline &&
+         server_->executor_->RunningCount() != 0) {
+    std::this_thread::sleep_for(5ms);
+  }
+  ASSERT_EQ(server_->executor_->RunningCount(), 0);
+
+  events::HotEvent second_event{};
+  second_event.client_id = client_id;
+  second_event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  second_event.type = events::HotEventType::kGeneric;
+  DispatchHotEventOnIo(second_event);
+
+  EXPECT_TRUE(WaitForCount(handled, 1));
+}
+
+TEST_F(PlayerMailboxCausalTest, GlobalMailboxHardLimitDropsEventAndSignalsBackpressure) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->handler_registry_, nullptr);
+
+  std::atomic<int> handled{0};
+  server_->handler_registry_->RegisterHandler(
+      static_cast<uint16_t>(mir2::common::MsgId::kEquipReq),
+      [&handled](HandlerContext, const uint8_t*, size_t) -> Task<void> {
+        handled.fetch_add(1, std::memory_order_relaxed);
+        co_return;
+      });
+
+  const auto gateway = MakeActiveTcpSession(io_context_, 65002);
+  ASSERT_NE(gateway.socket, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+    server_->gateway_session_ = gateway.session;
+  }
+
+  const uint64_t client_id = 45002;
+  server_->client_registry_.Track(client_id);
+  server_->mailbox_pending_events_total_ = std::numeric_limits<size_t>::max() / 2;
+
+  events::HotEvent event{};
+  event.client_id = client_id;
+  event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  event.type = events::HotEventType::kGeneric;
+  DispatchHotEventOnIo(event);
+
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
+
+  ASSERT_TRUE(WaitForSocketWrites(gateway.socket, 1));
+  ASSERT_FALSE(gateway.socket->GetWrites().empty());
+
+  common::NetworkPacket packet;
+  const auto& wire = gateway.socket->GetWrites().back();
+  ASSERT_EQ(common::DecodePacket(wire.data(), wire.size(), &packet), common::DecodeStatus::kOk);
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kBackpressureControl));
+}
+
+TEST_F(PlayerMailboxCausalTest, PrewarmSpawnRejectStillSendsLogicReady) {
+  ASSERT_NE(server_, nullptr);
+
+  server_->executor_ = std::make_unique<CoroutineExecutor>(io_context_, 1, 1);
+  server_->prewarm_manager_ = std::make_unique<PrewarmManager>(*server_->executor_);
+  server_->prewarm_manager_->SetLoader(
+      [](const PrewarmEntry&) { return true; });
+
+  std::promise<void> hold_promise;
+  auto hold_signal = hold_promise.get_future().share();
+  ASSERT_TRUE(server_->executor_->Spawn(HoldExecutorSlot(server_->executor_.get(), hold_signal)));
+
+  const auto gateway = MakeActiveTcpSession(io_context_, 65001);
+  ASSERT_NE(gateway.socket, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+    server_->gateway_session_ = gateway.session;
+  }
+
+  constexpr uint32_t kRequestId = 77;
+  server_->last_context_request_id_.store(kRequestId);
+
+  flatbuffers::FlatBufferBuilder builder;
+  const auto ip = builder.CreateString("127.0.0.1");
+  const auto context =
+      mir2::proto::CreateConnectionContext(builder, 50001, 60001, 70001, ip, 1000, 1000);
+  std::vector<flatbuffers::Offset<mir2::proto::ConnectionContext>> contexts;
+  contexts.push_back(context);
+  const auto response = mir2::proto::CreateContextRestoreResponse(
+      builder, kRequestId, builder.CreateVector(contexts), 1);
+  builder.Finish(response);
+  const uint8_t* data = builder.GetBufferPointer();
+  std::vector<uint8_t> payload(data, data + builder.GetSize());
+
+  auto done = std::make_shared<std::promise<void>>();
+  auto done_future = done->get_future();
+  asio::post(io_context_, [this, session = gateway.session, payload, done]() mutable {
+    server_->HandleContextRestoreResponse(session, payload);
+    done->set_value();
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+
+  ASSERT_TRUE(WaitForSocketWrites(gateway.socket, 1));
+  ASSERT_FALSE(gateway.socket->GetWrites().empty());
+
+  common::NetworkPacket packet;
+  const auto& wire = gateway.socket->GetWrites().front();
+  ASSERT_EQ(common::DecodePacket(wire.data(), wire.size(), &packet), common::DecodeStatus::kOk);
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kLogicReady));
+
+  hold_promise.set_value();
+  const auto drain_deadline = std::chrono::steady_clock::now() + 2s;
+  while (std::chrono::steady_clock::now() < drain_deadline &&
+         server_->executor_->RunningCount() != 0) {
+    std::this_thread::sleep_for(5ms);
+  }
+  EXPECT_EQ(server_->executor_->RunningCount(), 0);
 }
 
 }  // namespace

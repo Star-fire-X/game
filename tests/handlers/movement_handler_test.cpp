@@ -18,6 +18,7 @@
 #include "logic/response_sender.h"
 #include "network/network_manager.h"
 #include "security/anti_cheat.h"
+#include "game_generated.h"
 
 namespace {
 
@@ -112,8 +113,7 @@ TEST(MovementHandlerTest, ValidMoveBroadcastsAndResponds) {
   scene_manager.GetOrCreateMap(BuildMapConfig(1, 50, 50));
 
   TestDispatcher dispatcher;
-  mir2::logic::MovementHandler handler(dispatcher.executor,
-                                       dispatcher.sender,
+  mir2::logic::MovementHandler handler(dispatcher.sender,
                                        registry,
                                        character_manager,
                                        scene_manager,
@@ -122,6 +122,11 @@ TEST(MovementHandlerTest, ValidMoveBroadcastsAndResponds) {
   const entt::entity entity =
       EnsureEntity(character_manager, ecs_registry, 1, 1, 1, 1, 6);
   ASSERT_TRUE(entity != entt::null);
+  const entt::entity watcher =
+      EnsureEntity(character_manager, ecs_registry, 2, 4, 4, 1, 6);
+  ASSERT_TRUE(watcher != entt::null);
+  ASSERT_TRUE(scene_manager.AddEntityToMap(1, entity, 1, 1));
+  ASSERT_TRUE(scene_manager.AddEntityToMap(1, watcher, 4, 4));
 
   mir2::logic::HandlerContext context;
   context.client_id = 1;
@@ -133,12 +138,13 @@ TEST(MovementHandlerTest, ValidMoveBroadcastsAndResponds) {
       context, payload.data(), payload.size()));
   dispatcher.Run();
 
-  ASSERT_EQ(dispatcher.messages.size(), 3u);
+  ASSERT_EQ(dispatcher.messages.size(), 2u);
   EXPECT_EQ(dispatcher.messages[0].msg_id,
             static_cast<uint16_t>(mir2::common::MsgId::kMoveRsp));
   EXPECT_EQ(CountByMsgId(dispatcher.messages,
                          static_cast<uint16_t>(mir2::common::MsgId::kEntityMove)),
-            2u);
+            1u);
+  EXPECT_EQ(dispatcher.messages[1].client_id, 2u);
 
   mir2::common::MoveResponse response;
   const auto status = mir2::common::DecodeMoveResponse(
@@ -148,6 +154,13 @@ TEST(MovementHandlerTest, ValidMoveBroadcastsAndResponds) {
             static_cast<uint16_t>(mir2::common::ErrorCode::kOk));
   EXPECT_EQ(response.x, 5);
   EXPECT_EQ(response.y, 6);
+
+  const auto* move = flatbuffers::GetRoot<mir2::proto::EntityMove>(
+      dispatcher.messages[1].payload.data());
+  ASSERT_NE(move, nullptr);
+  EXPECT_EQ(move->entity_id(), 1u);
+  EXPECT_EQ(move->direction(),
+            static_cast<uint8_t>(mir2::common::Direction::DOWN_RIGHT));
 }
 
 TEST(MovementHandlerTest, TargetOutOfRangeReturnsErrorAndKeepsState) {
@@ -161,8 +174,7 @@ TEST(MovementHandlerTest, TargetOutOfRangeReturnsErrorAndKeepsState) {
   config.max_steps = 1;
 
   TestDispatcher dispatcher;
-  mir2::logic::MovementHandler handler(dispatcher.executor,
-                                       dispatcher.sender,
+  mir2::logic::MovementHandler handler(dispatcher.sender,
                                        registry,
                                        character_manager,
                                        scene_manager,
@@ -213,8 +225,7 @@ TEST(MovementHandlerTest, InvalidPathRecordsAntiCheatViolation) {
   config.max_steps = 1;
 
   TestDispatcher dispatcher;
-  mir2::logic::MovementHandler handler(dispatcher.executor,
-                                       dispatcher.sender,
+  mir2::logic::MovementHandler handler(dispatcher.sender,
                                        registry,
                                        character_manager,
                                        scene_manager,
@@ -250,8 +261,7 @@ TEST(MovementHandlerTest, ConcurrentMovesUpdateState) {
   scene_manager.GetOrCreateMap(BuildMapConfig(1, 30, 30));
 
   TestDispatcher dispatcher;
-  mir2::logic::MovementHandler handler(dispatcher.executor,
-                                       dispatcher.sender,
+  mir2::logic::MovementHandler handler(dispatcher.sender,
                                        registry,
                                        character_manager,
                                        scene_manager,
@@ -311,8 +321,7 @@ TEST(MovementHandlerTest, InvalidPayloadReturnsError) {
   scene_manager.GetOrCreateMap(BuildMapConfig(1, 10, 10));
 
   TestDispatcher dispatcher;
-  mir2::logic::MovementHandler handler(dispatcher.executor,
-                                       dispatcher.sender,
+  mir2::logic::MovementHandler handler(dispatcher.sender,
                                        registry,
                                        character_manager,
                                        scene_manager,
@@ -332,5 +341,5 @@ TEST(MovementHandlerTest, InvalidPayloadReturnsError) {
       mir2::common::kMoveResponseMsgId, dispatcher.messages[0].payload, &response);
   ASSERT_EQ(status, mir2::common::MessageCodecStatus::kOk);
   EXPECT_EQ(static_cast<uint16_t>(response.code),
-            static_cast<uint16_t>(mir2::common::ErrorCode::kInvalidAction));
+            static_cast<uint16_t>(mir2::common::ErrorCode::kDecodeInvalidPayload));
 }

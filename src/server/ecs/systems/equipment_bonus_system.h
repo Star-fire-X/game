@@ -19,6 +19,8 @@ struct EquipmentBonus {
     int dodge_bonus = 0;
     int speed_bonus = 0;
     int luck_bonus = 0;
+    int total_weight = 0;       ///< 装备总重量
+    int hand_weight = 0;        ///< 手持物品重量（武器）
 
     // 特殊效果
     int lifesteal_percent = 0;    // 吸血百分比

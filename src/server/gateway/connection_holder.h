@@ -63,7 +63,6 @@ class ConnectionHolder {
  private:
   void ResetHoldingState();
   bool ShouldDropRealtime(uint16_t msg_id, mir2::common::ChannelType channel) const;
-  void UpdateBufferGauge();
 
   State state_ = State::FORWARDING;
   RingBuffer buffer_;

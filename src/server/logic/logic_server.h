@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -60,6 +61,8 @@ namespace events {
 class HotEventPipeline;
 struct HotEvent;
 }  // namespace events
+
+enum class SpawnResult : uint8_t;
 
 class CoroutineExecutor;
 class PrewarmManager;
@@ -121,6 +124,8 @@ class LogicServer {
   void StartTick();
   void ScheduleNextTick();
   void OnTick(const asio::error_code& ec);
+  void MaybeScanHungCoroutines(std::chrono::steady_clock::time_point now);
+  void DumpActiveCoroutines(const char* reason) const;
   void RegisterSignalHandlers();
   void OnSignal(const asio::error_code& ec, int signal);
   void RequestStop();
@@ -139,6 +144,15 @@ class LogicServer {
                                    const std::vector<uint8_t>& payload);
   Task<void> RunPlayerMailbox(uint64_t client_id);
   Task<void> ExecuteQueuedEvent(const events::HotEvent& event);
+  void HandleMailboxSpawnRejected(uint64_t client_id, SpawnResult reason);
+  void PublishMailboxQueueMetrics() const;
+  bool TryReserveBackpressureSignal(uint64_t client_id,
+                                    int64_t now_ms,
+                                    int64_t cooldown_ms);
+  void PruneBackpressureStateLocked(int64_t now_ms);
+  bool MaybeSendBackpressurePause(uint64_t client_id,
+                                  uint32_t duration_ms,
+                                  int64_t cooldown_ms);
   void KickMailboxOverflow(uint64_t client_id);
   void HandleServiceHello(const std::shared_ptr<network::TcpSession>& session,
                           const std::vector<uint8_t>& payload);
@@ -199,13 +213,38 @@ class LogicServer {
   std::atomic<uint32_t> last_context_request_id_{0};
   std::atomic<bool> prewarm_running_{false};
   struct PlayerMailbox {
-    std::deque<events::HotEvent> pending_events;
+    std::deque<events::HotEvent> high_priority_events;
+    std::deque<events::HotEvent> low_priority_events;
+    uint8_t high_priority_budget = 0;
+    uint8_t consecutive_overflow_count = 0;
     bool executing = false;
   };
   // Accessed only on the logic io_context thread.
   std::unordered_map<uint64_t, PlayerMailbox> player_mailboxes_;
+  size_t mailbox_pending_events_total_ = 0;
+  size_t mailbox_active_runners_ = 0;
   std::mutex backpressure_mutex_;
   std::unordered_map<uint64_t, int64_t> backpressure_until_ms_;
+  std::chrono::milliseconds tick_interval_{50};
+  std::chrono::milliseconds coroutine_hung_threshold_{5000};
+  std::chrono::milliseconds coroutine_hung_scan_interval_{500};
+  size_t coroutine_dump_max_entries_ = 64;
+  std::chrono::steady_clock::time_point next_coroutine_scan_time_{};
+  size_t hot_event_max_drain_per_tick_ = 2048;
+  std::chrono::milliseconds hot_event_max_drain_duration_per_tick_{5};
+  uint32_t backpressure_pause_ms_ = 100;
+  int64_t backpressure_signal_cooldown_ms_ = 100;
+  uint32_t mailbox_soft_backpressure_pause_ms_ = 100;
+  uint32_t mailbox_hard_backpressure_pause_ms_ = 300;
+  int64_t mailbox_soft_backpressure_cooldown_ms_ = 100;
+  int64_t mailbox_hard_backpressure_cooldown_ms_ = 25;
+  size_t player_mailbox_max_high_pending_ = 100;
+  size_t player_mailbox_max_low_pending_ = 64;
+  size_t player_mailbox_max_pending_total_ = 164;
+  uint8_t mailbox_high_priority_burst_ = 4;
+  uint8_t mailbox_overflow_kick_threshold_ = 3;
+  size_t mailbox_global_pending_hard_limit_ = 20000;
+  size_t mailbox_global_pending_soft_limit_ = 15000;
   mutable std::mutex gateway_mutex_;
   std::shared_ptr<network::TcpSession> gateway_session_;
 };

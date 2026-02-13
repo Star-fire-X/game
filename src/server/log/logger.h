@@ -7,6 +7,7 @@
 #define MIR2_LOG_LOGGER_H_
 
 #include <mutex>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -71,14 +72,59 @@ class Logger : public core::Singleton<Logger> {
   std::unordered_map<LogCategory, std::shared_ptr<spdlog::logger>> loggers_;
 };
 
+struct TraceLogContext {
+  uint64_t trace_id = 0;
+  uint64_t coroutine_id = 0;
+};
+
+TraceLogContext GetCurrentTraceLogContext() noexcept;
+void SetCurrentTraceLogContext(uint64_t trace_id, uint64_t coroutine_id) noexcept;
+
+class ScopedTraceLogContext {
+ public:
+  ScopedTraceLogContext(uint64_t trace_id, uint64_t coroutine_id) noexcept
+      : previous_(GetCurrentTraceLogContext()) {
+    SetCurrentTraceLogContext(trace_id, coroutine_id);
+  }
+
+  ~ScopedTraceLogContext() { SetCurrentTraceLogContext(previous_.trace_id, previous_.coroutine_id); }
+
+ private:
+  TraceLogContext previous_{};
+};
+
+inline uint64_t CurrentTraceId() noexcept {
+  return GetCurrentTraceLogContext().trace_id;
+}
+
+inline uint64_t CurrentCoroutineId() noexcept {
+  return GetCurrentTraceLogContext().coroutine_id;
+}
+
 #define LOG_INFO(cat, fmt, ...) \
-  mir2::log::Logger::Instance().GetLogger(cat)->info(fmt, ##__VA_ARGS__)
+  mir2::log::Logger::Instance().GetLogger(cat)->info( \
+      "[trace_id={} coroutine_id={}] " fmt, \
+      mir2::log::CurrentTraceId(), \
+      mir2::log::CurrentCoroutineId(), \
+      ##__VA_ARGS__)
 #define LOG_DEBUG(cat, fmt, ...) \
-  mir2::log::Logger::Instance().GetLogger(cat)->debug(fmt, ##__VA_ARGS__)
+  mir2::log::Logger::Instance().GetLogger(cat)->debug( \
+      "[trace_id={} coroutine_id={}] " fmt, \
+      mir2::log::CurrentTraceId(), \
+      mir2::log::CurrentCoroutineId(), \
+      ##__VA_ARGS__)
 #define LOG_WARN(cat, fmt, ...) \
-  mir2::log::Logger::Instance().GetLogger(cat)->warn(fmt, ##__VA_ARGS__)
+  mir2::log::Logger::Instance().GetLogger(cat)->warn( \
+      "[trace_id={} coroutine_id={}] " fmt, \
+      mir2::log::CurrentTraceId(), \
+      mir2::log::CurrentCoroutineId(), \
+      ##__VA_ARGS__)
 #define LOG_ERROR(cat, fmt, ...) \
-  mir2::log::Logger::Instance().GetLogger(cat)->error(fmt, ##__VA_ARGS__)
+  mir2::log::Logger::Instance().GetLogger(cat)->error( \
+      "[trace_id={} coroutine_id={}] " fmt, \
+      mir2::log::CurrentTraceId(), \
+      mir2::log::CurrentCoroutineId(), \
+      ##__VA_ARGS__)
 
 #define SYSLOG_INFO(fmt, ...) LOG_INFO(mir2::log::LogCategory::kSystem, fmt, ##__VA_ARGS__)
 #define SYSLOG_DEBUG(fmt, ...) LOG_DEBUG(mir2::log::LogCategory::kSystem, fmt, ##__VA_ARGS__)

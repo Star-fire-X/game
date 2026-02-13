@@ -1,0 +1,109 @@
+name: Sanitizer Gate
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+  workflow_dispatch:
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+jobs:
+  coroutine-sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate legacy source gating
+        shell: bash
+        run: scripts/check_build_sources.sh
+
+      - name: Enforce migration guardrails
+        shell: bash
+        run: |
+          scripts/check_no_legacy_refs.sh
+          scripts/check_no_old_handlers_refs.sh
+          scripts/check_no_empty_dirs.sh
+          scripts/check_link_targets.sh
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: |
+          if [[ ! -d "${VCPKG_ROOT}" ]]; then
+            git clone https://github.com/microsoft/vcpkg "${VCPKG_ROOT}"
+          fi
+          if [[ ! -x "${VCPKG_ROOT}/vcpkg" ]]; then
+            "${VCPKG_ROOT}/bootstrap-vcpkg.sh"
+          fi
+
+      - name: Configure sanitizer build
+        shell: bash
+        run: |
+          BUILD_DIR="build-sanitize-${{ matrix.sanitizer }}"
+          if [[ "${{ matrix.sanitizer }}" == "asan" ]]; then
+            SAN_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address"
+            LINK_FLAGS="-fsanitize=address"
+          else
+            SAN_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread"
+            LINK_FLAGS="-fsanitize=thread"
+          fi
+
+          cmake -S . -B "${BUILD_DIR}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DVCPKG_MANIFEST_MODE=ON \
+            -DVCPKG_FEATURE_FLAGS=manifests \
+            -DCMAKE_C_FLAGS_DEBUG="${SAN_FLAGS}" \
+            -DCMAKE_CXX_FLAGS_DEBUG="${SAN_FLAGS}" \
+            -DCMAKE_EXE_LINKER_FLAGS_DEBUG="${LINK_FLAGS}" \
+            -DCMAKE_SHARED_LINKER_FLAGS_DEBUG="${LINK_FLAGS}" \
+            -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
+
+      - name: Build legend2_tests (sanitizer)
+        shell: bash
+        run: |
+          cmake --build "build-sanitize-${{ matrix.sanitizer }}" \
+            --target legend2_tests \
+            -j"$(nproc)"
+
+      - name: Run sanitizer gate tests
+        shell: bash
+        run: |
+          BUILD_DIR="build-sanitize-${{ matrix.sanitizer }}"
+          TEST_BIN="${BUILD_DIR}/bin/legend2_tests"
+
+          if [[ "${{ matrix.sanitizer }}" == "asan" ]]; then
+            ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=1:symbolize=1" \
+            LSAN_OPTIONS="report_objects=1" \
+            bash scripts/run-coroutine-sanitizer-gate.sh "${BUILD_DIR}" "${TEST_BIN}" 20
+          else
+            TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1" \
+            bash scripts/run-coroutine-sanitizer-gate.sh "${BUILD_DIR}" "${TEST_BIN}" 5
+          fi

@@ -9,6 +9,28 @@
 #include <cmath>
 
 namespace mir2::logic {
+namespace {
+
+constexpr uint16_t kNoFlyMask = 0x8000;
+
+double ComputeDistance(const mir2::common::Position& from,
+                       const mir2::common::Position& to,
+                       MovementValidator::Config::DistanceMetric metric) {
+  const double dx = static_cast<double>(std::abs(to.x - from.x));
+  const double dy = static_cast<double>(std::abs(to.y - from.y));
+  switch (metric) {
+    case MovementValidator::Config::DistanceMetric::kChebyshev:
+    case MovementValidator::Config::DistanceMetric::kStepBased:
+      return std::max(dx, dy);
+    case MovementValidator::Config::DistanceMetric::kManhattan:
+      return dx + dy;
+    case MovementValidator::Config::DistanceMetric::kEuclidean:
+    default:
+      return std::hypot(dx, dy);
+  }
+}
+
+}  // namespace
 
 bool MovementValidator::ValidateWalk(mir2::game::map::MapInstance* map,
                                      int32_t x,
@@ -34,7 +56,7 @@ bool MovementValidator::ValidateFly(mir2::game::map::MapInstance* map,
 
   const auto* tile = map->GetTileInfo(x, y);
   if (tile) {
-    return (tile->fr_img & 0x8000) == 0;
+    return (tile->fr_img & kNoFlyMask) == 0;
   }
 
   return map->IsWalkable(x, y);
@@ -68,8 +90,7 @@ mir2::common::ErrorCode MovementValidator::Validate(const mir2::common::Position
     if (elapsed_ms <= 0) {
       return mir2::common::ErrorCode::kSpeedViolation;
     }
-    const double distance = std::hypot(static_cast<double>(to.x - from.x),
-                                       static_cast<double>(to.y - from.y));
+    const double distance = ComputeDistance(from, to, config_.distance_metric);
     const double elapsed_seconds = static_cast<double>(elapsed_ms) / 1000.0;
     const double actual_speed = distance / elapsed_seconds;
     const double max_speed = static_cast<double>(speed) * config_.speed_tolerance;

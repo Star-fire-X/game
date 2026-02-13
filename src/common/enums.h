@@ -39,6 +39,8 @@ enum class MsgId : uint16_t {
   kChangeMap = 2030,
   kTeleport = 2031,
   kStateSync = 2040,
+  kBonusPointReq = 2060,
+  kBonusPointRsp = 2061,
 
   // ========== 战斗模块 (3000-3999) ==========
   kAttackReq = 3001,

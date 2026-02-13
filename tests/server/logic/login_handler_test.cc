@@ -9,6 +9,7 @@
 #include <asio/post.hpp>
 
 #include <chrono>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "logic/services/client_registry.h"
 #include "logic/services/session_role_store.h"
 #include "logic/coroutine_executor.h"
+#include "logic/handlers/handler_error_utils.h"
 #include "logic/handlers/login/login_handler.h"
 #include "logic/mock_response_sender.h"
 
@@ -31,6 +33,7 @@ class MockLoginService : public mir2::logic::LoginService {
 
   void SetResult(const mir2::logic::LoginResult& result) { result_ = result; }
   void SetAsync(bool async) { async_ = async; }
+  void SetThrowOnLogin(bool value) { throw_on_login_ = value; }
   bool WasCalled() const { return called_; }
   const std::string& LastUsername() const { return last_username_; }
   const std::string& LastPassword() const { return last_password_; }
@@ -41,6 +44,9 @@ class MockLoginService : public mir2::logic::LoginService {
     called_ = true;
     last_username_ = username;
     last_password_ = password;
+    if (throw_on_login_) {
+      throw std::runtime_error("mock login failure");
+    }
 
     if (async_) {
       asio::post(io_context_, [callback, result = result_]() { callback(result); });
@@ -54,6 +60,7 @@ class MockLoginService : public mir2::logic::LoginService {
   asio::io_context& io_context_;
   mir2::logic::LoginResult result_{};
   bool async_ = true;
+  bool throw_on_login_ = false;
   bool called_ = false;
   std::string last_username_;
   std::string last_password_;
@@ -75,6 +82,19 @@ std::vector<uint8_t> BuildLoginReq(const std::string& username,
 }
 
 }  // namespace
+
+TEST(LoginHandlerErrorMappingTest, ToCommonErrorUsesDetailedDecodeCodes) {
+  EXPECT_EQ(ToCommonError(mir2::common::MessageCodecStatus::kInvalidMsgId),
+            mir2::common::ErrorCode::kDecodeInvalidMsgId);
+  EXPECT_EQ(ToCommonError(mir2::common::MessageCodecStatus::kInvalidPayload),
+            mir2::common::ErrorCode::kDecodeInvalidPayload);
+  EXPECT_EQ(ToCommonError(mir2::common::MessageCodecStatus::kMissingField),
+            mir2::common::ErrorCode::kDecodeMissingField);
+  EXPECT_EQ(ToCommonError(mir2::common::MessageCodecStatus::kStringTooLong),
+            mir2::common::ErrorCode::kDecodeStringTooLong);
+  EXPECT_EQ(ToCommonError(mir2::common::MessageCodecStatus::kValueOutOfRange),
+            mir2::common::ErrorCode::kDecodeValueOutOfRange);
+}
 
 class LoginHandlerTest : public ::testing::Test {
  protected:
@@ -246,7 +266,7 @@ TEST_F(LoginHandlerTest, LoginEmptyPayload) {
   EXPECT_FALSE(service_->WasCalled());
 }
 
-// 损坏的 FlatBuffers 载荷应返回 ERR_INVALID_ACTION。
+// 损坏的 FlatBuffers 载荷应返回细粒度解码错误。
 TEST_F(LoginHandlerTest, LoginMalformedPayload) {
   HandlerContext context;
   context.client_id = 11011;
@@ -261,10 +281,64 @@ TEST_F(LoginHandlerTest, LoginMalformedPayload) {
   const auto status = mir2::common::DecodeLoginResponse(
       mir2::common::kLoginResponseMsgId, responses[0].payload, &response);
   ASSERT_EQ(status, mir2::common::MessageCodecStatus::kOk);
-  EXPECT_EQ(response.code, mir2::proto::ErrorCode::ERR_INVALID_ACTION);
+  EXPECT_EQ(response.code, mir2::proto::ErrorCode::ERR_DECODE_INVALID_PAYLOAD);
   EXPECT_FALSE(client_registry_.Contains(context.client_id));
   EXPECT_FALSE(role_store_.GetAccountId(context.client_id).has_value());
   EXPECT_FALSE(service_->WasCalled());
+}
+
+// 成功返回但 account_id=0 时，不应追踪或绑定，并降级为 ERR_UNKNOWN。
+TEST_F(LoginHandlerTest, LoginSuccessWithZeroAccountIdDoesNotTrack) {
+  mir2::logic::LoginResult result;
+  result.code = mir2::common::ErrorCode::kOk;
+  result.account_id = 0;
+  result.token = "unexpected-token";
+  service_->SetResult(result);
+
+  HandlerContext context;
+  context.client_id = 13013;
+
+  const auto payload = BuildLoginReq("user", "pass", "1.0");
+  executor_->Spawn(handler_->HandleMessage(context, payload.data(), payload.size()));
+
+  ASSERT_TRUE(PumpIoUntil(1, std::chrono::seconds(2)));
+  const auto responses = response_sender_->GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 1u);
+
+  mir2::common::LoginResponse response;
+  const auto status = mir2::common::DecodeLoginResponse(
+      mir2::common::kLoginResponseMsgId, responses[0].payload, &response);
+  ASSERT_EQ(status, mir2::common::MessageCodecStatus::kOk);
+  EXPECT_EQ(response.code, mir2::proto::ErrorCode::ERR_UNKNOWN);
+  EXPECT_EQ(response.account_id, 0u);
+  EXPECT_TRUE(response.session_token.empty());
+  EXPECT_FALSE(client_registry_.Contains(context.client_id));
+  EXPECT_FALSE(role_store_.GetAccountId(context.client_id).has_value());
+}
+
+// LoginService 抛异常时应返回 ERR_UNKNOWN，并清理绑定状态。
+TEST_F(LoginHandlerTest, LoginServiceExceptionSendsUnknownAndCleansState) {
+  service_->SetThrowOnLogin(true);
+
+  HandlerContext context;
+  context.client_id = 14014;
+
+  const auto payload = BuildLoginReq("user", "pass", "1.0");
+  executor_->Spawn(handler_->HandleMessage(context, payload.data(), payload.size()));
+
+  ASSERT_TRUE(PumpIoUntil(1, std::chrono::seconds(2)));
+  const auto responses = response_sender_->GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 1u);
+
+  mir2::common::LoginResponse response;
+  const auto status = mir2::common::DecodeLoginResponse(
+      mir2::common::kLoginResponseMsgId, responses[0].payload, &response);
+  ASSERT_EQ(status, mir2::common::MessageCodecStatus::kOk);
+  EXPECT_EQ(response.code, mir2::proto::ErrorCode::ERR_UNKNOWN);
+  EXPECT_EQ(response.account_id, 0u);
+  EXPECT_TRUE(response.session_token.empty());
+  EXPECT_FALSE(client_registry_.Contains(context.client_id));
+  EXPECT_FALSE(role_store_.GetAccountId(context.client_id).has_value());
 }
 
 // 协程销毁后，异步登录回调不应再次恢复该协程。

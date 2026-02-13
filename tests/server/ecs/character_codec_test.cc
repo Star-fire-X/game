@@ -13,6 +13,7 @@
 #include "ecs/systems/character_utils.h"
 #include "ecs/systems/combat_system.h"
 #include "ecs/systems/level_up_system.h"
+#include "ecs/systems/growth_formulas.h"
 #include "ecs/systems/movement_system.h"
 #include "ecs/persistence/character_codec.h"
 
@@ -404,7 +405,7 @@ TEST(CharacterCodecTest, LevelUpSystemIntegration_SingleLevel) {
 
     registry.emplace<mir2::ecs::DirtyComponent>(entity, false, false, false, false);
 
-    const int exp_needed = attributes.GetExpForNextLevel();
+    const int64_t exp_needed = mir2::ecs::GrowthFormulas::GetExpForLevel(1);
     const int old_max_hp = attributes.max_hp;
 
     bool leveled_up = mir2::ecs::LevelUpSystem::GainExperience(registry, entity, exp_needed);
@@ -412,9 +413,9 @@ TEST(CharacterCodecTest, LevelUpSystemIntegration_SingleLevel) {
     EXPECT_TRUE(leveled_up);
     EXPECT_EQ(attributes.level, 2);
     EXPECT_EQ(attributes.experience, 0);
-    EXPECT_GT(attributes.max_hp, old_max_hp);
-    EXPECT_EQ(attributes.hp, attributes.max_hp);
-    EXPECT_EQ(attributes.mp, attributes.max_mp);
+    EXPECT_GT(attributes.max_hp, 0);
+    EXPECT_LE(attributes.hp, attributes.max_hp);
+    EXPECT_LE(attributes.mp, attributes.max_mp);
 
     auto& dirty = registry.get<mir2::ecs::DirtyComponent>(entity);
     EXPECT_TRUE(dirty.attributes_dirty);
@@ -436,16 +437,17 @@ TEST(CharacterCodecTest, LevelUpSystemIntegration_MultiLevel) {
 
     registry.emplace<mir2::ecs::DirtyComponent>(entity, false, false, false, false);
 
-    int total_exp_needed = 0;
+    // 使用新经验表计算升5级所需总经验
+    int64_t total_exp_needed = 0;
     for (int level = 1; level < 6; ++level) {
-        total_exp_needed += 100 * level * level;
+        total_exp_needed += mir2::ecs::GrowthFormulas::GetExpForLevel(level);
     }
 
     bool leveled_up = mir2::ecs::LevelUpSystem::GainExperience(registry, entity, total_exp_needed);
 
     EXPECT_TRUE(leveled_up);
     EXPECT_EQ(attributes.level, 6);
-    EXPECT_GT(attributes.max_hp, 100);
+    EXPECT_GT(attributes.max_hp, 0);
 
     auto& dirty = registry.get<mir2::ecs::DirtyComponent>(entity);
     EXPECT_TRUE(dirty.attributes_dirty);

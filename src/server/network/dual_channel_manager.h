@@ -55,6 +55,10 @@ class IDualChannelManager {
 class DualChannelManager : public IDualChannelManager {
  public:
   using SessionFilter = std::function<bool(const std::shared_ptr<TcpSession>&)>;
+  using ChannelMessageHandler = std::function<void(
+      const std::shared_ptr<TcpSession>&,
+      mir2::common::ChannelType,
+      const std::vector<uint8_t>&)>;
 
   DualChannelManager(asio::io_context& io_context,
                      mir2::common::KcpConfig kcp_config = {});
@@ -70,6 +74,7 @@ class DualChannelManager : public IDualChannelManager {
   void Stop();
 
   void RegisterHandler(uint16_t msg_id, MessageHandler handler);
+  void RegisterChannelAwareHandler(uint16_t msg_id, ChannelMessageHandler handler);
   void SetRoute(uint16_t msg_id, mir2::common::ChannelType channel);
   void SetDefaultChannel(mir2::common::ChannelType channel);
 

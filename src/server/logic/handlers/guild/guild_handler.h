@@ -36,7 +36,6 @@ class GuildHandler {
                entt::registry& ecs_registry);
 
   Task<void> HandleMessage(HandlerContext ctx,
-                           uint16_t msg_id,
                            const uint8_t* payload,
                            size_t payload_size);
 
@@ -59,11 +58,22 @@ class GuildHandler {
 
   Task<void> SendCreateGuildResponse(HandlerContext ctx,
                                      bool success,
-                                     int error_code);
+                                     int error_code,
+                                     uint32_t guild_id = 0);
+  Task<void> SendJoinGuildResponse(HandlerContext ctx,
+                                   bool success,
+                                   int error_code);
+  Task<void> SendLeaveGuildResponse(HandlerContext ctx,
+                                    bool success,
+                                    int error_code);
+  Task<void> SendDeclareWarResponse(HandlerContext ctx,
+                                    bool success,
+                                    int error_code);
+  Task<void> SendCancelWarResponse(HandlerContext ctx,
+                                   bool success,
+                                   int error_code);
 
-  CoroutineExecutor& executor_;
   ResponseSender& response_sender_;
-  ClientRegistry& client_registry_;
   PlayerPresenceService& player_presence_service_;
   mir2::ecs::GuildSystem& guild_system_;
   entt::registry& ecs_registry_;

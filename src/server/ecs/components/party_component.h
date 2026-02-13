@@ -31,7 +31,7 @@ struct PartyComponent {
     std::vector<entt::entity> members;  ///< 成员列表（包含队长）
     LootMode loot_mode = LootMode::FREE_FOR_ALL;  ///< 掉落分配模式
     int32_t loot_range = 15;            ///< 掉落共享范围（格子数）
-    uint8_t max_members = 6;            ///< 最大成员数
+    uint8_t max_members = 11;           ///< 最大成员数 (GROUP_MAX)
 
     bool IsFull() const { return members.size() >= max_members; }
     bool IsLeader(entt::entity e) const { return e == leader; }

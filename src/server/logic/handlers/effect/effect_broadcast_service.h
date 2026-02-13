@@ -11,6 +11,10 @@
 
 #include <entt/entt.hpp>
 
+namespace mir2::logic {
+class RoleStore;
+}  // namespace mir2::logic
+
 namespace mir2::network {
 class NetworkManager;
 }  // namespace mir2::network
@@ -28,7 +32,8 @@ class EffectBroadcastService {
  public:
   EffectBroadcastService(mir2::network::NetworkManager& network,
                          mir2::game::map::AOIManager& aoi_manager,
-                         entt::registry& registry);
+                         entt::registry& registry,
+                         mir2::logic::RoleStore& role_store);
 
   void BroadcastSkillEffect(uint64_t caster_id,
                             uint64_t target_id,
@@ -44,6 +49,7 @@ class EffectBroadcastService {
   mir2::network::NetworkManager& network_;
   mir2::game::map::AOIManager& aoi_manager_;
   entt::registry& registry_;
+  mir2::logic::RoleStore& role_store_;
 };
 
 }  // namespace mir2::logic

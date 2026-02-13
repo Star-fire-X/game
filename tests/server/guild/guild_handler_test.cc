@@ -170,6 +170,8 @@ TEST_F(GuildHandlerTest, HandleCreateGuildSuccess) {
       flatbuffers::GetRoot<mir2::proto::CreateGuildResponse>(responses[0].payload.data());
   ASSERT_NE(rsp, nullptr);
   EXPECT_TRUE(rsp->success());
+  ASSERT_NE(rsp->guild_info(), nullptr);
+  EXPECT_EQ(rsp->guild_info()->id(), member->guild_id);
 }
 
 TEST_F(GuildHandlerTest, HandleCreateGuildInvalidPayload) {
@@ -190,6 +192,7 @@ TEST_F(GuildHandlerTest, HandleCreateGuildInvalidPayload) {
       flatbuffers::GetRoot<mir2::proto::CreateGuildResponse>(responses[0].payload.data());
   ASSERT_NE(rsp, nullptr);
   EXPECT_FALSE(rsp->success());
+  EXPECT_EQ(rsp->guild_info(), nullptr);
   EXPECT_EQ(rsp->error_code(),
             static_cast<int>(mir2::common::ErrorCode::kInvalidAction));
   EXPECT_EQ(guild_mgr_->GuildCount(), 0u);

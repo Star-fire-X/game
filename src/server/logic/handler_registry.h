@@ -9,7 +9,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <unordered_map>
+#include <limits>
+#include <string>
+#include <vector>
 
 #include "logic/handler_context.h"
 #include "logic/task.h"
@@ -17,6 +19,8 @@
 namespace mir2::logic {
 
 class CoroutineExecutor;
+struct CoroutineMetadata;
+enum class SpawnResult : uint8_t;
 
 class HandlerRegistry {
  public:
@@ -24,22 +28,34 @@ class HandlerRegistry {
 
   explicit HandlerRegistry(CoroutineExecutor& executor);
 
-  void RegisterHandler(uint16_t msg_id, HandlerFunc handler);
+  void RegisterHandler(uint16_t msg_id,
+                       HandlerFunc handler,
+                       std::string handler_name = {});
 
   bool CreateTask(const HandlerContext& context,
                   uint16_t msg_id,
                   const uint8_t* payload,
                   size_t payload_size,
-                  Task<void>* out_task) const;
+                  Task<void>* out_task,
+                  CoroutineMetadata* out_metadata = nullptr) const;
 
-  bool DispatchMessage(const HandlerContext& context,
-                       uint16_t msg_id,
-                       const uint8_t* payload,
-                       size_t payload_size) const;
+  SpawnResult DispatchMessage(const HandlerContext& context,
+                              uint16_t msg_id,
+                              const uint8_t* payload,
+                              size_t payload_size) const;
 
  private:
+  static constexpr size_t kHandlerTableSize =
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+
+  struct HandlerEntry {
+    HandlerFunc handler;
+    std::string name;
+    std::string handler_key;
+  };
+
   CoroutineExecutor& executor_;
-  std::unordered_map<uint16_t, HandlerFunc> handlers_;
+  std::vector<HandlerEntry> handlers_;
 };
 
 }  // namespace mir2::logic

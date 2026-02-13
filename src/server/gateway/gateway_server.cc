@@ -27,6 +27,20 @@ namespace {
 constexpr float kStaleRouteCleanupIntervalSec = 30.0f;
 constexpr uint32_t kDefaultBackpressurePauseMs = 100;
 constexpr uint32_t kMaxBackpressurePauseMs = 2000;
+constexpr size_t kMaxForwardPayloadBytes = 64 * 1024;
+constexpr int64_t kDisconnectRetryInitialBackoffMs = 500;
+constexpr int64_t kDisconnectRetryMaxBackoffMs = 30000;
+constexpr int64_t kDisconnectRetryTtlMs = 300000;
+constexpr size_t kDisconnectRetryMaxQueueSize = 100000;
+
+int64_t ComputeDisconnectBackoffMs(uint32_t retry_count) {
+  uint32_t capped_retry = retry_count;
+  if (capped_retry > 8) {
+    capped_retry = 8;
+  }
+  const int64_t delay = kDisconnectRetryInitialBackoffMs << capped_retry;
+  return std::min(delay, kDisconnectRetryMaxBackoffMs);
+}
 
 struct ConnectionSnapshot {
   uint64_t client_id = 0;
@@ -77,7 +91,9 @@ void UpdateSessionContextFromLogicMessage(
       return;
     }
     const auto* rsp = flatbuffers::GetRoot<mir2::proto::SelectRoleRsp>(payload.data());
-    if (rsp && rsp->player_id() != 0) {
+    if (rsp &&
+        rsp->code() == mir2::proto::ErrorCode::ERR_OK &&
+        rsp->player_id() != 0) {
       session->SetUserId(rsp->player_id());
     }
     return;
@@ -90,6 +106,9 @@ void UpdateSessionContextFromLogicMessage(
     }
     const auto* rsp = flatbuffers::GetRoot<mir2::proto::EnterGameRsp>(payload.data());
     if (!rsp) {
+      return;
+    }
+    if (rsp->code() != mir2::proto::ErrorCode::ERR_OK) {
       return;
     }
     const auto* player = rsp->player();
@@ -170,10 +189,12 @@ void GatewayServer::Shutdown() {
     return;
   }
 
+  logic_reconnecting_.store(false, std::memory_order_release);
   {
-    std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-    logic_reconnecting_ = false;
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    pending_disconnect_events_.clear();
   }
+  monitor::Metrics::Instance().SetGauge("gateway.disconnect_queue.size", 0);
 
   if (logic_client_) {
     logic_client_->Close();
@@ -211,6 +232,8 @@ void GatewayServer::Tick(float delta_time) {
     ResumeBackpressuredSessions(now_ms);
     CheckHeartbeatTimeouts(sessions, now_ms);
     FlushBufferedMessages();
+    ProcessDisconnectRetryQueue(now_ms);
+    UpdateHoldingMetrics();
 
     stale_route_cleanup_elapsed_sec_ += delta_time;
     if (stale_route_cleanup_elapsed_sec_ >= kStaleRouteCleanupIntervalSec) {
@@ -368,8 +391,9 @@ void GatewayServer::RegisterHandlers() {
   // 双进程架构下，认证检查由 LogicServer 负责
   auto universal_forward_handler = [this](const std::shared_ptr<network::TcpSession>& session,
                                           uint16_t msg_id,
+                                          mir2::common::ChannelType channel,
                                           const std::vector<uint8_t>& payload) {
-    HandleForwardMessage(session, msg_id, payload);
+    HandleForwardMessage(session, msg_id, channel, payload);
   };
 
   // 批量注册需要转发的消息类型
@@ -404,11 +428,12 @@ void GatewayServer::RegisterHandlers() {
   };
 
   for (auto msg_id : forward_messages) {
-    network_->RegisterHandler(
+    network_->RegisterChannelAwareHandler(
         msg_id,
         [universal_forward_handler, msg_id](const std::shared_ptr<network::TcpSession>& session,
+                                            mir2::common::ChannelType channel,
                                             const std::vector<uint8_t>& payload) {
-          universal_forward_handler(session, msg_id, payload);
+          universal_forward_handler(session, msg_id, channel, payload);
         });
   }
 
@@ -476,12 +501,10 @@ void GatewayServer::ScheduleReconnect(int retry_count) {
     return;
   }
 
-  {
-    std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-    if (logic_reconnecting_) {
-      return;
-    }
-    logic_reconnecting_ = true;
+  bool expected = false;
+  if (!logic_reconnecting_.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel)) {
+    return;
   }
 
   const int capped_retry = std::min(retry_count, 5);
@@ -493,37 +516,31 @@ void GatewayServer::ScheduleReconnect(int retry_count) {
       app_.GetIoContext(), std::chrono::milliseconds(delay_ms));
   timer->async_wait([this, retry_count, timer](const asio::error_code& ec) {
     if (shutting_down_.load(std::memory_order_acquire)) {
-      std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-      logic_reconnecting_ = false;
+      logic_reconnecting_.store(false, std::memory_order_release);
       return;
     }
 
     if (ec) {
-      std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-      logic_reconnecting_ = false;
+      logic_reconnecting_.store(false, std::memory_order_release);
       return;
     }
 
     if (ConnectToLogicService()) {
       SYSLOG_INFO("Reconnected to logic service");
-      std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-      logic_reconnecting_ = false;
+      logic_reconnecting_.store(false, std::memory_order_release);
       return;
     }
 
-    {
-      std::unique_lock<std::shared_mutex> lock(reconnect_mutex_);
-      logic_reconnecting_ = false;
-    }
+    logic_reconnecting_.store(false, std::memory_order_release);
     ScheduleReconnect(retry_count + 1);
   });
 }
 
-void GatewayServer::ForwardToLogic(uint64_t client_id, uint16_t msg_id,
+bool GatewayServer::ForwardToLogic(uint64_t client_id, uint16_t msg_id,
                                    const std::vector<uint8_t>& payload) {
   if (!logic_client_ || !logic_client_->IsConnected()) {
     SYSLOG_ERROR("Logic service not connected, msg_id={}", msg_id);
-    return;
+    return false;
   }
 
   monitor::Metrics::Instance().IncrementCounter("gateway.forward.total");
@@ -531,16 +548,170 @@ void GatewayServer::ForwardToLogic(uint64_t client_id, uint16_t msg_id,
 
   const auto routed = common::BuildRoutedMessage(client_id, msg_id, payload);
   logic_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), routed);
+  return true;
 }
 
 void GatewayServer::NotifyClientDisconnected(uint64_t client_id) {
   if (client_id == 0) {
     return;
   }
-  const std::vector<uint8_t> empty_payload;
-  ForwardToLogic(client_id,
-                 static_cast<uint16_t>(common::MsgId::kLogout),
-                 empty_payload);
+  const int64_t now_ms = network::TcpSession::NowMs();
+  EnqueueDisconnectEvent(client_id, now_ms);
+  ProcessDisconnectRetryQueue(now_ms);
+}
+
+void GatewayServer::EnqueueDisconnectEvent(uint64_t client_id, int64_t now_ms) {
+  if (client_id == 0) {
+    return;
+  }
+
+  size_t queue_size = 0;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    if (pending_disconnect_events_.size() >= kDisconnectRetryMaxQueueSize) {
+      pending_disconnect_events_.pop_front();
+      monitor::Metrics::Instance().IncrementCounter(
+          "gateway.disconnect_queue.dropped_overflow_total");
+    }
+
+    PendingDisconnectEvent event{};
+    event.client_id = client_id;
+    event.sequence = next_disconnect_sequence_++;
+    event.first_seen_ms = now_ms;
+    event.next_retry_ms = now_ms;
+    pending_disconnect_events_.push_back(event);
+    queue_size = pending_disconnect_events_.size();
+  }
+
+  monitor::Metrics::Instance().IncrementCounter("gateway.disconnect_queue.enqueue_total");
+  monitor::Metrics::Instance().SetGauge(
+      "gateway.disconnect_queue.size",
+      static_cast<int64_t>(queue_size));
+}
+
+bool GatewayServer::TrySendDisconnectEvent(
+    const PendingDisconnectEvent& event) {
+  static const std::vector<uint8_t> kEmptyPayload;
+  return ForwardToLogic(event.client_id,
+                        static_cast<uint16_t>(common::MsgId::kLogout),
+                        kEmptyPayload);
+}
+
+void GatewayServer::TrimExpiredDisconnectEvents(int64_t now_ms) {
+  size_t expired_count = 0;
+  size_t queue_size = 0;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    for (auto it = pending_disconnect_events_.begin();
+         it != pending_disconnect_events_.end();) {
+      if (now_ms - it->first_seen_ms < kDisconnectRetryTtlMs) {
+        ++it;
+        continue;
+      }
+      it = pending_disconnect_events_.erase(it);
+      ++expired_count;
+    }
+    queue_size = pending_disconnect_events_.size();
+  }
+
+  for (size_t i = 0; i < expired_count; ++i) {
+    monitor::Metrics::Instance().IncrementCounter("gateway.disconnect_queue.expired_total");
+  }
+  monitor::Metrics::Instance().SetGauge(
+      "gateway.disconnect_queue.size",
+      static_cast<int64_t>(queue_size));
+}
+
+void GatewayServer::ProcessDisconnectRetryQueue(int64_t now_ms) {
+  TrimExpiredDisconnectEvents(now_ms);
+  if (!IsLogicConnected()) {
+    return;
+  }
+
+  std::vector<PendingDisconnectEvent> due_events;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    for (auto it = pending_disconnect_events_.begin();
+         it != pending_disconnect_events_.end();) {
+      if (it->next_retry_ms > now_ms) {
+        ++it;
+        continue;
+      }
+      due_events.push_back(*it);
+      it = pending_disconnect_events_.erase(it);
+    }
+  }
+
+  if (due_events.empty()) {
+    return;
+  }
+
+  for (auto& event : due_events) {
+    if (TrySendDisconnectEvent(event)) {
+      monitor::Metrics::Instance().IncrementCounter(
+          "gateway.disconnect_queue.delivered_total");
+      continue;
+    }
+
+    monitor::Metrics::Instance().IncrementCounter("gateway.disconnect_queue.retry_total");
+    event.retry_count += 1;
+    event.next_retry_ms = now_ms + ComputeDisconnectBackoffMs(event.retry_count);
+
+    bool dropped_expired = false;
+    bool dropped_overflow = false;
+    {
+      std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+      if (now_ms - event.first_seen_ms >= kDisconnectRetryTtlMs) {
+        dropped_expired = true;
+      } else {
+        if (pending_disconnect_events_.size() >= kDisconnectRetryMaxQueueSize) {
+          pending_disconnect_events_.pop_front();
+          dropped_overflow = true;
+        }
+        pending_disconnect_events_.push_back(event);
+      }
+    }
+    if (dropped_expired) {
+      monitor::Metrics::Instance().IncrementCounter("gateway.disconnect_queue.expired_total");
+    }
+    if (dropped_overflow) {
+      monitor::Metrics::Instance().IncrementCounter(
+          "gateway.disconnect_queue.dropped_overflow_total");
+    }
+  }
+
+  size_t queue_size = 0;
+  {
+    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    queue_size = pending_disconnect_events_.size();
+  }
+  monitor::Metrics::Instance().SetGauge(
+      "gateway.disconnect_queue.size",
+      static_cast<int64_t>(queue_size));
+}
+
+void GatewayServer::UpdateHoldingMetrics() {
+  size_t total_buffered_bytes = 0;
+  size_t queue_size = 0;
+  {
+    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    for (const auto& [_, holder] : connection_holders_) {
+      if (holder) {
+        total_buffered_bytes += holder->BufferedBytes();
+      }
+    }
+    queue_size = pending_disconnect_events_.size();
+  }
+
+  monitor::Metrics::Instance().SetGauge(
+      "gateway.holding.buffer_size_bytes",
+      static_cast<int64_t>(total_buffered_bytes));
+  monitor::Metrics::Instance().SetGauge(
+      "gateway.holding.total_buffer_bytes",
+      static_cast<int64_t>(total_buffered_bytes));
+  monitor::Metrics::Instance().SetGauge(
+      "gateway.disconnect_queue.size",
+      static_cast<int64_t>(queue_size));
 }
 
 void GatewayServer::OnLogicPacket(const network::Packet& packet) {
@@ -840,14 +1011,16 @@ void GatewayServer::FlushBufferedMessages() {
     }
   }
 
-  for (auto& entry : drained) {
-    const uint64_t client_id = entry.first;
-    BufferedMessage message = std::move(entry.second);
-    asio::post(app_.GetIoContext(),
-               [this, client_id, message = std::move(message)]() mutable {
-                 ForwardToLogic(client_id, message.msg_id, message.payload);
-               });
+  if (drained.empty()) {
+    return;
   }
+
+  asio::post(app_.GetIoContext(),
+             [this, drained = std::move(drained)]() mutable {
+               for (auto& entry : drained) {
+                 ForwardToLogic(entry.first, entry.second.msg_id, entry.second.payload);
+               }
+             });
 }
 
 void GatewayServer::ApplyHolderState(ConnectionHolder& holder,
@@ -933,6 +1106,7 @@ void GatewayServer::HandleHeartbeat(const std::shared_ptr<network::TcpSession>& 
 
 void GatewayServer::HandleForwardMessage(const std::shared_ptr<network::TcpSession>& session,
                                          uint16_t msg_id,
+                                         mir2::common::ChannelType channel,
                                          const std::vector<uint8_t>& payload) {
   if (!session) {
     return;
@@ -941,6 +1115,18 @@ void GatewayServer::HandleForwardMessage(const std::shared_ptr<network::TcpSessi
   const uint64_t client_id = session->GetSessionId();
   if (client_id == 0) {
     SYSLOG_WARN("Invalid session ID, dropping message msg_id={}", msg_id);
+    return;
+  }
+
+  if (payload.size() > kMaxForwardPayloadBytes) {
+    SYSLOG_WARN(
+        "Gateway dropped oversized payload client_id={} msg_id={} channel={} size={}",
+        client_id,
+        msg_id,
+        static_cast<int>(channel),
+        payload.size());
+    monitor::Metrics::Instance().IncrementCounter("gateway.forward.payload_too_large");
+    session->Kick(common::ErrorCode::INVALID_PACKET, "Payload too large");
     return;
   }
 
@@ -983,7 +1169,7 @@ void GatewayServer::HandleForwardMessage(const std::shared_ptr<network::TcpSessi
       ApplyHolderState(*holder, holder_state_);
       connection_connected_at_ms_.try_emplace(client_id, network::TcpSession::NowMs());
     }
-    action = holder->HandleClientMessage(msg_id, mir2::common::ChannelType::kTcp, payload);
+    action = holder->HandleClientMessage(msg_id, channel, payload);
   }
 
   // 根据 ConnectionHolder 的决策执行操作

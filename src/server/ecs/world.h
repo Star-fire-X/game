@@ -28,6 +28,8 @@ enum class SystemPriority {
     kInventory = 150,
     kCombat = 200,
     kLevelUp = 300,
+    kAttributeRecalc = 350,
+    kRecovery = 500,
 };
 
 /**

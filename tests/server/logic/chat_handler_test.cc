@@ -37,7 +37,7 @@ std::vector<uint8_t> BuildChatReq(mir2::proto::ChatChannel channel,
 
 }  // namespace
 
-class ChatHandlerTest : public ::testing::Test {
+class LogicChatHandlerTest : public ::testing::Test {
  protected:
   void SetUp() override {
     executor_ = std::make_unique<CoroutineExecutor>(io_context_, 1);
@@ -71,7 +71,7 @@ class ChatHandlerTest : public ::testing::Test {
 };
 
 // 空载荷应返回 ERR_INVALID_ACTION。
-TEST_F(ChatHandlerTest, HandleEmptyPayload) {
+TEST_F(LogicChatHandlerTest, HandleEmptyPayload) {
   HandlerContext context;
   context.client_id = 100;
 
@@ -93,7 +93,7 @@ TEST_F(ChatHandlerTest, HandleEmptyPayload) {
 }
 
 // 损坏的 FlatBuffers 载荷应返回 ERR_INVALID_ACTION。
-TEST_F(ChatHandlerTest, HandleMalformedPayload) {
+TEST_F(LogicChatHandlerTest, HandleMalformedPayload) {
   HandlerContext context;
   context.client_id = 101;
 
@@ -116,7 +116,7 @@ TEST_F(ChatHandlerTest, HandleMalformedPayload) {
 }
 
 // 空字符串内容应返回 ERR_INVALID_ACTION。
-TEST_F(ChatHandlerTest, HandleEmptyContent) {
+TEST_F(LogicChatHandlerTest, HandleEmptyContent) {
   HandlerContext context;
   context.client_id = 102;
 

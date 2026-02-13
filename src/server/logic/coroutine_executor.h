@@ -15,19 +15,27 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <condition_variable>
 #include <coroutine>
 #include <cstdint>
 #include <exception>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "logic/task.h"
+#include "monitor/metrics_sink.h"
 
 namespace mir2::logic {
 
@@ -55,10 +63,65 @@ class TimeoutError : public std::runtime_error {
   explicit TimeoutError(const std::string& message) : std::runtime_error(message) {}
 };
 
+class CancelledError : public std::runtime_error {
+ public:
+  explicit CancelledError(const std::string& message) : std::runtime_error(message) {}
+};
+
+enum class SpawnResult : uint8_t {
+  kSpawned = 0,
+  kInvalidTask = 1,
+  kNotAccepting = 2,
+  kOverLimit = 3,
+};
+
+const char* ToString(SpawnResult result) noexcept;
+
+enum class CoroutineStatus : uint8_t {
+  kQueued = 0,
+  kRunning = 1,
+  kSuspendedAsync = 2,
+  kSuspendedSleep = 3,
+};
+
+const char* ToString(CoroutineStatus status) noexcept;
+
+struct CoroutineMetadata {
+  uint64_t trace_id = 0;
+  std::string name;
+  std::string source;
+  std::string handler_key;
+  uint16_t msg_id = 0;
+  uint64_t client_id = 0;
+};
+
+struct CoroutineSnapshot {
+  uint64_t coroutine_id = 0;
+  uint64_t trace_id = 0;
+  std::string name;
+  std::string source;
+  std::string handler_key;
+  uint16_t msg_id = 0;
+  uint64_t client_id = 0;
+  CoroutineStatus status = CoroutineStatus::kQueued;
+  std::string last_state_reason;
+  uint64_t age_ms = 0;
+  uint64_t since_last_state_ms = 0;
+  uint64_t suspended_for_ms = 0;
+  uint64_t resume_count = 0;
+  uint64_t suspend_count = 0;
+};
+
 class CoroutineExecutor {
  public:
+  using ParallelSpawnRejectedCallback = std::function<void(size_t, SpawnResult)>;
+  static constexpr size_t kWhenAnyNoTaskIndex = std::numeric_limits<size_t>::max();
+
   explicit CoroutineExecutor(asio::io_context& io_context,
-                             size_t blocking_threads = std::max(1u, std::thread::hardware_concurrency()));
+                             size_t blocking_threads = std::max(1u, std::thread::hardware_concurrency()),
+                             int64_t max_running_tasks = 0,
+                             std::shared_ptr<monitor::IMetricsSink> metrics_sink =
+                                 monitor::CreateDefaultMetricsSink());
   ~CoroutineExecutor();
 
   CoroutineExecutor(const CoroutineExecutor&) = delete;
@@ -67,22 +130,68 @@ class CoroutineExecutor {
   asio::io_context& GetIoContext() const noexcept { return io_context_; }
 
   template <typename T>
-  bool Spawn(Task<T> task) {
+  SpawnResult TrySpawn(Task<T> task) {
+    return TrySpawn(std::move(task), {});
+  }
+
+  template <typename T>
+  SpawnResult TrySpawn(Task<T> task, CoroutineMetadata metadata) {
     if (!task.IsValid()) {
-      return false;
+      RecordSpawnRejected(SpawnResult::kInvalidTask);
+      return SpawnResult::kInvalidTask;
     }
-    if (!BeginSpawn()) {
-      return false;
+
+    const SpawnResult begin_result = BeginSpawn();
+    if (begin_result != SpawnResult::kSpawned) {
+      return begin_result;
     }
-    auto wrapped = SpawnWrapped(this, std::move(task));
+
+    auto runtime = RegisterCoroutine(std::move(metadata));
+    auto wrapped = SpawnWrapped(this, lifetime_state_, runtime, std::move(task));
 
     auto handle = wrapped.Release();
     if (!handle) {
+      CompleteCoroutine(runtime);
       DecrementRunning();
-      return false;
+      RecordSpawnRejected(SpawnResult::kInvalidTask);
+      return SpawnResult::kInvalidTask;
     }
-    asio::post(io_context_, [handle]() mutable { handle.resume(); });
-    return true;
+
+    asio::post(io_context_, [this, handle, runtime]() mutable {
+      ResumeHandle(handle, runtime, "spawn");
+    });
+    return SpawnResult::kSpawned;
+  }
+
+  template <typename T>
+  bool Spawn(Task<T> task) {
+    return Spawn(std::move(task), {});
+  }
+
+  template <typename T>
+  bool Spawn(Task<T> task, CoroutineMetadata metadata) {
+    return TrySpawn(std::move(task), std::move(metadata)) == SpawnResult::kSpawned;
+  }
+
+  template <typename T, typename ErrorCallback>
+  SpawnResult SpawnOrDrop(Task<T> task,
+                          ErrorCallback&& on_error,
+                          CoroutineMetadata metadata = {}) {
+    const SpawnResult result = TrySpawn(std::move(task), std::move(metadata));
+    if (result == SpawnResult::kSpawned) {
+      return result;
+    }
+
+    if constexpr (std::is_invocable_v<ErrorCallback, SpawnResult>) {
+      std::invoke(std::forward<ErrorCallback>(on_error), result);
+    } else if constexpr (std::is_invocable_v<ErrorCallback>) {
+      std::invoke(std::forward<ErrorCallback>(on_error));
+    } else {
+      static_assert(std::is_invocable_v<ErrorCallback, SpawnResult> ||
+                        std::is_invocable_v<ErrorCallback>,
+                    "SpawnOrDrop callback must accept SpawnResult or no arguments");
+    }
+    return result;
   }
 
   void StopAccepting() noexcept;
@@ -91,42 +200,202 @@ class CoroutineExecutor {
   }
   bool DrainAndJoin(std::chrono::steady_clock::duration timeout);
 
-  Task<void> SleepFor(std::chrono::steady_clock::duration duration);
+  Task<void> SleepFor(std::chrono::steady_clock::duration duration,
+                      std::stop_token stop_token = {});
+
+  Task<void> WhenAll(std::vector<Task<void>> tasks,
+                     ParallelSpawnRejectedCallback on_spawn_rejected = {});
+
+  Task<size_t> WhenAny(std::vector<Task<void>> tasks,
+                       ParallelSpawnRejectedCallback on_spawn_rejected = {});
 
   template <typename Fn>
   auto Async(Fn&& fn) -> Task<std::invoke_result_t<Fn>> {
     using FnType = std::decay_t<Fn>;
     using Result = std::invoke_result_t<FnType>;
     static_assert(!std::is_reference_v<Result>, "Async cannot return references");
+    static_assert(!detail::Awaitable<Result>,
+                  "Async callable must return a plain value, not an awaitable");
     return RunAsync<FnType, Result>(
         this, FnType(std::forward<Fn>(fn)),
-        std::chrono::steady_clock::duration::zero(), false);
+        std::chrono::steady_clock::duration::zero(), false, std::stop_token{});
   }
 
   template <typename Fn>
   auto AsyncWithTimeout(Fn&& fn, std::chrono::steady_clock::duration timeout)
       -> Task<std::invoke_result_t<Fn>> {
+    return AsyncWithTimeout(std::forward<Fn>(fn), timeout, std::stop_token{});
+  }
+
+  template <typename Fn>
+  auto AsyncWithTimeout(Fn&& fn,
+                        std::chrono::steady_clock::duration timeout,
+                        std::stop_token stop_token)
+      -> Task<std::invoke_result_t<Fn>> {
     using FnType = std::decay_t<Fn>;
     using Result = std::invoke_result_t<FnType>;
     static_assert(!std::is_reference_v<Result>, "AsyncWithTimeout cannot return references");
+    static_assert(!detail::Awaitable<Result>,
+                  "AsyncWithTimeout callable must return a plain value, not an awaitable");
     return RunAsync<FnType, Result>(
-        this, FnType(std::forward<Fn>(fn)), timeout, true);
+        this, FnType(std::forward<Fn>(fn)), timeout, true, stop_token);
   }
 
-  int64_t SuspendedCount() const noexcept { return suspended_count_.load(); }
-  int64_t RunningCount() const noexcept { return running_count_.load(); }
+  int64_t SuspendedCount() const noexcept {
+    return suspended_count_.load(std::memory_order_acquire);
+  }
+  int64_t RunningCount() const noexcept {
+    return running_count_.load(std::memory_order_acquire);
+  }
+  int64_t MaxRunningTasks() const noexcept { return max_running_tasks_; }
+  int64_t TimeoutBackgroundInflightCount() const noexcept {
+    return timeout_background_inflight_.load(std::memory_order_acquire);
+  }
+  uint64_t AllocateTraceId() noexcept;
+  size_t ActiveCoroutineCount() const noexcept;
+  std::vector<CoroutineSnapshot> SnapshotActiveCoroutines(
+      size_t max_entries = 0) const;
+  std::optional<CoroutineSnapshot> SnapshotCoroutine(uint64_t coroutine_id) const;
+  std::vector<CoroutineSnapshot> DetectHungCoroutines(
+      std::chrono::steady_clock::duration threshold,
+      size_t max_entries = 64);
+  std::vector<CoroutineSnapshot> DetectStarvingCoroutines(
+      std::chrono::steady_clock::duration threshold,
+      size_t max_entries = 64);
+  void ConfigureStarvationWatchdog(
+      std::chrono::steady_clock::duration threshold,
+      std::chrono::steady_clock::duration poll_interval =
+          std::chrono::steady_clock::duration::zero());
+  bool ConfigureTraceExport(const std::string& trace_file_path);
+  bool IsTraceExportEnabled() const noexcept;
 
  private:
+  struct ExecutorLifetimeState {
+    explicit ExecutorLifetimeState(asio::io_context& io_context)
+        : io_context(io_context) {}
+
+    bool IsStopRequested() const noexcept {
+      return stop_requested.load(std::memory_order_acquire);
+    }
+
+    void RequestStop() noexcept {
+      stop_requested.store(true, std::memory_order_release);
+    }
+
+    void IncrementSuspended() const {
+      if (increment_suspended && !IsStopRequested()) {
+        increment_suspended();
+      }
+    }
+
+    void DecrementSuspended() const {
+      if (decrement_suspended && !IsStopRequested()) {
+        decrement_suspended();
+      }
+    }
+
+    void DecrementRunning() const {
+      if (decrement_running && !IsStopRequested()) {
+        decrement_running();
+      }
+    }
+
+    void IncrementPendingResumeCallbacks() const {
+      if (increment_pending_resume_callbacks && !IsStopRequested()) {
+        increment_pending_resume_callbacks();
+      }
+    }
+
+    void DecrementPendingResumeCallbacks() const {
+      if (decrement_pending_resume_callbacks && !IsStopRequested()) {
+        decrement_pending_resume_callbacks();
+      }
+    }
+
+    void IncrementTimeoutBackgroundInflight() const {
+      if (increment_timeout_background_inflight && !IsStopRequested()) {
+        increment_timeout_background_inflight();
+      }
+    }
+
+    void DecrementTimeoutBackgroundInflight() const {
+      if (decrement_timeout_background_inflight && !IsStopRequested()) {
+        decrement_timeout_background_inflight();
+      }
+    }
+
+    void IncrementTimeoutBackgroundTotal() const {
+      if (increment_timeout_background_total && !IsStopRequested()) {
+        increment_timeout_background_total();
+      }
+    }
+
+    asio::io_context& io_context;
+    std::atomic<bool> stop_requested{false};
+    std::function<void()> increment_suspended;
+    std::function<void()> decrement_suspended;
+    std::function<void()> decrement_running;
+    std::function<void()> increment_pending_resume_callbacks;
+    std::function<void()> decrement_pending_resume_callbacks;
+    std::function<void()> increment_timeout_background_inflight;
+    std::function<void()> decrement_timeout_background_inflight;
+    std::function<void()> increment_timeout_background_total;
+  };
+
+  struct CoroutineRuntimeState {
+    std::chrono::steady_clock::time_point created_at;
+    std::chrono::steady_clock::time_point last_state_time;
+    std::chrono::steady_clock::time_point last_suspend_time;
+    uint64_t coroutine_id = 0;
+    uint64_t trace_id = 0;
+    uint16_t msg_id = 0;
+    uint64_t client_id = 0;
+    std::string name;
+    std::string source;
+    std::string handler_key;
+    std::string last_state_reason;
+    CoroutineStatus status = CoroutineStatus::kQueued;
+    uint64_t resume_count = 0;
+    uint64_t suspend_count = 0;
+    bool hung_reported = false;
+    bool starvation_reported = false;
+  };
+
+  struct TraceWriter;
+  struct ReusableTimerPool {
+    explicit ReusableTimerPool(asio::io_context& io_context)
+        : io_context(io_context) {}
+
+    asio::io_context& io_context;
+    std::atomic<bool> recycle_enabled{true};
+    std::mutex mutex;
+    std::vector<std::unique_ptr<asio::steady_timer>> free_timers;
+    size_t max_cached = 4096;
+  };
+
+  static std::shared_ptr<CoroutineRuntimeState>& CurrentRuntimeSlot() {
+    thread_local std::shared_ptr<CoroutineRuntimeState> runtime;
+    return runtime;
+  }
+
   template <typename T>
-  static Task<void> SpawnWrapped(CoroutineExecutor* executor, Task<T> task) {
+  static Task<void> SpawnWrapped(CoroutineExecutor* executor,
+                                 std::shared_ptr<ExecutorLifetimeState> lifetime_state,
+                                 std::shared_ptr<CoroutineRuntimeState> runtime,
+                                 Task<T> task) {
     struct RunningGuard {
       CoroutineExecutor* executor = nullptr;
+      std::shared_ptr<ExecutorLifetimeState> lifetime_state;
+      std::shared_ptr<CoroutineRuntimeState> runtime;
       ~RunningGuard() {
         if (executor) {
-          executor->DecrementRunning();
+          executor->CompleteCoroutine(runtime);
+        }
+        if (lifetime_state) {
+          lifetime_state->DecrementRunning();
         }
       }
-    } guard{executor};
+    } guard{executor, std::move(lifetime_state), std::move(runtime)};
 
     co_await std::move(task);
   }
@@ -135,37 +404,198 @@ class CoroutineExecutor {
   static Task<Result> RunAsync(CoroutineExecutor* executor,
                                Fn fn,
                                std::chrono::steady_clock::duration timeout,
-                               bool enable_timeout) {
+                               bool enable_timeout,
+                               std::stop_token stop_token) {
     co_return co_await AsyncAwaiter<Fn, Result>(
-        executor, std::move(fn), timeout, enable_timeout);
+        executor, std::move(fn), timeout, enable_timeout, stop_token);
   }
+
+  enum class AsyncCompletion : uint8_t {
+    kCompleted = 0,
+    kTimedOut = 1,
+    kCancelled = 2,
+  };
 
   template <typename Result>
   struct AsyncState {
-    AsyncState(CoroutineExecutor* executor, std::coroutine_handle<> continuation)
-        : executor(executor), continuation(continuation) {}
+    AsyncState(CoroutineExecutor* executor,
+               std::shared_ptr<ExecutorLifetimeState> lifetime_state,
+               std::coroutine_handle<> continuation,
+               std::shared_ptr<CoroutineRuntimeState> runtime,
+               const char* suspend_reason)
+        : executor(executor),
+          lifetime_state(std::move(lifetime_state)),
+          continuation(continuation),
+          runtime(std::move(runtime)),
+          suspend_reason(suspend_reason == nullptr ? "" : suspend_reason) {}
 
-    void TryResume(bool timed_out_flag) {
-      if (completed.exchange(true)) {
+    void TryResume(AsyncCompletion completion) {
+      if (completed.exchange(true, std::memory_order_acq_rel)) {
         return;
       }
-      timed_out = timed_out_flag;
-      if (!timed_out_flag && timer) {
+      completion_reason = completion;
+      if (completion != AsyncCompletion::kTimedOut && timer) {
         asio::error_code ignored;
         timer->cancel(ignored);
       }
-      executor->DecrementSuspended();
-      continuation.resume();
+      if (completion == AsyncCompletion::kTimedOut &&
+          !worker_completed.load(std::memory_order_acquire) &&
+          lifetime_state) {
+        bool expected = false;
+        if (timeout_background_tracked.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+          lifetime_state->IncrementTimeoutBackgroundInflight();
+          lifetime_state->IncrementTimeoutBackgroundTotal();
+        }
+      }
+      if (!lifetime_state || lifetime_state->IsStopRequested()) {
+        return;
+      }
+      lifetime_state->DecrementSuspended();
+      if (executor) {
+        executor->ResumeHandle(continuation, runtime, ResumeReason(completion));
+      } else {
+        continuation.resume();
+      }
+    }
+
+    void MarkWorkerCompleted() {
+      worker_completed.store(true, std::memory_order_release);
+      if (!lifetime_state) {
+        return;
+      }
+      if (timeout_background_tracked.exchange(false,
+                                              std::memory_order_acq_rel)) {
+        lifetime_state->DecrementTimeoutBackgroundInflight();
+      }
+    }
+
+    static const char* ResumeReason(AsyncCompletion completion) noexcept {
+      switch (completion) {
+        case AsyncCompletion::kCompleted:
+          return "async_complete";
+        case AsyncCompletion::kTimedOut:
+          return "async_timeout";
+        case AsyncCompletion::kCancelled:
+          return "async_cancelled";
+      }
+      return "async_complete";
     }
 
     CoroutineExecutor* executor = nullptr;
+    std::shared_ptr<ExecutorLifetimeState> lifetime_state;
     std::coroutine_handle<> continuation;
+    std::shared_ptr<CoroutineRuntimeState> runtime;
+    std::string suspend_reason;
     std::atomic<bool> completed{false};
+    std::atomic<bool> worker_completed{false};
+    std::atomic<bool> timeout_background_tracked{false};
     std::exception_ptr exception;
-    bool timed_out = false;
+    AsyncCompletion completion_reason = AsyncCompletion::kCompleted;
     detail::AsyncResultStorage<Result> result;
     std::shared_ptr<asio::steady_timer> timer;
   };
+
+  struct ParallelWaitState {
+    ParallelWaitState(CoroutineExecutor* executor,
+                      asio::io_context& io_context,
+                      size_t total_tasks,
+                      std::shared_ptr<CoroutineRuntimeState> runtime)
+        : executor(executor),
+          io_context(io_context),
+          remaining(total_tasks),
+          runtime(std::move(runtime)) {}
+
+    void RecordException(const std::exception_ptr& exception) {
+      if (!exception) {
+        return;
+      }
+      std::lock_guard<std::mutex> lock(exception_mutex);
+      if (!first_exception) {
+        first_exception = exception;
+      }
+    }
+
+    void CompleteAll() {
+      const size_t previous = remaining.fetch_sub(1, std::memory_order_acq_rel);
+      if (previous == 1) {
+        PostResume();
+      }
+    }
+
+    void CompleteAny(size_t index, const std::exception_ptr& exception = nullptr) {
+      size_t expected = kWhenAnyNoTaskIndex;
+      if (winner_index.compare_exchange_strong(expected,
+                                               index,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+        if (exception) {
+          RecordException(exception);
+        }
+        PostResume();
+      }
+      remaining.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    void PostResume() {
+      if (resume_posted.exchange(true, std::memory_order_acq_rel)) {
+        return;
+      }
+      if (!continuation) {
+        return;
+      }
+      CoroutineExecutor* executor_ptr = executor;
+      asio::post(io_context,
+                 [executor_ptr, continuation = continuation, runtime = runtime]() mutable {
+        if (executor_ptr) {
+          executor_ptr->ResumeHandle(continuation, runtime, "parallel_wait_resume");
+          return;
+        }
+        continuation.resume();
+      });
+    }
+
+    CoroutineExecutor* executor = nullptr;
+    asio::io_context& io_context;
+    std::atomic<size_t> remaining{0};
+    std::atomic<size_t> winner_index{kWhenAnyNoTaskIndex};
+    std::atomic<bool> resume_posted{false};
+    std::mutex exception_mutex;
+    std::exception_ptr first_exception;
+    std::coroutine_handle<> continuation{};
+    std::shared_ptr<CoroutineRuntimeState> runtime;
+  };
+
+  static std::exception_ptr BuildSpawnRejectedException(SpawnResult reason,
+                                                        size_t index) {
+    return std::make_exception_ptr(
+        std::runtime_error("parallel spawn rejected index=" + std::to_string(index) +
+                           " reason=" + ToString(reason)));
+  }
+
+  static Task<void> RunWhenAllBranch(std::shared_ptr<ParallelWaitState> state,
+                                     Task<void> task) {
+    try {
+      co_await std::move(task);
+    } catch (...) {
+      state->RecordException(std::current_exception());
+    }
+    state->CompleteAll();
+    co_return;
+  }
+
+  static Task<void> RunWhenAnyBranch(std::shared_ptr<ParallelWaitState> state,
+                                     size_t index,
+                                     Task<void> task) {
+    std::exception_ptr exception;
+    try {
+      co_await std::move(task);
+    } catch (...) {
+      exception = std::current_exception();
+    }
+    state->CompleteAny(index, exception);
+    co_return;
+  }
 
   template <typename Fn, typename Result>
   class AsyncAwaiter {
@@ -173,28 +603,77 @@ class CoroutineExecutor {
     AsyncAwaiter(CoroutineExecutor* executor,
                  Fn&& fn,
                  std::chrono::steady_clock::duration timeout,
-                 bool enable_timeout)
+                 bool enable_timeout,
+                 std::stop_token stop_token)
         : executor_(executor),
           fn_(std::move(fn)),
           timeout_(timeout),
-          enable_timeout_(enable_timeout) {}
+          enable_timeout_(enable_timeout),
+          stop_token_(stop_token) {}
 
     bool await_ready() const noexcept { return false; }
 
     void await_suspend(std::coroutine_handle<> handle) {
-      executor_->IncrementSuspended();
-      auto state = std::make_shared<AsyncState<Result>>(executor_, handle);
+      auto runtime = executor_ ? executor_->CurrentRuntime() : nullptr;
+      auto lifetime_state = executor_->lifetime_state_;
+      if (!lifetime_state) {
+        asio::post(executor_->io_context_,
+                   [executor = executor_, handle, runtime]() mutable {
+                     if (executor) {
+                       executor->ResumeHandle(handle, runtime, "async_resume_no_lifetime");
+                       return;
+                     }
+                     handle.resume();
+                   });
+        return;
+      }
+
+      lifetime_state->IncrementSuspended();
+      auto state = std::make_shared<AsyncState<Result>>(
+          executor_,
+          lifetime_state,
+          handle,
+          runtime,
+          enable_timeout_ ? "async_with_timeout" : "async");
+      if (executor_ && runtime) {
+        executor_->MarkCoroutineSuspended(runtime, state->suspend_reason.c_str());
+      }
       state_ = state;
 
       if (enable_timeout_) {
-        state->timer = std::make_shared<asio::steady_timer>(executor_->io_context_);
+        state->timer = executor_ ? executor_->AcquireReusableTimer()
+                                 : std::make_shared<asio::steady_timer>(lifetime_state->io_context);
         state->timer->expires_after(timeout_);
         state->timer->async_wait([state](const asio::error_code& ec) {
           if (ec) {
             return;
           }
-          state->TryResume(true);
+          state->TryResume(AsyncCompletion::kTimedOut);
         });
+      }
+
+      if (stop_token_.stop_possible()) {
+        std::weak_ptr<AsyncState<Result>> weak_state = state;
+        stop_callback_ = std::make_unique<StopCallback>(
+            stop_token_,
+            [weak_state]() {
+              auto state = weak_state.lock();
+              if (!state || !state->lifetime_state || state->lifetime_state->IsStopRequested()) {
+                return;
+              }
+
+              state->lifetime_state->IncrementPendingResumeCallbacks();
+              asio::post(state->lifetime_state->io_context, [state]() {
+                state->TryResume(AsyncCompletion::kCancelled);
+                if (!state->lifetime_state) {
+                  return;
+                }
+                state->lifetime_state->DecrementPendingResumeCallbacks();
+              });
+            });
+        if (stop_token_.stop_requested()) {
+          return;
+        }
       }
 
       auto fn = std::move(fn_);
@@ -210,10 +689,20 @@ class CoroutineExecutor {
           state->exception = std::current_exception();
         }
 
-        state->executor->IncrementPendingResumeCallbacks();
-        asio::post(state->executor->io_context_, [state]() {
-          state->TryResume(false);
-          state->executor->DecrementPendingResumeCallbacks();
+        state->MarkWorkerCompleted();
+
+        auto lifetime_state = state->lifetime_state;
+        if (!lifetime_state || lifetime_state->IsStopRequested()) {
+          return;
+        }
+
+        lifetime_state->IncrementPendingResumeCallbacks();
+        asio::post(lifetime_state->io_context, [state]() {
+          state->TryResume(AsyncCompletion::kCompleted);
+          if (!state->lifetime_state) {
+            return;
+          }
+          state->lifetime_state->DecrementPendingResumeCallbacks();
         });
       });
     }
@@ -227,15 +716,22 @@ class CoroutineExecutor {
         throw std::runtime_error("Async awaiter state missing");
       }
 
-      if (state->timed_out) {
+      if (state->completion_reason == AsyncCompletion::kTimedOut) {
         throw TimeoutError("Coroutine operation timed out");
+      }
+
+      if (state->completion_reason == AsyncCompletion::kCancelled) {
+        throw CancelledError("Coroutine operation cancelled");
       }
 
       if (state->exception) {
         std::rethrow_exception(state->exception);
       }
 
-      if constexpr (!std::is_void_v<Result>) {
+      if constexpr (std::is_void_v<Result>) {
+        state->result.Take();
+        return;
+      } else {
         return state->result.Take();
       }
     }
@@ -246,14 +742,25 @@ class CoroutineExecutor {
     std::shared_ptr<AsyncState<Result>> state_;
     std::chrono::steady_clock::duration timeout_{};
     bool enable_timeout_ = false;
+    std::stop_token stop_token_;
+    using StopCallback = std::stop_callback<std::function<void()>>;
+    std::unique_ptr<StopCallback> stop_callback_;
   };
 
   class SleepAwaiter {
    public:
-    SleepAwaiter(CoroutineExecutor* executor, std::chrono::steady_clock::duration duration)
-        : executor_(executor), duration_(duration) {
-      if (duration_ > std::chrono::steady_clock::duration::zero()) {
-        timer_ = std::make_shared<asio::steady_timer>(executor_->io_context_);
+    SleepAwaiter(CoroutineExecutor* executor,
+                 std::shared_ptr<ExecutorLifetimeState> lifetime_state,
+                 std::chrono::steady_clock::duration duration,
+                 std::stop_token stop_token)
+        : executor_(executor),
+          lifetime_state_(std::move(lifetime_state)),
+          duration_(duration),
+          stop_token_(stop_token),
+          runtime_(executor ? executor->CurrentRuntime() : nullptr) {
+      if (lifetime_state_ && duration_ > std::chrono::steady_clock::duration::zero()) {
+        timer_ = executor_ ? executor_->AcquireReusableTimer()
+                           : std::make_shared<asio::steady_timer>(lifetime_state_->io_context);
         timer_->expires_after(duration_);
       }
     }
@@ -263,20 +770,94 @@ class CoroutineExecutor {
     }
 
     void await_suspend(std::coroutine_handle<> handle) {
-      if (!timer_) {
-        handle.resume();
+      if (!lifetime_state_) {
         return;
       }
 
-      executor_->IncrementSuspended();
-      timer_->async_wait([this, handle, timer = timer_](const asio::error_code& ec) {
+      if (stop_token_.stop_possible()) {
+        std::weak_ptr<asio::steady_timer> weak_timer = timer_;
+        auto lifetime_state = lifetime_state_;
+        stop_callback_ = std::make_unique<StopCallback>(
+            stop_token_,
+            [this, weak_timer, lifetime_state]() {
+              cancelled_.store(true, std::memory_order_release);
+              if (auto timer = weak_timer.lock()) {
+                asio::error_code ignored;
+                timer->cancel(ignored);
+                return;
+              }
+              if (!lifetime_state || lifetime_state->IsStopRequested()) {
+                return;
+              }
+              asio::post(lifetime_state->io_context, [this]() {
+                if (continuation_) {
+                  if (executor_) {
+                    executor_->ResumeHandle(continuation_, runtime_, "sleep_cancelled");
+                    return;
+                  }
+                  continuation_.resume();
+                }
+              });
+            });
+      }
+
+      if (!timer_) {
+        // Resume via post to avoid inline resume on await_suspend path.
+        asio::post(lifetime_state_->io_context,
+                   [this, handle]() mutable {
+                     if (executor_) {
+                       executor_->ResumeHandle(handle, runtime_, "sleep_resume_posted");
+                       return;
+                     }
+                     handle.resume();
+                   });
+        return;
+      }
+
+      if (stop_token_.stop_requested()) {
+        cancelled_.store(true, std::memory_order_release);
+        asio::post(lifetime_state_->io_context,
+                   [this, handle]() mutable {
+                     if (executor_) {
+                       executor_->ResumeHandle(handle, runtime_, "sleep_cancelled");
+                       return;
+                     }
+                     handle.resume();
+                   });
+        return;
+      }
+
+      continuation_ = handle;
+      lifetime_state_->IncrementSuspended();
+      if (executor_ && runtime_) {
+        executor_->MarkCoroutineSuspended(runtime_, "sleep_for");
+      }
+      timer_->async_wait([this, handle, timer = timer_, lifetime_state = lifetime_state_]
+                         (const asio::error_code& ec) {
         error_ = ec;
-        executor_->DecrementSuspended();
+        if (!lifetime_state) {
+          return;
+        }
+        lifetime_state->DecrementSuspended();
+        if (lifetime_state->IsStopRequested()) {
+          return;
+        }
+        if (executor_) {
+          const char* reason =
+              cancelled_.load(std::memory_order_acquire)
+                  ? "sleep_cancelled"
+                  : "sleep_ready";
+          executor_->ResumeHandle(handle, runtime_, reason);
+          return;
+        }
         handle.resume();
       });
     }
 
     void await_resume() {
+      if (cancelled_.load(std::memory_order_acquire)) {
+        throw CancelledError("SleepFor cancelled");
+      }
       if (error_ && error_ != asio::error::operation_aborted) {
         throw std::runtime_error("SleepFor failed: " + error_.message());
       }
@@ -284,9 +865,137 @@ class CoroutineExecutor {
 
    private:
     CoroutineExecutor* executor_ = nullptr;
+    std::shared_ptr<ExecutorLifetimeState> lifetime_state_;
     std::chrono::steady_clock::duration duration_{};
     std::shared_ptr<asio::steady_timer> timer_;
     asio::error_code error_;
+    std::stop_token stop_token_;
+    std::atomic<bool> cancelled_{false};
+    std::coroutine_handle<> continuation_{};
+    std::shared_ptr<CoroutineRuntimeState> runtime_;
+    using StopCallback = std::stop_callback<std::function<void()>>;
+    std::unique_ptr<StopCallback> stop_callback_;
+  };
+
+  class WhenAllAwaiter {
+   public:
+    WhenAllAwaiter(CoroutineExecutor* executor,
+                   std::vector<Task<void>>&& tasks,
+                   ParallelSpawnRejectedCallback&& on_spawn_rejected)
+        : executor_(executor),
+          tasks_(std::move(tasks)),
+          on_spawn_rejected_(std::move(on_spawn_rejected)) {}
+
+    bool await_ready() const noexcept { return tasks_.empty(); }
+
+    bool await_suspend(std::coroutine_handle<> continuation) {
+      if (!executor_) {
+        return false;
+      }
+      state_ = std::make_shared<ParallelWaitState>(
+          executor_,
+          executor_->io_context_,
+          tasks_.size(),
+          executor_->CurrentRuntime());
+      state_->continuation = continuation;
+
+      for (size_t i = 0; i < tasks_.size(); ++i) {
+        SpawnResult result =
+            executor_->TrySpawn(RunWhenAllBranch(state_, std::move(tasks_[i])));
+        if (result == SpawnResult::kSpawned) {
+          continue;
+        }
+        if (on_spawn_rejected_) {
+          on_spawn_rejected_(i, result);
+        } else {
+          state_->RecordException(BuildSpawnRejectedException(result, i));
+        }
+        state_->CompleteAll();
+      }
+      tasks_.clear();
+      return true;
+    }
+
+    void await_resume() {
+      if (!state_) {
+        return;
+      }
+      std::exception_ptr exception;
+      {
+        std::lock_guard<std::mutex> lock(state_->exception_mutex);
+        exception = state_->first_exception;
+      }
+      if (exception) {
+        std::rethrow_exception(exception);
+      }
+    }
+
+   private:
+    CoroutineExecutor* executor_ = nullptr;
+    std::vector<Task<void>> tasks_;
+    ParallelSpawnRejectedCallback on_spawn_rejected_;
+    std::shared_ptr<ParallelWaitState> state_;
+  };
+
+  class WhenAnyAwaiter {
+   public:
+    WhenAnyAwaiter(CoroutineExecutor* executor,
+                   std::vector<Task<void>>&& tasks,
+                   ParallelSpawnRejectedCallback&& on_spawn_rejected)
+        : executor_(executor),
+          tasks_(std::move(tasks)),
+          on_spawn_rejected_(std::move(on_spawn_rejected)) {}
+
+    bool await_ready() const noexcept { return tasks_.empty(); }
+
+    bool await_suspend(std::coroutine_handle<> continuation) {
+      if (!executor_) {
+        return false;
+      }
+      state_ = std::make_shared<ParallelWaitState>(
+          executor_,
+          executor_->io_context_,
+          tasks_.size(),
+          executor_->CurrentRuntime());
+      state_->continuation = continuation;
+
+      for (size_t i = 0; i < tasks_.size(); ++i) {
+        SpawnResult result =
+            executor_->TrySpawn(RunWhenAnyBranch(state_, i, std::move(tasks_[i])));
+        if (result == SpawnResult::kSpawned) {
+          continue;
+        }
+        if (on_spawn_rejected_) {
+          on_spawn_rejected_(i, result);
+        } else {
+          state_->RecordException(BuildSpawnRejectedException(result, i));
+        }
+        state_->CompleteAny(i);
+      }
+      tasks_.clear();
+      return true;
+    }
+
+    size_t await_resume() {
+      if (!state_) {
+        return kWhenAnyNoTaskIndex;
+      }
+      std::exception_ptr exception;
+      {
+        std::lock_guard<std::mutex> lock(state_->exception_mutex);
+        exception = state_->first_exception;
+      }
+      if (exception) {
+        std::rethrow_exception(exception);
+      }
+      return state_->winner_index.load(std::memory_order_acquire);
+    }
+
+   private:
+    CoroutineExecutor* executor_ = nullptr;
+    std::vector<Task<void>> tasks_;
+    ParallelSpawnRejectedCallback on_spawn_rejected_;
+    std::shared_ptr<ParallelWaitState> state_;
   };
 
   void IncrementSuspended();
@@ -295,24 +1004,82 @@ class CoroutineExecutor {
   void DecrementRunning();
   void IncrementPendingResumeCallbacks();
   void DecrementPendingResumeCallbacks();
-  bool BeginSpawn();
+  void IncrementTimeoutBackgroundInflight();
+  void DecrementTimeoutBackgroundInflight();
+  void IncrementTimeoutBackgroundTotal();
+  std::shared_ptr<asio::steady_timer> AcquireReusableTimer();
+  static void RecycleTimer(std::weak_ptr<ReusableTimerPool> weak_pool,
+                           asio::steady_timer* timer) noexcept;
+  void IncrementMetricCounter(const std::string& name, uint64_t delta = 1) const;
+  void SetMetricGauge(const std::string& name, double value) const;
+  SpawnResult BeginSpawn();
+  void RecordSpawnRejected(SpawnResult reason) noexcept;
+  void StopStarvationWatchdog() noexcept;
+  void RunStarvationWatchdog(std::stop_token stop_token);
   bool IsDrained() const noexcept;
   void NotifyDrainWaiters() noexcept;
   bool WaitForDrain(std::chrono::steady_clock::duration timeout);
+  std::shared_ptr<CoroutineRuntimeState> RegisterCoroutine(CoroutineMetadata metadata);
+  void CompleteCoroutine(const std::shared_ptr<CoroutineRuntimeState>& runtime);
+  void ResumeHandle(std::coroutine_handle<> handle,
+                    const std::shared_ptr<CoroutineRuntimeState>& runtime,
+                    const char* reason);
+  std::shared_ptr<CoroutineRuntimeState> CurrentRuntime() const;
+  void MarkCoroutineRunning(const std::shared_ptr<CoroutineRuntimeState>& runtime,
+                            const char* reason);
+  void MarkCoroutineSuspended(const std::shared_ptr<CoroutineRuntimeState>& runtime,
+                              const char* reason);
+  CoroutineSnapshot BuildSnapshotLocked(
+      const CoroutineRuntimeState& runtime,
+      std::chrono::steady_clock::time_point now) const;
+  void EmitTraceInstant(const char* phase,
+                        const CoroutineRuntimeState& runtime,
+                        std::chrono::steady_clock::time_point ts,
+                        const char* reason);
+  std::string BuildHandlerGaugeMetricName(const std::string& handler_key) const;
 
   asio::io_context& io_context_;
   asio::thread_pool blocking_pool_;
+  std::shared_ptr<ExecutorLifetimeState> lifetime_state_;
   std::atomic<int64_t> suspended_count_{0};
   std::atomic<int64_t> running_count_{0};
   std::atomic<int64_t> pending_resume_callbacks_{0};
+  std::atomic<int64_t> timeout_background_inflight_{0};
   std::atomic<bool> accepting_tasks_{true};
   std::atomic<bool> blocking_pool_joined_{false};
+  std::shared_ptr<monitor::IMetricsSink> metrics_sink_;
+  std::shared_ptr<ReusableTimerPool> timer_pool_;
+  const int64_t max_running_tasks_;
+  std::chrono::steady_clock::duration starvation_watchdog_threshold_{};
+  std::chrono::steady_clock::duration starvation_watchdog_poll_interval_{};
+  std::jthread starvation_watchdog_thread_;
+  mutable std::mutex coroutine_mutex_;
+  std::unordered_map<uint64_t, std::shared_ptr<CoroutineRuntimeState>> active_coroutines_;
+  std::unordered_map<std::string, int64_t> handler_inflight_counts_;
+  std::unordered_map<std::string, std::string> handler_metric_names_;
+  std::shared_ptr<TraceWriter> trace_writer_;
+  std::atomic<uint64_t> next_coroutine_id_{1};
+  std::atomic<uint64_t> next_trace_id_{1};
   mutable std::mutex drain_mutex_;
   std::condition_variable drain_cv_;
 };
 
-inline Task<void> CoroutineExecutor::SleepFor(std::chrono::steady_clock::duration duration) {
-  co_await SleepAwaiter(this, duration);
+inline Task<void> CoroutineExecutor::SleepFor(std::chrono::steady_clock::duration duration,
+                                              std::stop_token stop_token) {
+  co_await SleepAwaiter(this, lifetime_state_, duration, stop_token);
+}
+
+inline Task<void> CoroutineExecutor::WhenAll(
+    std::vector<Task<void>> tasks,
+    ParallelSpawnRejectedCallback on_spawn_rejected) {
+  co_await WhenAllAwaiter(this, std::move(tasks), std::move(on_spawn_rejected));
+}
+
+inline Task<size_t> CoroutineExecutor::WhenAny(
+    std::vector<Task<void>> tasks,
+    ParallelSpawnRejectedCallback on_spawn_rejected) {
+  co_return co_await WhenAnyAwaiter(
+      this, std::move(tasks), std::move(on_spawn_rejected));
 }
 
 }  // namespace mir2::logic

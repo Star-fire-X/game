@@ -54,10 +54,13 @@ mir2::game::map::MapTileData BuildTileData(
 mir2::logic::MovementValidator MakeValidator(
     const mir2::game::map::MapInstance& map,
     int max_steps = 20,
-    float speed_tolerance = 1.2f) {
+    float speed_tolerance = 1.2f,
+    mir2::logic::MovementValidator::Config::DistanceMetric metric =
+        mir2::logic::MovementValidator::Config::DistanceMetric::kEuclidean) {
   mir2::logic::MovementValidator::Config config;
   config.max_steps = max_steps;
   config.speed_tolerance = speed_tolerance;
+  config.distance_metric = metric;
   return mir2::logic::MovementValidator(map, config);
 }
 
@@ -131,6 +134,48 @@ TEST(MovementValidatorTest, SpeedViolationReturnsError) {
 
   const auto code = validator.Validate({1, 1}, {11, 1}, 3, 1000, 1500);
   EXPECT_EQ(code, mir2::common::ErrorCode::kSpeedViolation);
+}
+
+TEST(MovementValidatorTest, ChebyshevMetricAllowsDiagonalAtGridSpeed) {
+  mir2::game::map::MapInstance map(
+      70, 20, 20, mir2::game::map::AOIManager::kDefaultGridSize,
+      BuildWalkability(20, 20, {}));
+  auto validator = MakeValidator(
+      map,
+      50,
+      1.0f,
+      mir2::logic::MovementValidator::Config::DistanceMetric::kChebyshev);
+
+  const auto code = validator.Validate({1, 1}, {2, 2}, 1, 1000, 2000);
+  EXPECT_EQ(code, mir2::common::ErrorCode::kOk);
+}
+
+TEST(MovementValidatorTest, ManhattanMetricRejectsFastDiagonal) {
+  mir2::game::map::MapInstance map(
+      71, 20, 20, mir2::game::map::AOIManager::kDefaultGridSize,
+      BuildWalkability(20, 20, {}));
+  auto validator = MakeValidator(
+      map,
+      50,
+      1.0f,
+      mir2::logic::MovementValidator::Config::DistanceMetric::kManhattan);
+
+  const auto code = validator.Validate({1, 1}, {2, 2}, 1, 1000, 2000);
+  EXPECT_EQ(code, mir2::common::ErrorCode::kSpeedViolation);
+}
+
+TEST(MovementValidatorTest, StepBasedMetricMatchesChebyshevDistance) {
+  mir2::game::map::MapInstance map(
+      72, 20, 20, mir2::game::map::AOIManager::kDefaultGridSize,
+      BuildWalkability(20, 20, {}));
+  auto validator = MakeValidator(
+      map,
+      50,
+      1.0f,
+      mir2::logic::MovementValidator::Config::DistanceMetric::kStepBased);
+
+  const auto code = validator.Validate({1, 1}, {2, 2}, 1, 1000, 2000);
+  EXPECT_EQ(code, mir2::common::ErrorCode::kOk);
 }
 
 TEST(MovementValidatorTest, InvalidTimeDeltaIsSpeedViolation) {

@@ -28,7 +28,21 @@ void RoleStore::BindClientRole(uint64_t client_id, uint64_t player_id) {
     return;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+
+  // Remove old reverse mapping if this client was bound to another role
+  auto old_it = client_roles_.find(client_id);
+  if (old_it != client_roles_.end() && old_it->second != player_id) {
+    role_clients_.erase(old_it->second);
+  }
+
+  // Remove old client if this role was bound to another client
+  auto old_client_it = role_clients_.find(player_id);
+  if (old_client_it != role_clients_.end() && old_client_it->second != client_id) {
+    client_roles_.erase(old_client_it->second);
+  }
+
   client_roles_[client_id] = player_id;
+  role_clients_[player_id] = client_id;
 }
 
 std::optional<uint64_t> RoleStore::GetRoleId(uint64_t client_id) const {
@@ -40,11 +54,27 @@ std::optional<uint64_t> RoleStore::GetRoleId(uint64_t client_id) const {
   return it->second;
 }
 
+std::optional<uint64_t> RoleStore::GetClientIdByRoleId(uint64_t player_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = role_clients_.find(player_id);
+  if (it == role_clients_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 void RoleStore::UnbindClient(uint64_t client_id) {
   if (client_id == 0) {
     return;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+
+  // Remove reverse mapping
+  auto role_it = client_roles_.find(client_id);
+  if (role_it != client_roles_.end()) {
+    role_clients_.erase(role_it->second);
+  }
+
   client_accounts_.erase(client_id);
   client_roles_.erase(client_id);
 }

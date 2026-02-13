@@ -6,16 +6,13 @@
 namespace mir2::gateway {
 
 namespace {
-constexpr const char* kBufferSizeMetric = "gateway.holding.buffer_size_bytes";
 constexpr const char* kDroppedRealtimeMetric = "gateway.holding.dropped_realtime";
 }
 
 ConnectionHolder::ConnectionHolder(size_t buffer_capacity_bytes,
                                    size_t disconnect_threshold_bytes)
     : buffer_(buffer_capacity_bytes),
-      disconnect_threshold_bytes_(disconnect_threshold_bytes) {
-  UpdateBufferGauge();
-}
+      disconnect_threshold_bytes_(disconnect_threshold_bytes) {}
 
 ConnectionHolder::State ConnectionHolder::GetState() const {
   return state_;
@@ -85,7 +82,6 @@ ConnectionHolder::Action ConnectionHolder::HandleClientMessage(
     return Action::kDisconnect;
   }
 
-  UpdateBufferGauge();
   return Action::kBuffered;
 }
 
@@ -93,7 +89,6 @@ bool ConnectionHolder::PopBufferedMessage(BufferedMessage* out_message) {
   if (!buffer_.Pop(out_message)) {
     return false;
   }
-  UpdateBufferGauge();
   return true;
 }
 
@@ -122,7 +117,6 @@ void ConnectionHolder::ResetHoldingState() {
   holding_bytes_total_ = 0;
   dropped_realtime_bytes_ = 0;
   should_disconnect_ = false;
-  UpdateBufferGauge();
 }
 
 bool ConnectionHolder::ShouldDropRealtime(uint16_t msg_id,
@@ -134,11 +128,6 @@ bool ConnectionHolder::ShouldDropRealtime(uint16_t msg_id,
     return true;
   }
   return false;
-}
-
-void ConnectionHolder::UpdateBufferGauge() {
-  monitor::Metrics::Instance().SetGauge(kBufferSizeMetric,
-                                        static_cast<int64_t>(buffer_.Size()));
 }
 
 }  // namespace mir2::gateway

@@ -69,3 +69,27 @@ table DeclareWarRequest {
 table MakeAllianceRequest {
   target_guild_id: uint;
 }
+
+table JoinGuildResponse {
+  success: bool;
+  error_code: int;
+}
+
+table LeaveGuildResponse {
+  success: bool;
+  error_code: int;
+}
+
+table DeclareWarResponse {
+  success: bool;
+  error_code: int;
+}
+
+table CancelWarRequest {
+  target_guild_id: uint;
+}
+
+table CancelWarResponse {
+  success: bool;
+  error_code: int;
+}

@@ -6,9 +6,20 @@
 #include "storage_engine/backends/common/account_storage_codec.h"
 #include "log/logger.h"
 #include "logic/coroutine_executor.h"
+#include "monitor/metrics.h"
 #include "storage_engine/storage_engine.h"
 
 namespace mir2::logic {
+namespace {
+
+constexpr const char* kMetricLoginSpawnRejectedNotAcceptingTotal =
+    "logic.login.spawn_rejected_not_accepting_total";
+constexpr const char* kMetricLoginSpawnRejectedOverLimitTotal =
+    "logic.login.spawn_rejected_over_limit_total";
+constexpr const char* kMetricLoginSpawnRejectedInvalidTaskTotal =
+    "logic.login.spawn_rejected_invalid_task_total";
+
+}  // namespace
 
 StorageLoginService::StorageLoginService(
     CoroutineExecutor& executor,
@@ -42,7 +53,42 @@ void StorageLoginService::Login(const std::string& username,
     return;
   }
 
-  executor_.Spawn(LoginAsync(username, password, std::move(callback)));
+  LoginCallback callback_for_task = callback;
+  executor_.SpawnOrDrop(
+      LoginAsync(username, password, std::move(callback_for_task)),
+      [callback = std::move(callback)](SpawnResult reason) mutable {
+        if (!callback) {
+          return;
+        }
+
+        monitor::Metrics::Instance().IncrementCounter(
+            monitor::Metrics::kLoginSpawnRejectedTotal);
+        LoginResult result;
+        switch (reason) {
+          case SpawnResult::kOverLimit:
+            monitor::Metrics::Instance().IncrementCounter(
+                kMetricLoginSpawnRejectedOverLimitTotal);
+            result.code = mir2::common::ErrorCode::SERVER_OVERLOADED;
+            break;
+          case SpawnResult::kNotAccepting:
+            monitor::Metrics::Instance().IncrementCounter(
+                kMetricLoginSpawnRejectedNotAcceptingTotal);
+            result.code = mir2::common::ErrorCode::SERVER_MAINTENANCE;
+            break;
+          case SpawnResult::kInvalidTask:
+            monitor::Metrics::Instance().IncrementCounter(
+                kMetricLoginSpawnRejectedInvalidTaskTotal);
+            result.code = mir2::common::ErrorCode::kUnknown;
+            break;
+          case SpawnResult::kSpawned:
+            result.code = mir2::common::ErrorCode::kUnknown;
+            break;
+        }
+
+        SYSLOG_WARN("StorageLoginService login dropped before spawn reason={}",
+                    ToString(reason));
+        callback(result);
+      });
 }
 
 Task<void> StorageLoginService::LoginAsync(std::string username,

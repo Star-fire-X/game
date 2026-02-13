@@ -4,9 +4,8 @@
 
 #include <atomic>
 #include <coroutine>
+#include <exception>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <utility>
 #include <vector>
 
@@ -50,8 +49,7 @@ struct LoginAwaitState {
 
   CoroutineExecutor& executor;
   std::coroutine_handle<> continuation;
-  std::mutex mutex;
-  std::optional<LoginResult> result;
+  std::shared_ptr<LoginResult> result;
   std::atomic<bool> completed{false};
   std::atomic<bool> cancelled{false};
 };
@@ -87,14 +85,8 @@ class LoginAwaiter {
           if (state->cancelled.load(std::memory_order_acquire)) {
             return;
           }
-
-          {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (state->cancelled.load(std::memory_order_acquire)) {
-              return;
-            }
-            state->result = result;
-          }
+          std::atomic_store_explicit(
+              &state->result, std::make_shared<LoginResult>(result), std::memory_order_release);
 
           asio::post(state->executor.GetIoContext(),
                      [state]() {
@@ -113,13 +105,13 @@ class LoginAwaiter {
       return result;
     }
 
-    std::lock_guard<std::mutex> lock(state_->mutex);
-    if (!state_->result.has_value()) {
+    auto result = std::atomic_load_explicit(&state_->result, std::memory_order_acquire);
+    if (!result) {
       LoginResult result;
       result.code = mir2::common::ErrorCode::kUnknown;
       return result;
     }
-    return std::move(*state_->result);
+    return std::move(*result);
   }
 
  private:
@@ -146,42 +138,71 @@ LoginHandler::LoginHandler(CoroutineExecutor& executor,
 Task<void> LoginHandler::HandleMessage(HandlerContext ctx,
                                        const uint8_t* payload,
                                        size_t payload_size) {
-  if (!payload || payload_size == 0) {
-    SYSLOG_WARN("LoginHandler ignored empty payload (client_id={})", ctx.client_id);
-    auto error_payload = BuildLoginResponsePayload(mir2::common::ErrorCode::kInvalidAction, 0, "");
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kLoginRsp),
-        std::move(error_payload));
-    co_return;
+  bool send_fallback_unknown = false;
+
+  try {
+    if (!payload || payload_size == 0) {
+      SYSLOG_WARN("LoginHandler ignored empty payload (client_id={})", ctx.client_id);
+      auto error_payload = BuildLoginResponsePayload(mir2::common::ErrorCode::kInvalidAction, 0, "");
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kLoginRsp),
+          std::move(error_payload));
+      co_return;
+    }
+
+    mir2::common::LoginRequest request;
+    const auto status = mir2::common::DecodeLoginRequest(
+        static_cast<uint16_t>(mir2::common::MsgId::kLoginReq),
+        payload,
+        payload_size,
+        &request);
+    if (status != mir2::common::MessageCodecStatus::kOk) {
+      SYSLOG_WARN("LoginHandler decode failed (client_id={}, status={})",
+                  ctx.client_id, static_cast<int>(status));
+      auto error_payload = BuildLoginResponsePayload(ToCommonError(status), 0, "");
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kLoginRsp),
+          std::move(error_payload));
+      co_return;
+    }
+
+    co_await HandleLogin(std::move(ctx), request);
+  } catch (const std::exception& ex) {
+    role_store_.UnbindClient(ctx.client_id);
+    client_registry_.Remove(ctx.client_id);
+    SYSLOG_ERROR("LoginHandler exception (client_id={}): {}", ctx.client_id, ex.what());
+    send_fallback_unknown = true;
+  } catch (...) {
+    role_store_.UnbindClient(ctx.client_id);
+    client_registry_.Remove(ctx.client_id);
+    SYSLOG_ERROR("LoginHandler unknown exception (client_id={})", ctx.client_id);
+    send_fallback_unknown = true;
   }
 
-  mir2::common::LoginRequest request;
-  const auto status = mir2::common::DecodeLoginRequest(
-      static_cast<uint16_t>(mir2::common::MsgId::kLoginReq),
-      payload,
-      payload_size,
-      &request);
-  if (status != mir2::common::MessageCodecStatus::kOk) {
-    SYSLOG_WARN("LoginHandler decode failed (client_id={}, status={})",
-                ctx.client_id, static_cast<int>(status));
-    auto error_payload = BuildLoginResponsePayload(ToCommonError(status), 0, "");
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kLoginRsp),
-        std::move(error_payload));
-    co_return;
+  if (send_fallback_unknown) {
+    try {
+      auto error_payload = BuildLoginResponsePayload(mir2::common::ErrorCode::kUnknown, 0, "");
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kLoginRsp),
+          std::move(error_payload));
+    } catch (const std::exception& send_ex) {
+      SYSLOG_ERROR("LoginHandler failed to send fallback response (client_id={}): {}",
+                   ctx.client_id, send_ex.what());
+    } catch (...) {
+      SYSLOG_ERROR("LoginHandler failed to send fallback response (client_id={})",
+                   ctx.client_id);
+    }
   }
-
-  co_await HandleLogin(std::move(ctx), request);
 }
 
 Task<void> LoginHandler::HandleLogin(HandlerContext ctx,
                                      const mir2::common::LoginRequest& req) {
   // Rate limit per username to prevent brute-force attacks
   if (!login_rate_limiter_.TryAcquire(req.username)) {
-    SYSLOG_WARN("LoginHandler rate limited user={} client_id={}",
-                req.username, ctx.client_id);
+    SYSLOG_WARN("LoginHandler rate limited (client_id={})", ctx.client_id);
     auto payload = BuildLoginResponsePayload(
         mir2::common::ErrorCode::RATE_LIMITED, 0, "");
     co_await response_sender_.SendAsync(
@@ -192,26 +213,32 @@ Task<void> LoginHandler::HandleLogin(HandlerContext ctx,
   }
 
   const auto result = co_await AwaitLogin(req.username, req.password);
-  if (result.code == mir2::common::ErrorCode::kOk) {
+  mir2::common::ErrorCode response_code = result.code;
+  uint64_t response_account_id = result.account_id;
+  std::string response_token = result.token;
+
+  if (result.code == mir2::common::ErrorCode::kOk && result.account_id != 0) {
     client_registry_.Track(ctx.client_id);
-    if (result.account_id != 0) {
-      role_store_.BindClientAccount(ctx.client_id, result.account_id);
-    } else {
-      SYSLOG_WARN("LoginHandler success without account_id (client_id={})", ctx.client_id);
-      role_store_.UnbindClient(ctx.client_id);
-    }
+    role_store_.BindClientAccount(ctx.client_id, result.account_id);
   } else {
+    if (result.code == mir2::common::ErrorCode::kOk && result.account_id == 0) {
+      SYSLOG_WARN("LoginHandler success without account_id (client_id={})", ctx.client_id);
+      response_code = mir2::common::ErrorCode::kUnknown;
+      response_account_id = 0;
+      response_token.clear();
+    }
     role_store_.UnbindClient(ctx.client_id);
+    client_registry_.Remove(ctx.client_id);
   }
 
-  auto payload = BuildLoginResponsePayload(result.code, result.account_id, result.token);
+  auto payload = BuildLoginResponsePayload(response_code, response_account_id, response_token);
   co_await response_sender_.SendAsync(
       ctx.client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kLoginRsp),
       std::move(payload));
 
-  SYSLOG_DEBUG("LoginHandler login user={} client_id={} code={}",
-               req.username, ctx.client_id, static_cast<int>(result.code));
+  SYSLOG_DEBUG("LoginHandler login client_id={} account_id={} code={}",
+               ctx.client_id, response_account_id, static_cast<int>(response_code));
 }
 
 Task<LoginResult> LoginHandler::AwaitLogin(const std::string& username,

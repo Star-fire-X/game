@@ -2,14 +2,18 @@
 
 #include <flatbuffers/flatbuffers.h>
 
+#include <algorithm>
+#include <charconv>
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "common/enums.h"
 #include "common/protocol/message_codec.h"
+#include "config/config_manager.h"
 #include "core/utils.h"
 #include "ecs/components/character_components.h"
 #include "ecs/character_entity_manager.h"
@@ -18,9 +22,9 @@
 #include "game_generated.h"
 #include "ecs/systems/teleport_system.h"
 #include "log/logger.h"
-#include "logic/coroutine_executor.h"
 #include "logic/handlers/handler_error_utils.h"
 #include "logic/response_sender.h"
+#include "logic/services/session_role_store.h"
 #include "security/anti_cheat.h"
 
 namespace mir2::logic {
@@ -42,7 +46,14 @@ std::vector<uint8_t> BuildMoveRsp(mir2::common::ErrorCode code, int x, int y) {
   response.code = mir2::proto::ErrorCode::ERR_UNKNOWN;
   response.x = 0;
   response.y = 0;
-  return mir2::common::EncodeMoveResponse(response, nullptr);
+  mir2::common::MessageCodecStatus fallback_status = mir2::common::MessageCodecStatus::kOk;
+  auto fallback_payload = mir2::common::EncodeMoveResponse(response, &fallback_status);
+  if (fallback_status != mir2::common::MessageCodecStatus::kOk) {
+    SYSLOG_ERROR("BuildMoveRsp fallback encode failed (status={})",
+                 static_cast<int>(fallback_status));
+    return {};
+  }
+  return fallback_payload;
 }
 
 std::vector<uint8_t> BuildEntityMove(uint64_t entity_id, int x, int y, uint8_t direction) {
@@ -56,14 +67,15 @@ std::vector<uint8_t> BuildEntityMove(uint64_t entity_id, int x, int y, uint8_t d
 
 bool MapViolationToCheat(mir2::common::ErrorCode code,
                          mir2::security::CheatType* out_type,
-                         int* out_severity) {
+                         int* out_severity,
+                         const MovementHandler::AntiCheatConfig& config) {
   switch (code) {
     case mir2::common::ErrorCode::kSpeedViolation:
       if (out_type) {
         *out_type = mir2::security::CheatType::kSpeedHack;
       }
       if (out_severity) {
-        *out_severity = 10;
+        *out_severity = config.speed_violation_severity;
       }
       return true;
     case mir2::common::ErrorCode::kTargetOutOfRange:
@@ -73,7 +85,7 @@ bool MapViolationToCheat(mir2::common::ErrorCode code,
         *out_type = mir2::security::CheatType::kTeleportHack;
       }
       if (out_severity) {
-        *out_severity = 5;
+        *out_severity = config.teleport_violation_severity;
       }
       return true;
     default:
@@ -85,47 +97,59 @@ bool TryParseMapId(const std::string& value, int32_t* out) {
   if (!out) {
     return false;
   }
-  try {
-    size_t pos = 0;
-    const long long parsed = std::stoll(value, &pos, 10);
-    if (pos != value.size()) {
-      return false;
-    }
-    if (parsed < std::numeric_limits<int32_t>::min() ||
-        parsed > std::numeric_limits<int32_t>::max()) {
-      return false;
-    }
-    *out = static_cast<int32_t>(parsed);
-    return true;
-  } catch (const std::exception&) {
+  if (value.empty()) {
     return false;
   }
+  int32_t parsed = 0;
+  const auto* begin = value.data();
+  const auto* end = begin + value.size();
+  const auto [ptr, ec] = std::from_chars(begin, end, parsed, 10);
+  if (ec != std::errc() || ptr != end) {
+    return false;
+  }
+  *out = parsed;
+  return true;
+}
+
+mir2::common::Direction ComputeDirection(const mir2::common::Position& from,
+                                         const mir2::common::Position& to,
+                                         mir2::common::Direction fallback) {
+  const int dx = to.x - from.x;
+  const int dy = to.y - from.y;
+  if (dx == 0 && dy == 0) {
+    return fallback;
+  }
+
+  const int step_x = (dx > 0) ? 1 : ((dx < 0) ? -1 : 0);
+  const int step_y = (dy > 0) ? 1 : ((dy < 0) ? -1 : 0);
+
+  if (step_x == 0 && step_y < 0) {
+    return mir2::common::Direction::UP;
+  }
+  if (step_x > 0 && step_y < 0) {
+    return mir2::common::Direction::UP_RIGHT;
+  }
+  if (step_x > 0 && step_y == 0) {
+    return mir2::common::Direction::RIGHT;
+  }
+  if (step_x > 0 && step_y > 0) {
+    return mir2::common::Direction::DOWN_RIGHT;
+  }
+  if (step_x == 0 && step_y > 0) {
+    return mir2::common::Direction::DOWN;
+  }
+  if (step_x < 0 && step_y > 0) {
+    return mir2::common::Direction::DOWN_LEFT;
+  }
+  if (step_x < 0 && step_y == 0) {
+    return mir2::common::Direction::LEFT;
+  }
+  return mir2::common::Direction::UP_LEFT;
 }
 
 }  // namespace
 
-MovementHandler::MovementHandler(CoroutineExecutor& executor,
-                                 ResponseSender& response_sender,
-                                 ClientRegistry& registry,
-                                 mir2::ecs::CharacterEntityManager& character_manager,
-                                 mir2::game::map::SceneManager& scene_manager,
-                                 uint32_t default_map_id,
-                                 MovementValidator::Config validator_config,
-                                 mir2::ecs::TeleportSystem* teleport_system,
-                                 mir2::game::map::GateManager* gate_manager)
-    : executor_(executor),
-      response_sender_(response_sender),
-      client_registry_(registry),
-      character_manager_(character_manager),
-      scene_manager_(scene_manager),
-      ecs_registry_(nullptr),
-      teleport_system_(teleport_system),
-      gate_manager_(gate_manager),
-      default_map_id_(default_map_id),
-      validator_config_(validator_config) {}
-
-MovementHandler::MovementHandler(CoroutineExecutor& executor,
-                                 ResponseSender& response_sender,
+MovementHandler::MovementHandler(ResponseSender& response_sender,
                                  ClientRegistry& registry,
                                  mir2::ecs::CharacterEntityManager& character_manager,
                                  mir2::game::map::SceneManager& scene_manager,
@@ -133,15 +157,18 @@ MovementHandler::MovementHandler(CoroutineExecutor& executor,
                                  uint32_t default_map_id,
                                  MovementValidator::Config validator_config,
                                  mir2::ecs::TeleportSystem* teleport_system,
-                                 mir2::game::map::GateManager* gate_manager)
-    : executor_(executor),
-      response_sender_(response_sender),
+                                 mir2::game::map::GateManager* gate_manager,
+                                 RoleStore* role_store,
+                                 AntiCheatConfig anti_cheat_config)
+    : response_sender_(response_sender),
       client_registry_(registry),
       character_manager_(character_manager),
       scene_manager_(scene_manager),
-      ecs_registry_(&ecs_registry),
+      ecs_registry_(ecs_registry),
       teleport_system_(teleport_system),
       gate_manager_(gate_manager),
+      role_store_(role_store),
+      anti_cheat_config_(anti_cheat_config),
       default_map_id_(default_map_id),
       validator_config_(validator_config) {}
 
@@ -200,82 +227,117 @@ Task<void> MovementHandler::HandleMove(HandlerContext ctx,
   uint32_t map_id = default_map_id_;
   const int64_t now_ms = mir2::core::GetCurrentTimestampMs();
   bool should_broadcast = false;
+  uint8_t broadcast_direction = static_cast<uint8_t>(mir2::common::Direction::DOWN);
+  std::vector<uint64_t> recipient_client_ids;
   entt::entity entity = ctx.entity;
   std::optional<mir2::game::map::GateInfo> triggered_gate;
+  entt::registry* registry = ctx.registry != nullptr ? ctx.registry : &ecs_registry_;
 
-  {
-    std::lock_guard<std::mutex> lock(move_mutex_);
-    entt::registry* registry = ctx.registry != nullptr ? ctx.registry : ecs_registry_;
-
-    if (!registry || entity == entt::null || !registry->valid(entity)) {
+  if (!registry || entity == entt::null || !registry->valid(entity)) {
+    result = mir2::common::ErrorCode::kInvalidAction;
+  } else {
+    const auto* identity = registry->try_get<mir2::ecs::CharacterIdentityComponent>(entity);
+    if (!identity || identity->id == 0) {
       result = mir2::common::ErrorCode::kInvalidAction;
     } else {
-      const auto* identity = registry->try_get<mir2::ecs::CharacterIdentityComponent>(entity);
-      if (!identity || identity->id == 0) {
-        result = mir2::common::ErrorCode::kInvalidAction;
-      } else {
-        entity_id = identity->id;
-      }
+      entity_id = identity->id;
+    }
+  }
+
+  if (result == mir2::common::ErrorCode::kOk) {
+    auto& state = registry->get_or_emplace<mir2::ecs::CharacterStateComponent>(entity);
+    map_id = state.map_id;
+    const mir2::common::Position from = state.position;
+    const mir2::common::Position to{x, y};
+    int speed = 0;
+    if (auto* attrs = registry->try_get<mir2::ecs::CharacterAttributesComponent>(entity)) {
+      speed = attrs->speed;
     }
 
-    if (result == mir2::common::ErrorCode::kOk) {
-      auto& state = registry->get_or_emplace<mir2::ecs::CharacterStateComponent>(entity);
-      map_id = state.map_id;
-      const mir2::common::Position from = state.position;
-      const mir2::common::Position to{x, y};
-      int speed = 0;
-      if (auto* attrs = registry->try_get<mir2::ecs::CharacterAttributesComponent>(entity)) {
-        speed = attrs->speed;
-      }
-
-      int64_t last_move_time = 0;
+    int64_t last_move_time = 0;
+    {
+      std::lock_guard<std::mutex> lock(move_mutex_);
       auto it = last_move_time_ms_.find(entity_id);
       if (it != last_move_time_ms_.end()) {
         last_move_time = it->second;
       }
+    }
 
-      const auto* map_instance = scene_manager_.GetMap(static_cast<int32_t>(map_id));
-      if (!map_instance) {
-        result = mir2::common::ErrorCode::kInvalidAction;
-      } else {
-        MovementValidator validator(*map_instance, validator_config_);
-        result = validator.Validate(from, to, speed, last_move_time, now_ms);
-        if (result == mir2::common::ErrorCode::kOk) {
-          const bool anti_cheat_ok = mir2::security::AntiCheat::Instance().ValidateMove(
-              entity_id, from.x, from.y, to.x, to.y, now_ms);
-          if (!anti_cheat_ok) {
-            result = mir2::common::ErrorCode::kSpeedViolation;
+    const auto* map_instance = scene_manager_.GetMap(static_cast<int32_t>(map_id));
+    if (!map_instance) {
+      result = mir2::common::ErrorCode::kInvalidAction;
+    } else {
+      MovementValidator validator(*map_instance, validator_config_);
+      result = validator.Validate(from, to, speed, last_move_time, now_ms);
+      if (result == mir2::common::ErrorCode::kOk) {
+        const bool anti_cheat_ok = mir2::security::AntiCheat::Instance().ValidateMove(
+            entity_id, from.x, from.y, to.x, to.y, now_ms);
+        if (!anti_cheat_ok) {
+          result = mir2::common::ErrorCode::kSpeedViolation;
+        }
+      }
+
+      if (result == mir2::common::ErrorCode::kOk) {
+        const auto computed_direction = ComputeDirection(from, to, state.direction);
+        broadcast_direction = static_cast<uint8_t>(computed_direction);
+        const bool position_ok =
+            character_manager_.SetPosition(static_cast<uint32_t>(entity_id), x, y, map_id);
+        if (!position_ok) {
+          SYSLOG_WARN("MovementHandler SetPosition failed entity_id={} map_id={} pos=({}, {})",
+                      entity_id,
+                      map_id,
+                      x,
+                      y);
+          result = mir2::common::ErrorCode::kInvalidAction;
+        }
+        if (result == mir2::common::ErrorCode::kOk && entity != entt::null) {
+          const auto current_map_id = scene_manager_.TryGetEntityMapId(entity);
+          bool scene_ok = false;
+          if (!current_map_id.has_value() ||
+              *current_map_id != static_cast<int32_t>(map_id)) {
+            scene_ok =
+                scene_manager_.AddEntityToMap(static_cast<int32_t>(map_id), entity, x, y);
+          } else {
+            scene_ok = scene_manager_.UpdateEntityPosition(entity, x, y);
+          }
+          if (!scene_ok) {
+            SYSLOG_WARN("MovementHandler scene update failed entity_id={} map_id={} pos=({}, {})",
+                        entity_id,
+                        map_id,
+                        x,
+                        y);
+            result = mir2::common::ErrorCode::kInvalidAction;
           }
         }
-
         if (result == mir2::common::ErrorCode::kOk) {
-          character_manager_.SetPosition(static_cast<uint32_t>(entity_id), x, y, map_id);
-          if (entity != entt::null) {
-            const auto current_map_id = scene_manager_.TryGetEntityMapId(entity);
-            if (!current_map_id.has_value() ||
-                *current_map_id != static_cast<int32_t>(map_id)) {
-              scene_manager_.AddEntityToMap(static_cast<int32_t>(map_id), entity, x, y);
-            } else {
-              scene_manager_.UpdateEntityPosition(entity, x, y);
-            }
+          if (auto* mutable_state =
+                  registry->try_get<mir2::ecs::CharacterStateComponent>(entity)) {
+            mutable_state->direction = computed_direction;
           }
-          last_move_time_ms_[entity_id] = now_ms;
+          {
+            std::lock_guard<std::mutex> lock(move_mutex_);
+            last_move_time_ms_[entity_id] = now_ms;
+          }
           should_broadcast = true;
           if (gate_manager_) {
             triggered_gate =
                 gate_manager_->CheckGateTrigger(static_cast<int32_t>(map_id), x, y);
           }
-        } else {
-          RecordMoveViolation(entity_id, result, now_ms);
+          recipient_client_ids = ResolveAoiRecipients(*map_instance, entity, *registry);
         }
       }
     }
   }
 
+  if (result != mir2::common::ErrorCode::kOk) {
+    RecordMoveViolation(entity_id, result, now_ms);
+  }
+
   co_await SendMoveResponse(ctx.client_id, result, x, y);
 
-  if (result == mir2::common::ErrorCode::kOk && should_broadcast) {
-    co_await BroadcastEntityMove(entity_id, x, y, 0);
+  if (result == mir2::common::ErrorCode::kOk && should_broadcast &&
+      !recipient_client_ids.empty()) {
+    co_await BroadcastEntityMove(entity_id, x, y, broadcast_direction, recipient_client_ids);
   }
 
   if (result == mir2::common::ErrorCode::kOk && should_broadcast &&
@@ -298,6 +360,11 @@ Task<void> MovementHandler::SendMoveResponse(uint64_t client_id,
                                              int x,
                                              int y) {
   auto payload = BuildMoveRsp(code, x, y);
+  if (payload.empty()) {
+    SYSLOG_ERROR("MovementHandler SendMoveResponse aborted due to empty payload (client_id={})",
+                 client_id);
+    co_return;
+  }
   co_await response_sender_.SendAsync(
       client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kMoveRsp),
@@ -307,9 +374,10 @@ Task<void> MovementHandler::SendMoveResponse(uint64_t client_id,
 Task<void> MovementHandler::BroadcastEntityMove(uint64_t entity_id,
                                                 int x,
                                                 int y,
-                                                uint8_t direction) {
+                                                uint8_t direction,
+                                                const std::vector<uint64_t>& recipient_client_ids) {
   const auto payload = BuildEntityMove(entity_id, x, y, direction);
-  for (const auto client_id : client_registry_.GetAll()) {
+  for (const auto client_id : recipient_client_ids) {
     co_await response_sender_.SendAsync(
         client_id,
         static_cast<uint16_t>(mir2::common::MsgId::kEntityMove),
@@ -317,12 +385,58 @@ Task<void> MovementHandler::BroadcastEntityMove(uint64_t entity_id,
   }
 }
 
+std::vector<uint64_t> MovementHandler::ResolveAoiRecipients(
+    const mir2::game::map::MapInstance& map,
+    entt::entity self,
+    entt::registry& registry) const {
+  std::vector<uint64_t> recipients;
+  const auto nearby_entities = map.GetEntitiesInViewOf(self);
+  recipients.reserve(nearby_entities.size());
+  std::unordered_set<uint64_t> dedup;
+
+  for (const entt::entity nearby : nearby_entities) {
+    const auto* identity =
+        registry.try_get<mir2::ecs::CharacterIdentityComponent>(nearby);
+    if (!identity || identity->id == 0) {
+      continue;
+    }
+
+    uint64_t client_id = identity->id;
+    if (role_store_) {
+      const auto mapped_client = role_store_->GetClientIdByRoleId(identity->id);
+      if (!mapped_client.has_value()) {
+        continue;
+      }
+      client_id = *mapped_client;
+    }
+
+    if (!client_registry_.Contains(client_id)) {
+      continue;
+    }
+    if (dedup.insert(client_id).second) {
+      recipients.push_back(client_id);
+    }
+  }
+
+  return recipients;
+}
+
 void MovementHandler::RecordMoveViolation(uint64_t player_id,
                                           mir2::common::ErrorCode code,
                                           int64_t timestamp_ms) {
+  AntiCheatConfig effective_config = anti_cheat_config_;
+  auto& config_manager = config::ConfigManager::Instance();
+  if (config_manager.IsLoaded()) {
+    const auto& server_config = config_manager.GetServerConfig();
+    effective_config.speed_violation_severity =
+        std::max(server_config.movement_speed_violation_severity, 0);
+    effective_config.teleport_violation_severity =
+        std::max(server_config.movement_teleport_violation_severity, 0);
+  }
+
   mir2::security::CheatType cheat_type;
   int severity = 0;
-  if (!MapViolationToCheat(code, &cheat_type, &severity)) {
+  if (!MapViolationToCheat(code, &cheat_type, &severity, effective_config)) {
     return;
   }
   mir2::security::AntiCheat::Instance().ProcessViolation(

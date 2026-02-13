@@ -1,6 +1,7 @@
 #include "security/rate_limiter.h"
 
 #include <algorithm>
+#include <cstdint>
 
 namespace mir2::security {
 
@@ -26,6 +27,7 @@ void RateLimiter::SetConfig(const Config& config, bool clear_buckets) {
   std::lock_guard<std::mutex> lock(mutex_);
   config_.capacity = std::max(1, config.capacity);
   config_.refill_rate = std::max(1, config.refill_rate);
+  config_.refill_interval_seconds = std::max(1, config.refill_interval_seconds);
   if (clear_buckets) {
     buckets_.clear();
   }
@@ -39,11 +41,15 @@ void RateLimiter::RefillBucket(Bucket& bucket) {
     return;
   }
 
-  const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - bucket.last_refill);
-  if (elapsed.count() > 0) {
-    const int refill = static_cast<int>(elapsed.count()) * config_.refill_rate;
-    bucket.tokens = std::min(config_.capacity, bucket.tokens + refill);
-    bucket.last_refill = now;
+  const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+      now - bucket.last_refill);
+  const int interval_seconds = std::max(1, config_.refill_interval_seconds);
+  const int64_t intervals = elapsed.count() / interval_seconds;
+  if (intervals > 0) {
+    const int64_t refill = intervals * static_cast<int64_t>(config_.refill_rate);
+    bucket.tokens = std::min(config_.capacity,
+                             bucket.tokens + static_cast<int>(refill));
+    bucket.last_refill += std::chrono::seconds(intervals * interval_seconds);
   }
 }
 

@@ -53,6 +53,7 @@ struct LoginAwaitState {
   std::mutex mutex;
   std::optional<LoginResult> result;
   std::atomic<bool> completed{false};
+  std::atomic<bool> cancelled{false};
 };
 
 class LoginAwaiter {
@@ -66,6 +67,12 @@ class LoginAwaiter {
         username_(std::move(username)),
         password_(std::move(password)) {}
 
+  ~LoginAwaiter() {
+    if (state_) {
+      state_->cancelled.store(true, std::memory_order_release);
+    }
+  }
+
   bool await_ready() const noexcept { return false; }
 
   void await_suspend(std::coroutine_handle<> handle) {
@@ -77,13 +84,25 @@ class LoginAwaiter {
             return;
           }
 
+          if (state->cancelled.load(std::memory_order_acquire)) {
+            return;
+          }
+
           {
             std::lock_guard<std::mutex> lock(state->mutex);
+            if (state->cancelled.load(std::memory_order_acquire)) {
+              return;
+            }
             state->result = result;
           }
 
           asio::post(state->executor.GetIoContext(),
-                     [state]() { state->continuation.resume(); });
+                     [state]() {
+                       if (state->cancelled.load(std::memory_order_acquire)) {
+                         return;
+                       }
+                       state->continuation.resume();
+                     });
         });
   }
 
@@ -100,7 +119,7 @@ class LoginAwaiter {
       result.code = mir2::common::ErrorCode::kUnknown;
       return result;
     }
-    return *state_->result;
+    return std::move(*state_->result);
   }
 
  private:

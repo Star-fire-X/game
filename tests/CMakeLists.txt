@@ -9,6 +9,7 @@ set(LEGEND2_TEST_SOURCES
     common/npc_message_codec_test.cpp
     server/combat_core_test.cpp
     server/ip_rate_limiter_test.cc
+    server/security/rate_limiter_test.cc
     server/gateway/connection_holder_test.cc
     server/gateway/ring_buffer_test.cc
     server/network/kcp_session_test.cc
@@ -46,6 +47,7 @@ set(LEGEND2_TEST_SOURCES
     # client/movement_handler_test.cpp  # disabled
     # client/combat_handler_test.cpp  # disabled
     # client/system_handler_test.cpp  # disabled
+    client/handlers/chat_handler_test.cc
     client/network/kcp_channel_test.cc
     client/network/kcp_upgrade_handler_test.cc
     client/network/dual_channel_client_test.cc
@@ -123,6 +125,9 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/effect_system_test.cc
     server/ecs/skill_system_test.cc
     server/ecs/level_up_system_test.cpp
+    server/ecs/growth_formulas_test.cpp
+    server/ecs/attribute_recalc_system_test.cpp
+    server/ecs/bonus_point_system_test.cpp
     server/ecs/inventory_system_test.cpp
     server/ecs/ground_item_system_test.cc
     server/ecs/amulet_consumer_test.cc
@@ -153,6 +158,7 @@ set(LEGEND2_TEST_SOURCES
     server/movement_validator_test.cpp
     integration/scene_manager_test.cpp
     integration/cross_map_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/chat_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/message_dispatcher.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/network_manager.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/network_client.cc
@@ -346,10 +352,70 @@ target_include_directories(client_skill_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/tests
 )
 
+add_executable(client_item_handler_test
+    client/handlers/item_handler_test.cc
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
+)
+
+target_link_libraries(client_item_handler_test PRIVATE
+    legend2_common
+    asio
+    GTest::gtest_main
+)
+
+target_include_directories(client_item_handler_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/client
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+set_target_properties(client_item_handler_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/client/handlers
+)
+
 include(GoogleTest)
 gtest_discover_tests(legend2_tests)
 gtest_discover_tests(routing_table_tests)
 gtest_discover_tests(client_skill_tests)
+gtest_discover_tests(client_item_handler_test)
+
+# Standalone client config test target (no SDL dependency)
+add_executable(client_config_test
+    client/config/client_config_test.cc
+)
+
+target_link_libraries(client_config_test PRIVATE
+    legend2_common
+    yaml-cpp::yaml-cpp
+    GTest::gtest_main
+)
+
+target_include_directories(client_config_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/client
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+gtest_discover_tests(client_config_test)
+
+# Standalone client logger test target (no SDL dependency)
+add_executable(client_logger_test
+    client/log/client_logger_test.cc
+)
+
+target_link_libraries(client_logger_test PRIVATE
+    legend2_common
+    spdlog::spdlog
+    GTest::gtest_main
+)
+
+target_include_directories(client_logger_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/client
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+gtest_discover_tests(client_logger_test)
 
 # Standalone combat_core test target
 add_executable(combat_core_test
@@ -451,8 +517,125 @@ if(TARGET SDL2::SDL2)
     )
 
     gtest_discover_tests(client_skill_ui_tests)
+
+    add_executable(client_hud_tests
+        client/ui/hud/hud_container_test.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/hud/status_bar.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/hud/player_info_panel.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/hud/hud_container.cc
+    )
+
+    target_link_libraries(client_hud_tests PRIVATE
+        legend2_common
+        GTest::gtest_main
+        GTest::gmock
+        SDL2::SDL2
+    )
+
+    target_include_directories(client_hud_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/client
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+
+    gtest_discover_tests(client_hud_tests)
+
+    # Inventory panel tests
+    add_executable(client_inventory_tests
+        client/ui/inventory/inventory_panel_test.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/inventory/inventory_panel.cc
+        ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
+    )
+
+    target_link_libraries(client_inventory_tests PRIVATE
+        legend2_common
+        asio
+        GTest::gtest_main
+        GTest::gmock
+        SDL2::SDL2
+    )
+
+    target_include_directories(client_inventory_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/client
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+
+    gtest_discover_tests(client_inventory_tests)
+
+    # Equipment panel tests
+    add_executable(client_equipment_tests
+        client/ui/equipment/equipment_panel_test.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/equipment/equipment_panel.cc
+        ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
+    )
+
+    target_link_libraries(client_equipment_tests PRIVATE
+        legend2_common
+        asio
+        GTest::gtest_main
+        GTest::gmock
+        SDL2::SDL2
+    )
+
+    target_include_directories(client_equipment_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/client
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+
+    gtest_discover_tests(client_equipment_tests)
+
+    # Chat panel tests
+    add_executable(client_chat_panel_tests
+        client/ui/chat/chat_panel_test.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/chat/chat_panel.cc
+        ${CMAKE_SOURCE_DIR}/src/client/handlers/chat_handler.cpp
+    )
+
+    target_link_libraries(client_chat_panel_tests PRIVATE
+        legend2_common
+        asio
+        GTest::gtest_main
+        GTest::gmock
+        SDL2::SDL2
+    )
+
+    target_include_directories(client_chat_panel_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/client
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+
+    gtest_discover_tests(client_chat_panel_tests)
+
+    # Minimap widget tests
+    add_executable(client_minimap_tests
+        client/ui/minimap/minimap_widget_test.cc
+        ${CMAKE_SOURCE_DIR}/src/client/ui/minimap/minimap_widget.cc
+    )
+
+    target_link_libraries(client_minimap_tests PRIVATE
+        legend2_common
+        GTest::gtest_main
+        GTest::gmock
+        SDL2::SDL2
+    )
+
+    target_include_directories(client_minimap_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/client
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+
+    gtest_discover_tests(client_minimap_tests)
 else()
     message(STATUS "Skipping client_skill_ui_tests: SDL2::SDL2 target not available")
+    message(STATUS "Skipping client_hud_tests: SDL2::SDL2 target not available")
+    message(STATUS "Skipping client_inventory_tests: SDL2::SDL2 target not available")
+    message(STATUS "Skipping client_equipment_tests: SDL2::SDL2 target not available")
+    message(STATUS "Skipping client_chat_panel_tests: SDL2::SDL2 target not available")
+    message(STATUS "Skipping client_minimap_tests: SDL2::SDL2 target not available")
 endif()
 
 find_program(LEGEND2_BASH_PROGRAM bash)

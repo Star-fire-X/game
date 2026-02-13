@@ -66,7 +66,7 @@ class LoginHandler {
   // Login rate limiter: 5 attempts per account, refills 1 per 12 seconds
   // (effectively ~5 attempts per minute)
   mir2::security::RateLimiter login_rate_limiter_{
-      {.capacity = 5, .refill_rate = 1}};
+      {.capacity = 5, .refill_rate = 1, .refill_interval_seconds = 12}};
 };
 
 }  // namespace mir2::logic

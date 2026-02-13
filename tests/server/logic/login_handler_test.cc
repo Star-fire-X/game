@@ -267,4 +267,32 @@ TEST_F(LoginHandlerTest, LoginMalformedPayload) {
   EXPECT_FALSE(service_->WasCalled());
 }
 
+// 协程销毁后，异步登录回调不应再次恢复该协程。
+TEST_F(LoginHandlerTest, DestroyedCoroutineSkipsLateLoginResume) {
+  mir2::logic::LoginResult result;
+  result.code = mir2::common::ErrorCode::kOk;
+  result.account_id = 12345;
+  result.token = "late-token";
+  service_->SetResult(result);
+  service_->SetAsync(true);
+
+  HandlerContext context;
+  context.client_id = 12012;
+
+  const auto payload = BuildLoginReq("user", "pass", "1.0");
+  auto task = handler_->HandleMessage(context, payload.data(), payload.size());
+  auto handle = task.Release();
+  ASSERT_TRUE(handle);
+
+  handle.resume();
+  handle.destroy();
+
+  io_context_.restart();
+  io_context_.poll();
+  io_context_.restart();
+  io_context_.poll();
+
+  EXPECT_EQ(response_sender_->ResponseCount(), 0u);
+}
+
 }  // namespace mir2::logic::test

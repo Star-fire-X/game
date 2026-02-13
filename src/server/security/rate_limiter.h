@@ -21,6 +21,7 @@ class RateLimiter {
   struct Config {
     int capacity = 10;
     int refill_rate = 10;
+    int refill_interval_seconds = 1;
   };
 
   explicit RateLimiter(const Config& config) : config_(config) {}

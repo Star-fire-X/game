@@ -102,12 +102,18 @@ set(MIR2_SERVER_SOURCES
     ecs/systems/effect_broadcaster.cc
     ecs/systems/effect_system.cc
     ecs/systems/amulet_consumer.cc
+    ecs/systems/equipment_bonus_system.cc
     ecs/systems/guild_system.cc
     ecs/systems/inventory_system.cc
     ecs/systems/ground_item_system.cc
     ecs/systems/trade_system.cc
     ecs/systems/storage_system.cc
     ecs/systems/level_up_system.cc
+    ecs/systems/growth_formulas.cc
+    ecs/systems/attribute_recalc_system.cc
+    ecs/systems/bonus_point_system.cc
+    ecs/systems/recovery_system.cc
+    ecs/systems/luck_system.cc
     ecs/systems/movement_system.cc
     ecs/systems/monster_ai_system.cc
     ecs/systems/monster_drop_system.cc

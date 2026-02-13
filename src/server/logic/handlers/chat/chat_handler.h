@@ -15,7 +15,6 @@
 
 #include "chat_generated.h"
 #include "game/chat/chat_service.h"
-#include "logic/services/client_registry.h"
 #include "logic/handler_context.h"
 #include "logic/task.h"
 #include "server/common/error_codes.h"
@@ -26,15 +25,12 @@ class AOIManager;
 
 namespace mir2::logic {
 
-class CoroutineExecutor;
 class PlayerPresenceService;
 class ResponseSender;
 
 class ChatHandler {
  public:
-  ChatHandler(CoroutineExecutor& executor,
-              ResponseSender& response_sender,
-              ClientRegistry& registry,
+  ChatHandler(ResponseSender& response_sender,
               PlayerPresenceService& player_presence_service,
               mir2::game::map::AOIManager& aoi_mgr,
               entt::registry& ecs_registry);
@@ -58,9 +54,7 @@ class ChatHandler {
   Task<void> SendChatDispatches(uint16_t msg_id,
                                 const mir2::game::chat::ChatDispatchList& dispatches);
 
-  CoroutineExecutor& executor_;
   ResponseSender& response_sender_;
-  ClientRegistry& client_registry_;
   mir2::game::map::AOIManager& aoi_mgr_;
   entt::registry& ecs_registry_;
   std::unique_ptr<mir2::game::chat::ChatService> chat_service_;

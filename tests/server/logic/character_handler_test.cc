@@ -77,8 +77,7 @@ class CharacterHandlerTest : public ::testing::Test {
     response_sender_ = std::make_unique<MockResponseSender>();
     entity_manager_ = std::make_unique<ecs::CharacterEntityManager>(ecs_registry_);
     role_store_ = std::make_unique<RoleStore>();
-    handler_ = std::make_unique<CharacterHandler>(*executor_,
-                                                   *response_sender_,
+    handler_ = std::make_unique<CharacterHandler>(*response_sender_,
                                                    *entity_manager_,
                                                    *role_store_,
                                                    client_registry_);

@@ -138,13 +138,10 @@ TEST_F(GuildHandlerTest, HandleCreateGuildSuccess) {
 
   HandlerContext ctx;
   ctx.client_id = leader.id;
+  ctx.msg_id = static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE);
   const auto payload = BuildCreateGuildPayload("Knights");
 
-  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(
-      ctx,
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
-      payload.data(),
-      payload.size())));
+  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(ctx, payload.data(), payload.size())));
   RunIoContext();
 
   const auto* member = registry_.try_get<ecs::GuildMemberComponent>(leader.entity);
@@ -178,13 +175,10 @@ TEST_F(GuildHandlerTest, HandleCreateGuildSuccess) {
 TEST_F(GuildHandlerTest, HandleCreateGuildInvalidPayload) {
   HandlerContext ctx;
   ctx.client_id = 999u;
+  ctx.msg_id = static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE);
   const std::vector<uint8_t> payload = {0x01, 0x02, 0x03};
 
-  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(
-      ctx,
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
-      payload.data(),
-      payload.size())));
+  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(ctx, payload.data(), payload.size())));
   RunIoContext();
 
   const auto responses = response_sender_->GetCapturedResponses();
@@ -212,12 +206,10 @@ TEST_F(GuildHandlerTest, HandleJoinAndLeaveGuildSuccess) {
   const auto join_payload = BuildJoinGuildPayload(guild_id);
   HandlerContext join_ctx;
   join_ctx.client_id = member.id;
+  join_ctx.msg_id = static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN);
 
-  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(
-      join_ctx,
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN),
-      join_payload.data(),
-      join_payload.size())));
+  ASSERT_TRUE(
+      executor_->Spawn(handler_->HandleMessage(join_ctx, join_payload.data(), join_payload.size())));
   RunIoContext();
 
   const auto* member_comp =
@@ -231,11 +223,9 @@ TEST_F(GuildHandlerTest, HandleJoinAndLeaveGuildSuccess) {
   EXPECT_TRUE(guild->IsMember(member.entity));
 
   const auto leave_payload = BuildLeaveGuildPayload();
-  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(
-      join_ctx,
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE),
-      leave_payload.data(),
-      leave_payload.size())));
+  join_ctx.msg_id = static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE);
+  ASSERT_TRUE(executor_->Spawn(
+      handler_->HandleMessage(join_ctx, leave_payload.data(), leave_payload.size())));
   RunIoContext();
 
   EXPECT_EQ(registry_.try_get<ecs::GuildMemberComponent>(member.entity), nullptr);
@@ -259,21 +249,15 @@ TEST_F(GuildHandlerTest, HandleDeclareAndCancelWarSuccess) {
 
   HandlerContext ctx;
   ctx.client_id = leader_a.id;
+  ctx.msg_id = static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR);
   const auto war_payload = BuildDeclareWarPayload(guild_b);
 
-  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(
-      ctx,
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR),
-      war_payload.data(),
-      war_payload.size())));
+  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(ctx, war_payload.data(), war_payload.size())));
   RunIoContext();
   EXPECT_TRUE(guild_mgr_->IsAtWar(guild_a, guild_b));
 
-  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(
-      ctx,
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR),
-      war_payload.data(),
-      war_payload.size())));
+  ctx.msg_id = static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR);
+  ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(ctx, war_payload.data(), war_payload.size())));
   RunIoContext();
   EXPECT_FALSE(guild_mgr_->IsAtWar(guild_a, guild_b));
 }

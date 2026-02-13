@@ -45,12 +45,10 @@ class ChatHandlerTest : public ::testing::Test {
     player_presence_service_ =
         std::make_unique<PlayerPresenceService>(ecs_registry_);
     aoi_mgr_ = std::make_unique<mir2::game::map::AOIManager>(100, 100);
-    handler_ = std::make_unique<ChatHandler>(*executor_,
-                                              *response_sender_,
-                                              client_registry_,
-                                              *player_presence_service_,
-                                              *aoi_mgr_,
-                                              ecs_registry_);
+    handler_ = std::make_unique<ChatHandler>(*response_sender_,
+                                             *player_presence_service_,
+                                             *aoi_mgr_,
+                                             ecs_registry_);
   }
 
   void TearDown() override {

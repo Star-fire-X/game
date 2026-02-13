@@ -159,6 +159,7 @@ set(LEGEND2_TEST_SOURCES
     integration/scene_manager_test.cpp
     integration/cross_map_test.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/chat_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/message_dispatcher.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/network_manager.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/network_client.cc

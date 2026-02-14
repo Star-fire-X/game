@@ -6,10 +6,12 @@
 #ifndef MIR2_LOGIC_SERVICES_PLAYER_PRESENCE_SERVICE_H_
 #define MIR2_LOGIC_SERVICES_PLAYER_PRESENCE_SERVICE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -50,7 +52,9 @@ class PlayerPresenceService {
   bool SetHearGuildMessage(uint64_t player_id, bool enabled);
 
  private:
+  static constexpr size_t kNameLookupCacheMaxEntries = 4096;
   entt::registry& registry_;
+  mutable std::unordered_map<std::string, uint64_t> name_lookup_cache_;
 };
 
 }  // namespace mir2::logic

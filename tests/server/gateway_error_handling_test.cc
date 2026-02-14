@@ -69,6 +69,10 @@ TEST(GatewayErrorHandlingTest, ServerConfig_DefaultLoginIpRateLimitValues) {
   config::ServerConfig defaults;
   EXPECT_EQ(defaults.login_ip_rate_limit_capacity, 5);
   EXPECT_EQ(defaults.login_ip_rate_limit_refill_rate, 1);
+  EXPECT_TRUE(defaults.legacy_fallback_enabled);
+  EXPECT_TRUE(defaults.legacy_fallback_allow_auth_whitelist);
+  EXPECT_TRUE(defaults.legacy_fallback_allow_critical_msgs);
+  EXPECT_FALSE(defaults.legacy_fallback_allow_normal_msgs);
   EXPECT_EQ(defaults.movement_speed_violation_severity, 10);
   EXPECT_EQ(defaults.movement_teleport_violation_severity, 5);
 }
@@ -78,6 +82,10 @@ TEST(GatewayErrorHandlingTest, LoadConfig_LoginIpRateLimitFieldsParsed) {
       "server:\n"
       "  login_ip_rate_limit_capacity: 12\n"
       "  login_ip_rate_limit_refill_rate: 3\n"
+      "  legacy_fallback_enabled: false\n"
+      "  legacy_fallback_allow_auth_whitelist: false\n"
+      "  legacy_fallback_allow_critical_msgs: false\n"
+      "  legacy_fallback_allow_normal_msgs: true\n"
       "  movement_speed_violation_severity: 20\n"
       "  movement_teleport_violation_severity: 9\n",
       "login_ip_limit");
@@ -86,8 +94,48 @@ TEST(GatewayErrorHandlingTest, LoadConfig_LoginIpRateLimitFieldsParsed) {
   const auto& config = config::ConfigManager::Instance().GetServerConfig();
   EXPECT_EQ(config.login_ip_rate_limit_capacity, 12);
   EXPECT_EQ(config.login_ip_rate_limit_refill_rate, 3);
+  EXPECT_FALSE(config.legacy_fallback_enabled);
+  EXPECT_FALSE(config.legacy_fallback_allow_auth_whitelist);
+  EXPECT_FALSE(config.legacy_fallback_allow_critical_msgs);
+  EXPECT_TRUE(config.legacy_fallback_allow_normal_msgs);
   EXPECT_EQ(config.movement_speed_violation_severity, 20);
   EXPECT_EQ(config.movement_teleport_violation_severity, 9);
+
+  std::filesystem::remove(path);
+}
+
+TEST(GatewayErrorHandlingTest, LoadConfig_LogicServiceTransportParsed) {
+  const auto path = WriteTempConfig(
+      "services:\n"
+      "  logic:\n"
+      "    host: \"localhost\"\n"
+      "    port: 9123\n"
+      "    transport: \"UDS\"\n"
+      "    uds_path: \"/tmp/mir2_logic_test.sock\"\n",
+      "logic_service_transport");
+  ASSERT_TRUE(config::ConfigManager::Instance().Load(path));
+
+  const auto& logic = config::ConfigManager::Instance().GetServiceConfig().logic;
+  EXPECT_EQ(logic.host, "localhost");
+  EXPECT_EQ(logic.port, 9123);
+  EXPECT_EQ(logic.transport, "uds");
+  EXPECT_EQ(logic.uds_path, "/tmp/mir2_logic_test.sock");
+
+  std::filesystem::remove(path);
+}
+
+TEST(GatewayErrorHandlingTest, LoadConfig_InvalidLogicServiceTransportFallsBackToAuto) {
+  const auto path = WriteTempConfig(
+      "services:\n"
+      "  logic:\n"
+      "    transport: \"invalid_mode\"\n"
+      "    uds_path: \"/tmp/invalid.sock\"\n",
+      "logic_service_invalid_transport");
+  ASSERT_TRUE(config::ConfigManager::Instance().Load(path));
+
+  const auto& logic = config::ConfigManager::Instance().GetServiceConfig().logic;
+  EXPECT_EQ(logic.transport, "auto");
+  EXPECT_EQ(logic.uds_path, "/tmp/invalid.sock");
 
   std::filesystem::remove(path);
 }

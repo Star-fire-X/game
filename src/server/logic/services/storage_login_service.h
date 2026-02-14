@@ -46,15 +46,18 @@ class StorageLoginService final : public LoginService {
   bool IsMissingAccountCached(const std::string& username);
   void CacheMissingAccount(const std::string& username);
   void RemoveMissingAccount(const std::string& username);
+  void MaybePruneExpiredLocked(std::chrono::steady_clock::time_point now);
   void PruneExpiredLocked(std::chrono::steady_clock::time_point now);
 
   static constexpr std::chrono::seconds kNegativeCacheTtl{30};
+  static constexpr std::chrono::seconds kNegativeCachePruneInterval{1};
   static constexpr size_t kMaxNegativeCacheEntries = 50000;
 
   CoroutineExecutor& executor_;
   mir2::storage_engine::StorageEngine* storage_engine_ = nullptr;
   std::mutex negative_cache_mutex_;
   std::unordered_map<std::string, NegativeCacheEntry> negative_cache_;
+  std::chrono::steady_clock::time_point next_prune_at_{};
 };
 
 }  // namespace mir2::logic

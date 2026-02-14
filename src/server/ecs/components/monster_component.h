@@ -9,6 +9,7 @@
 #define MIR2_ECS_COMPONENTS_MONSTER_COMPONENT_H_
 
 #include <cstdint>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -101,6 +102,7 @@ struct MonsterAggroComponent {
     float hate_decay_rate = 5.0f;               ///< 仇恨衰减速率（每秒）
     float accumulated_decay = 0.0f;            ///< 累积仇恨衰减，用于保留小数部分
     float hate_clear_time = 30.0f;              ///< 仇恨清除超时时间（秒）
+    float elapsed_since_hatred_update = 0.0f;   ///< 距离上次仇恨更新的累计时间（秒）
 
     /**
      * @brief 增加仇恨值
@@ -108,11 +110,20 @@ struct MonsterAggroComponent {
      * @param damage 伤害值
      */
     void AddHatred(entt::entity attacker, int32_t damage) {
-        if (attacker == entt::null) return;
+        if (attacker == entt::null || damage <= 0) return;
+        elapsed_since_hatred_update = 0.0f;
+
+        constexpr int32_t kMaxHatred = std::numeric_limits<int32_t>::max();
         // 仇恨值计算公式：伤害 * 1.5
-        int32_t hatred = static_cast<int32_t>(damage * 1.5f);
+        const int64_t hatred_raw = static_cast<int64_t>(damage) * 3 / 2;
+        const int32_t hatred = static_cast<int32_t>(
+            hatred_raw > static_cast<int64_t>(kMaxHatred) ? kMaxHatred : hatred_raw);
         auto& total_hatred = hate_list[attacker];
-        total_hatred += hatred;
+        if (total_hatred > kMaxHatred - hatred) {
+            total_hatred = kMaxHatred;
+        } else {
+            total_hatred += hatred;
+        }
         // 更新最高仇恨缓存以减少后续遍历
         if (cached_top_target_ == entt::null) {
             cached_top_target_ = attacker;
@@ -165,6 +176,12 @@ struct MonsterAggroComponent {
         if (dt <= 0.0f) {
             return;
         }
+        elapsed_since_hatred_update += dt;
+        if (hate_clear_time > 0.0f && elapsed_since_hatred_update >= hate_clear_time) {
+            Clear();
+            return;
+        }
+
         accumulated_decay += hate_decay_rate * dt;
         if (accumulated_decay < 1.0f) {
             return;
@@ -185,6 +202,12 @@ struct MonsterAggroComponent {
         for (auto entity : to_remove) {
             hate_list.erase(entity);
         }
+        if (hate_list.empty()) {
+            cached_top_target_ = entt::null;
+            accumulated_decay = 0.0f;
+            elapsed_since_hatred_update = 0.0f;
+            return;
+        }
         // 若缓存目标被清理，重置缓存以便重新计算
         if (cached_top_target_ != entt::null && hate_list.find(cached_top_target_) == hate_list.end()) {
             cached_top_target_ = entt::null;
@@ -199,6 +222,7 @@ struct MonsterAggroComponent {
         // 同步清空缓存避免返回过期目标
         cached_top_target_ = entt::null;
         accumulated_decay = 0.0f;
+        elapsed_since_hatred_update = 0.0f;
     }
 };
 

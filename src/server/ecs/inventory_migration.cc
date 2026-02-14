@@ -1,6 +1,6 @@
 /**
  * @file inventory_migration.cc
- * @brief JSON 与结构化组件迁移工具实现
+ * @brief JSON 与实体化库存快照兼容迁移工具实现
  */
 
 #include "ecs/inventory_migration.h"
@@ -8,6 +8,7 @@
 #include "common/types/constants.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/equipment_component.h"
+#include "ecs/components/inventory_snapshot_component.h"
 #include "ecs/components/item_component.h"
 #include "ecs/components/skill_component.h"
 #include "log/logger.h"
@@ -195,8 +196,8 @@ bool PopulateItemFromJson(const json& item_json, ItemComponent& out_item) {
     return true;
 }
 
-ItemData ToItemData(const ItemComponent& item) {
-    ItemData item_data;
+InventorySnapshotItemData ToInventorySnapshotItemData(const ItemComponent& item) {
+    InventorySnapshotItemData item_data;
     item_data.instance_id = item.instance_id;
     item_data.item_id = item.item_id;
     item_data.count = item.count;
@@ -211,15 +212,15 @@ ItemData ToItemData(const ItemComponent& item) {
     return item_data;
 }
 
-SkillData ToSkillData(const SkillComponent& skill) {
-    SkillData skill_data;
+InventorySnapshotSkillData ToInventorySnapshotSkillData(const SkillComponent& skill) {
+    InventorySnapshotSkillData skill_data;
     skill_data.skill_id = skill.skill_id;
     skill_data.level = static_cast<uint8_t>(std::clamp(skill.level, 0, 255));
     skill_data.cooldown_end_ms = 0;
     return skill_data;
 }
 
-json BuildItemJson(const ItemData& item) {
+json BuildItemJson(const InventorySnapshotItemData& item) {
     json item_json;
     item_json["instance_id"] = item.instance_id;
     item_json["template_id"] = item.item_id;
@@ -300,29 +301,29 @@ void ClearSkills(entt::registry& registry, entt::entity character) {
 
 int ClampSlotIndex(int slot, int max_slots);
 
-void ResetNativeInventory(InventoryComponent& inventory) {
-    inventory.slots.fill(std::nullopt);
-    inventory.equipment.fill(std::nullopt);
-    inventory.skills.clear();
+void ResetInventorySnapshot(InventorySnapshotComponent& snapshot) {
+    snapshot.slots.fill(std::nullopt);
+    snapshot.equipment.fill(std::nullopt);
+    snapshot.skills.clear();
 }
 
-std::size_t RuntimeInventorySlotLimit() {
-    return std::min(InventoryComponent::kMaxSlots,
+std::size_t SnapshotInventorySlotLimit() {
+    return std::min(InventorySnapshotComponent::kMaxSlots,
                     static_cast<std::size_t>(mir2::common::constants::MAX_INVENTORY_SIZE));
 }
 
-std::size_t RuntimeEquipmentSlotLimit() {
-    return std::min(InventoryComponent::kMaxEquipmentSlots,
+std::size_t SnapshotEquipmentSlotLimit() {
+    return std::min(InventorySnapshotComponent::kMaxEquipmentSlots,
                     EquipmentSlotComponent::kSlotCount);
 }
 
-void SyncInventoryComponentFromRuntime(entt::registry& registry,
-                                       entt::entity character,
-                                       InventoryComponent& inventory,
-                                       uint32_t character_id) {
-    ResetNativeInventory(inventory);
+void SyncInventorySnapshotFromRuntime(entt::registry& registry,
+                                      entt::entity character,
+                                      InventorySnapshotComponent& snapshot,
+                                      uint32_t character_id) {
+    ResetInventorySnapshot(snapshot);
 
-    const int inventory_slot_limit = static_cast<int>(RuntimeInventorySlotLimit());
+    const int inventory_slot_limit = static_cast<int>(SnapshotInventorySlotLimit());
     auto item_view = registry.view<ItemComponent, InventoryOwnerComponent>();
     for (auto item_entity : item_view) {
         const auto& owner = item_view.get<InventoryOwnerComponent>(item_entity);
@@ -337,18 +338,18 @@ void SyncInventoryComponentFromRuntime(entt::registry& registry,
             continue;
         }
 
-        auto& slot_ref = inventory.slots[static_cast<std::size_t>(slot)];
+        auto& slot_ref = snapshot.slots[static_cast<std::size_t>(slot)];
         if (slot_ref.has_value()) {
             SYSLOG_WARN("InventoryMigration: runtime duplicate inventory slot={} id={}",
                         slot, character_id);
             continue;
         }
-        slot_ref = ToItemData(item_view.get<ItemComponent>(item_entity));
+        slot_ref = ToInventorySnapshotItemData(item_view.get<ItemComponent>(item_entity));
     }
 
     if (const auto* equipment = registry.try_get<EquipmentSlotComponent>(character)) {
         const std::size_t equip_limit =
-            std::min(RuntimeEquipmentSlotLimit(), equipment->slots.size());
+            std::min(SnapshotEquipmentSlotLimit(), equipment->slots.size());
         for (std::size_t slot = 0; slot < equip_limit; ++slot) {
             const entt::entity item_entity = equipment->slots[slot];
             if (item_entity == entt::null || !registry.valid(item_entity)) {
@@ -362,32 +363,37 @@ void SyncInventoryComponentFromRuntime(entt::registry& registry,
                 continue;
             }
 
-            ItemData item_data = ToItemData(*item);
+            InventorySnapshotItemData item_data =
+                ToInventorySnapshotItemData(*item);
             item_data.equip_slot = static_cast<int>(slot);
-            inventory.equipment[slot] = item_data;
+            snapshot.equipment[slot] = item_data;
         }
     }
 
     auto skill_view = registry.view<SkillComponent, InventoryOwnerComponent>();
-    std::vector<SkillData> skill_entries;
+    std::vector<InventorySnapshotSkillData> skill_entries;
     for (auto skill_entity : skill_view) {
         const auto& owner = skill_view.get<InventoryOwnerComponent>(skill_entity);
         if (owner.owner != character) {
             continue;
         }
-        skill_entries.push_back(ToSkillData(skill_view.get<SkillComponent>(skill_entity)));
+        skill_entries.push_back(
+            ToInventorySnapshotSkillData(skill_view.get<SkillComponent>(skill_entity)));
     }
 
     std::sort(skill_entries.begin(), skill_entries.end(),
-              [](const SkillData& lhs, const SkillData& rhs) {
+              [](const InventorySnapshotSkillData& lhs,
+                 const InventorySnapshotSkillData& rhs) {
                   return lhs.skill_id < rhs.skill_id;
               });
-    skill_entries.erase(std::unique(skill_entries.begin(), skill_entries.end(),
-                                    [](const SkillData& lhs, const SkillData& rhs) {
-                                        return lhs.skill_id == rhs.skill_id;
-                                    }),
-                        skill_entries.end());
-    inventory.skills = std::move(skill_entries);
+    skill_entries.erase(
+        std::unique(skill_entries.begin(), skill_entries.end(),
+                    [](const InventorySnapshotSkillData& lhs,
+                       const InventorySnapshotSkillData& rhs) {
+                        return lhs.skill_id == rhs.skill_id;
+                    }),
+        skill_entries.end());
+    snapshot.skills = std::move(skill_entries);
 }
 
 std::optional<json> ParseJsonSafe(const std::string& input,
@@ -819,8 +825,9 @@ void LoadInventoryFromJson(entt::registry& registry,
         ClearSkills(registry, character);
     }
 
-    auto& native_inventory = registry.get_or_emplace<InventoryComponent>(character);
-    SyncInventoryComponentFromRuntime(registry, character, native_inventory, character_id);
+    auto& inventory_snapshot = registry.get_or_emplace<InventorySnapshotComponent>(character);
+    SyncInventorySnapshotFromRuntime(
+        registry, character, inventory_snapshot, character_id);
 
     SYSLOG_INFO("InventoryMigration: loaded id={} items={} equipment={} skills={}",
                 character_id, loaded_items, loaded_equipment, loaded_skills);
@@ -834,16 +841,17 @@ SaveInventoryToJson(entt::registry& registry, entt::entity character) {
     }
 
     uint32_t character_id = GetCharacterId(registry, character);
-    auto& native_inventory = registry.get_or_emplace<InventoryComponent>(character);
-    SyncInventoryComponentFromRuntime(registry, character, native_inventory, character_id);
+    auto& inventory_snapshot = registry.get_or_emplace<InventorySnapshotComponent>(character);
+    SyncInventorySnapshotFromRuntime(
+        registry, character, inventory_snapshot, character_id);
 
     json inventory = json::array();
     json equipment = json::array();
     json skills = json::array();
 
     std::vector<std::pair<int, json>> inventory_entries;
-    for (std::size_t slot = 0; slot < native_inventory.slots.size(); ++slot) {
-        const auto& item = native_inventory.slots[slot];
+    for (std::size_t slot = 0; slot < inventory_snapshot.slots.size(); ++slot) {
+        const auto& item = inventory_snapshot.slots[slot];
         if (!item.has_value() || item->item_id == 0 || item->count <= 0) {
             continue;
         }
@@ -859,8 +867,8 @@ SaveInventoryToJson(entt::registry& registry, entt::entity character) {
         inventory.push_back(std::move(entry.second));
     }
 
-    for (std::size_t slot = 0; slot < native_inventory.equipment.size(); ++slot) {
-        const auto& item = native_inventory.equipment[slot];
+    for (std::size_t slot = 0; slot < inventory_snapshot.equipment.size(); ++slot) {
+        const auto& item = inventory_snapshot.equipment[slot];
         if (!item.has_value() || item->item_id == 0 || item->count <= 0) {
             continue;
         }
@@ -870,13 +878,15 @@ SaveInventoryToJson(entt::registry& registry, entt::entity character) {
         equipment.push_back(std::move(slot_json));
     }
 
-    std::vector<SkillData> skill_entries = native_inventory.skills;
+    std::vector<InventorySnapshotSkillData> skill_entries = inventory_snapshot.skills;
     std::sort(skill_entries.begin(), skill_entries.end(),
-              [](const SkillData& lhs, const SkillData& rhs) {
+              [](const InventorySnapshotSkillData& lhs,
+                 const InventorySnapshotSkillData& rhs) {
                   return lhs.skill_id < rhs.skill_id;
               });
     skill_entries.erase(std::unique(skill_entries.begin(), skill_entries.end(),
-                                    [](const SkillData& lhs, const SkillData& rhs) {
+                                    [](const InventorySnapshotSkillData& lhs,
+                                       const InventorySnapshotSkillData& rhs) {
                                         return lhs.skill_id == rhs.skill_id;
                                     }),
                         skill_entries.end());
@@ -904,12 +914,13 @@ void MigrateAllCharacters(entt::registry& registry) {
     size_t migrated = 0;
     for (auto entity : view) {
         uint32_t character_id = GetCharacterId(registry, entity);
-        auto& inventory = registry.get_or_emplace<InventoryComponent>(entity);
-        SyncInventoryComponentFromRuntime(registry, entity, inventory, character_id);
+        auto& inventory_snapshot = registry.get_or_emplace<InventorySnapshotComponent>(entity);
+        SyncInventorySnapshotFromRuntime(
+            registry, entity, inventory_snapshot, character_id);
         ++migrated;
     }
 
-    SYSLOG_INFO("InventoryMigration: migrated {} characters to native storage", migrated);
+    SYSLOG_INFO("InventoryMigration: migrated {} characters to inventory snapshots", migrated);
 }
 
 }  // namespace mir2::ecs::inventory

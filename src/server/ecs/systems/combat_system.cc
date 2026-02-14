@@ -253,7 +253,7 @@ legend2::DamageResult CombatSystem::TakeDamageWithCalc(entt::registry& registry,
                 auto& effects = registry.get_or_emplace<EffectListComponent>(target);
                 ActiveEffect stun_effect;
                 stun_effect.category = EffectCategory::STUN;
-                stun_effect.source_entity = static_cast<uint32_t>(attacker);
+                stun_effect.source_entity = attacker;
                 stun_effect.start_time_ms = 0; // 需要从外部传入时间
                 stun_effect.end_time_ms = 3000; // 3秒定身
                 effects.add_effect(stun_effect);

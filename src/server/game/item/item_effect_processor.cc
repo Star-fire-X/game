@@ -298,7 +298,7 @@ bool ItemEffectProcessor::ProcessAbilityDrug(entt::entity character) {
 
   ecs::ActiveEffect effect;
   effect.skill_id = active_scroll_item_id_;
-  effect.source_entity = static_cast<uint32_t>(character);
+  effect.source_entity = character;
   effect.category = ecs::EffectCategory::STAT_BUFF;
   effect.value = dc_bonus;
   effect.magic_attack_bonus = mc_bonus;

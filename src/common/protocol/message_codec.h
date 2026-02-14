@@ -97,7 +97,6 @@ struct AttackResponse {
 struct SkillRequest {
     uint32_t skill_id = 0;
     uint64_t target_id = 0;
-    mir2::proto::EntityType target_type = mir2::proto::EntityType::NONE;
 };
 
 MessageCodecStatus ValidateLoginRequest(const LoginRequest& request);

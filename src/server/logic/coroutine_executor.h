@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "logic/task.h"
+#include "logic/thread_affinity.h"
 #include "monitor/metrics_sink.h"
 
 namespace mir2::logic {
@@ -678,6 +679,7 @@ class CoroutineExecutor {
 
       auto fn = std::move(fn_);
       asio::post(executor_->blocking_pool_, [state, fn = std::move(fn)]() mutable {
+        AssertNotOnLogicThread("CoroutineExecutor::AsyncWorker");
         try {
           if constexpr (std::is_void_v<Result>) {
             fn();

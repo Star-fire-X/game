@@ -26,6 +26,10 @@ bool NetworkManager::Start(const std::string& bind_ip, uint16_t port, int max_co
   return server_.Start(bind_ip, port, max_connections);
 }
 
+bool NetworkManager::StartUnix(const std::string& socket_path, int max_connections) {
+  return server_.StartUnix(socket_path, max_connections);
+}
+
 void NetworkManager::Stop() {
   server_.Stop();
   StopAll();

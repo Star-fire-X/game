@@ -10,7 +10,6 @@
     "entt",
     "flatbuffers",
     "gtest",
-    "hiredis",
     "libpqxx",
     "luajit",
     "lz4",

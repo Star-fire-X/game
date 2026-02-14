@@ -6,7 +6,7 @@
  * - Phase 1: GetDefaultMapId() and defensive programming
  * - Phase 2: HandlerContext cache validation
  * - Phase 3: MoveToMap transactional safety
- * - Phase 4: Native inventory storage
+ * - Phase 4: Inventory compatibility snapshot
  */
 
 #include <gtest/gtest.h>
@@ -25,10 +25,10 @@ namespace {
 using mir2::ecs::CharacterEntityManager;
 using mir2::ecs::CharacterIdentityComponent;
 using mir2::ecs::CharacterStateComponent;
-using mir2::ecs::InventoryComponent;
-using mir2::ecs::ItemData;
+using mir2::ecs::InventorySnapshotComponent;
+using mir2::ecs::InventorySnapshotItemData;
 using mir2::ecs::RegistryManager;
-using mir2::ecs::SkillData;
+using mir2::ecs::InventorySnapshotSkillData;
 using mir2::ecs::require_component;
 using mir2::logic::HandlerContext;
 
@@ -309,11 +309,11 @@ TEST_F(MoveToMapTransactionalTest, MovePreservesCharacterData) {
 }
 
 // =============================================================================
-// Phase 4: Native Inventory Storage Tests
+// Phase 4: Inventory Snapshot Compatibility Tests
 // =============================================================================
 
-TEST(NativeInventoryTest, ItemDataStructureHasCorrectFields) {
-  ItemData item;
+TEST(InventorySnapshotCompatTest, ItemDataStructureHasCorrectFields) {
+  InventorySnapshotItemData item;
   item.instance_id = 12345;
   item.item_id = 100;
   item.count = 5;
@@ -329,8 +329,8 @@ TEST(NativeInventoryTest, ItemDataStructureHasCorrectFields) {
   EXPECT_EQ(item.enhancement_level, 3);
 }
 
-TEST(NativeInventoryTest, SkillDataStructureHasCorrectFields) {
-  SkillData skill;
+TEST(InventorySnapshotCompatTest, SkillDataStructureHasCorrectFields) {
+  InventorySnapshotSkillData skill;
   skill.skill_id = 28;
   skill.level = 5;
   skill.cooldown_end_ms = 1000000;
@@ -340,18 +340,18 @@ TEST(NativeInventoryTest, SkillDataStructureHasCorrectFields) {
   EXPECT_EQ(skill.cooldown_end_ms, 1000000u);
 }
 
-TEST(NativeInventoryTest, InventoryComponentHasCorrectCapacity) {
-  InventoryComponent inventory;
+TEST(InventorySnapshotCompatTest, InventoryComponentHasCorrectCapacity) {
+  InventorySnapshotComponent inventory;
 
-  EXPECT_EQ(inventory.slots.size(), InventoryComponent::kMaxSlots);
-  EXPECT_EQ(inventory.equipment.size(), InventoryComponent::kMaxEquipmentSlots);
+  EXPECT_EQ(inventory.slots.size(), InventorySnapshotComponent::kMaxSlots);
+  EXPECT_EQ(inventory.equipment.size(), InventorySnapshotComponent::kMaxEquipmentSlots);
   EXPECT_TRUE(inventory.skills.empty());
 }
 
-TEST(NativeInventoryTest, CanAddItemToSlot) {
-  InventoryComponent inventory;
+TEST(InventorySnapshotCompatTest, CanAddItemToSlot) {
+  InventorySnapshotComponent inventory;
 
-  ItemData item;
+  InventorySnapshotItemData item;
   item.instance_id = 1;
   item.item_id = 100;
   item.count = 1;
@@ -363,10 +363,10 @@ TEST(NativeInventoryTest, CanAddItemToSlot) {
   EXPECT_EQ(inventory.slots[0]->item_id, 100u);
 }
 
-TEST(NativeInventoryTest, CanRemoveItemFromSlot) {
-  InventoryComponent inventory;
+TEST(InventorySnapshotCompatTest, CanRemoveItemFromSlot) {
+  InventorySnapshotComponent inventory;
 
-  ItemData item;
+  InventorySnapshotItemData item;
   item.instance_id = 1;
   item.item_id = 100;
 
@@ -377,10 +377,10 @@ TEST(NativeInventoryTest, CanRemoveItemFromSlot) {
   EXPECT_FALSE(inventory.slots[5].has_value());
 }
 
-TEST(NativeInventoryTest, CanAddEquipment) {
-  InventoryComponent inventory;
+TEST(InventorySnapshotCompatTest, CanAddEquipment) {
+  InventorySnapshotComponent inventory;
 
-  ItemData weapon;
+  InventorySnapshotItemData weapon;
   weapon.instance_id = 1;
   weapon.item_id = 200;
   weapon.equip_slot = 0;  // Weapon slot
@@ -391,14 +391,14 @@ TEST(NativeInventoryTest, CanAddEquipment) {
   EXPECT_EQ(inventory.equipment[0]->item_id, 200u);
 }
 
-TEST(NativeInventoryTest, CanAddSkills) {
-  InventoryComponent inventory;
+TEST(InventorySnapshotCompatTest, CanAddSkills) {
+  InventorySnapshotComponent inventory;
 
-  SkillData skill1;
+  InventorySnapshotSkillData skill1;
   skill1.skill_id = 28;
   skill1.level = 3;
 
-  SkillData skill2;
+  InventorySnapshotSkillData skill2;
   skill2.skill_id = 29;
   skill2.level = 5;
 
@@ -410,8 +410,8 @@ TEST(NativeInventoryTest, CanAddSkills) {
   EXPECT_EQ(inventory.skills[1].skill_id, 29u);
 }
 
-TEST(NativeInventoryTest, OptionalSlotsDefaultToEmpty) {
-  InventoryComponent inventory;
+TEST(InventorySnapshotCompatTest, OptionalSlotsDefaultToEmpty) {
+  InventorySnapshotComponent inventory;
 
   for (size_t i = 0; i < inventory.slots.size(); ++i) {
     EXPECT_FALSE(inventory.slots[i].has_value()) << "Slot " << i << " should be empty";
@@ -422,19 +422,19 @@ TEST(NativeInventoryTest, OptionalSlotsDefaultToEmpty) {
   }
 }
 
-TEST(NativeInventoryTest, CanIterateOverNonEmptySlots) {
-  InventoryComponent inventory;
+TEST(InventorySnapshotCompatTest, CanIterateOverNonEmptySlots) {
+  InventorySnapshotComponent inventory;
 
   // Add items to specific slots
-  ItemData item1;
+  InventorySnapshotItemData item1;
   item1.instance_id = 1;
   inventory.slots[0] = item1;
 
-  ItemData item2;
+  InventorySnapshotItemData item2;
   item2.instance_id = 2;
   inventory.slots[5] = item2;
 
-  ItemData item3;
+  InventorySnapshotItemData item3;
   item3.instance_id = 3;
   inventory.slots[10] = item3;
 

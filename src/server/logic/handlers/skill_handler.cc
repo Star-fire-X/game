@@ -1,5 +1,6 @@
 #include "logic/handlers/skill_handler.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -42,17 +43,15 @@ uint64_t ResolveCasterId(const RoleStore& role_store, uint64_t client_id) {
   if (const auto role_id = role_store.GetRoleId(client_id)) {
     return *role_id;
   }
-  return client_id;
+  return 0;
 }
 
 }  // namespace
 
-SkillHandler::SkillHandler(CoroutineExecutor& executor,
-                           ResponseSender& response_sender,
+SkillHandler::SkillHandler(ResponseSender& response_sender,
                            CombatService& service,
                            RoleStore& role_store)
-    : executor_(executor),
-      response_sender_(response_sender),
+    : response_sender_(response_sender),
       service_(service),
       role_store_(role_store) {}
 
@@ -73,17 +72,13 @@ Task<void> SkillHandler::HandleMessage(HandlerContext ctx,
   }
 
   const auto* req = flatbuffers::GetRoot<mir2::proto::SkillReq>(payload);
-  if (!req) {
-    SYSLOG_WARN("SkillHandler payload missing root (client_id={})", ctx.client_id);
-    co_await SendSkillError(std::move(ctx), mir2::common::ErrorCode::kInvalidAction);
-    co_return;
-  }
 
   const uint64_t target_id = req->target_id();
   const uint32_t skill_id = req->skill_id();
   if (target_id == 0) {
     SYSLOG_WARN("SkillHandler missing target_id (client_id={})", ctx.client_id);
-    co_await SendSkillError(std::move(ctx), mir2::common::ErrorCode::kTargetNotFound);
+    co_await SendSkillError(
+        std::move(ctx), mir2::common::ErrorCode::kTargetNotFound, skill_id);
     co_return;
   }
 
@@ -94,7 +89,8 @@ Task<void> SkillHandler::HandleHot(HandlerContext ctx,
                                    uint64_t target_id,
                                    uint32_t skill_id) {
   if (target_id == 0) {
-    co_await SendSkillError(std::move(ctx), mir2::common::ErrorCode::kTargetNotFound);
+    co_await SendSkillError(
+        std::move(ctx), mir2::common::ErrorCode::kTargetNotFound, skill_id);
     co_return;
   }
 
@@ -102,7 +98,18 @@ Task<void> SkillHandler::HandleHot(HandlerContext ctx,
 }
 
 Task<void> SkillHandler::Handle(HandlerContext ctx, uint64_t target_id, uint32_t skill_id) {
-  const uint64_t caster_id = ResolveCasterId(role_store_, ctx.client_id);
+  const auto role_id = role_store_.GetRoleId(ctx.client_id);
+  if (!role_id.has_value()) {
+    SYSLOG_WARN(
+        "SkillHandler rejected unbound client (client_id={}, target_id={}, skill_id={})",
+        ctx.client_id,
+        target_id,
+        skill_id);
+    co_await SendSkillError(
+        std::move(ctx), mir2::common::ErrorCode::kInvalidAction, skill_id);
+    co_return;
+  }
+  const uint64_t caster_id = *role_id;
   CombatResult result = service_.UseSkill(caster_id, target_id, skill_id);
   auto payload = BuildSkillRsp(result, caster_id, target_id, skill_id);
   co_await response_sender_.SendAsync(
@@ -110,19 +117,22 @@ Task<void> SkillHandler::Handle(HandlerContext ctx, uint64_t target_id, uint32_t
       static_cast<uint16_t>(mir2::common::MsgId::kSkillRsp),
       std::move(payload));
 
-  SYSLOG_DEBUG("SkillHandler skill client_id={} caster_id={} target_id={} skill_id={} code={}",
+  SYSLOG_DEBUG("SkillHandler skill client_id={} caster_id={} target_id={} skill_id={} code={} ({})",
                ctx.client_id,
                caster_id,
                target_id,
                skill_id,
-               static_cast<int>(result.code));
+               static_cast<int>(result.code),
+               mir2::common::error_code_to_string(result.code));
 }
 
-Task<void> SkillHandler::SendSkillError(HandlerContext ctx, mir2::common::ErrorCode code) {
+Task<void> SkillHandler::SendSkillError(HandlerContext ctx,
+                                        mir2::common::ErrorCode code,
+                                        uint32_t skill_id) {
   CombatResult result;
   result.code = code;
   const uint64_t caster_id = ResolveCasterId(role_store_, ctx.client_id);
-  auto payload = BuildSkillRsp(result, caster_id, 0, 0);
+  auto payload = BuildSkillRsp(result, caster_id, 0, skill_id);
   co_await response_sender_.SendAsync(
       ctx.client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kSkillRsp),

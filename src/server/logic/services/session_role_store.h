@@ -25,7 +25,7 @@ class RoleStore {
 
   void BindClientAccount(uint64_t client_id, uint64_t account_id);
   std::optional<uint64_t> GetAccountId(uint64_t client_id) const;
-  void BindClientRole(uint64_t client_id, uint64_t player_id);
+  std::optional<uint64_t> BindClientRole(uint64_t client_id, uint64_t player_id);
   std::optional<uint64_t> GetRoleId(uint64_t client_id) const;
   std::optional<uint64_t> GetClientIdByRoleId(uint64_t player_id) const;
   void UnbindClient(uint64_t client_id);

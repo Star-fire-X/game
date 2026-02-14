@@ -92,7 +92,7 @@ class MockSocket : public SocketAdapter {
     asio::post(executor_, [handler = std::move(handler), bytes]() { handler({}, bytes); });
   }
 
-  void shutdown(asio::ip::tcp::socket::shutdown_type /*type*/, asio::error_code& ec) override {
+  void shutdown(asio::socket_base::shutdown_type /*type*/, asio::error_code& ec) override {
     shutdown_called_ = true;
     CancelPendingRead(asio::error::operation_aborted);
     ec.clear();

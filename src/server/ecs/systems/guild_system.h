@@ -33,7 +33,7 @@ class GuildSystem : public System {
     int CreateGuild(entt::registry& registry, entt::entity player,
                     const std::string& guild_name);
 
-    bool JoinGuild(entt::registry& registry, entt::entity player, uint32_t guild_id);
+    bool JoinGuild(entt::registry& registry, entt::entity player, GuildId guild_id);
     bool LeaveGuild(entt::registry& registry, entt::entity player);
     // Dissolve guild. Returns: 0=success, -1=not leader, -2=member count > 1.
     int DissolveGuild(entt::registry& registry, entt::entity player);
@@ -52,14 +52,14 @@ class GuildSystem : public System {
     // Declare war. Returns: 0=success, -1=not leader, -2=insufficient gold,
     // -3=target not found, -4=allied.
     int DeclareWar(entt::registry& registry, entt::entity player,
-                   uint32_t target_guild_id);
+                   GuildId target_guild_id);
     bool CancelWar(entt::registry& registry, entt::entity player,
-                   uint32_t target_guild_id);
+                   GuildId target_guild_id);
 
     int MakeAlliance(entt::registry& registry, entt::entity player,
-                     uint32_t target_guild_id);
+                     GuildId target_guild_id);
     bool BreakAlliance(entt::registry& registry, entt::entity player,
-                       uint32_t target_guild_id);
+                       GuildId target_guild_id);
 
     bool UpdateNotice(entt::registry& registry, entt::entity player,
                       const std::vector<std::string>& notice_lines);

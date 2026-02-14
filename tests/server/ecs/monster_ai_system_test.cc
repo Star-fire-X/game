@@ -157,6 +157,23 @@ TEST_F(MonsterAISystemTest, AggroComponentDecayHatred) {
     EXPECT_EQ(aggro.cached_top_target_, e1);
 }
 
+TEST_F(MonsterAISystemTest, AggroComponentClearsAfterTimeout) {
+    MonsterAggroComponent aggro;
+    auto target = registry_.create();
+
+    aggro.hate_decay_rate = 0.0f;
+    aggro.hate_clear_time = 1.0f;
+    aggro.AddHatred(target, 100);
+
+    ASSERT_FALSE(aggro.hate_list.empty());
+    aggro.DecayHatred(0.5f);
+    EXPECT_FALSE(aggro.hate_list.empty());
+
+    aggro.DecayHatred(0.6f);
+    EXPECT_TRUE(aggro.hate_list.empty());
+    EXPECT_EQ(aggro.cached_top_target_, static_cast<entt::entity>(entt::null));
+}
+
 TEST_F(MonsterAISystemTest, AggroComponentClear) {
     MonsterAggroComponent aggro;
     auto e1 = registry_.create();

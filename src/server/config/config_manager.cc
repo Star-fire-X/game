@@ -1,5 +1,7 @@
 #include "config/config_manager.h"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 
@@ -13,6 +15,17 @@ T ReadOrDefault(const YAML::Node& node, const char* key, const T& default_value)
     return node[key].as<T>();
   }
   return default_value;
+}
+
+std::string NormalizeTransport(const std::string& value) {
+  std::string normalized = value;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return normalized;
+}
+
+bool IsSupportedTransport(const std::string& value) {
+  return value == "auto" || value == "tcp" || value == "uds";
 }
 
 }  // namespace
@@ -101,6 +114,22 @@ bool ConfigManager::Load(const std::string& config_path) {
         server,
         "coroutine_dump_max_entries",
         server_config_.coroutine_dump_max_entries);
+    server_config_.legacy_fallback_enabled = ReadOrDefault(
+        server,
+        "legacy_fallback_enabled",
+        server_config_.legacy_fallback_enabled);
+    server_config_.legacy_fallback_allow_auth_whitelist = ReadOrDefault(
+        server,
+        "legacy_fallback_allow_auth_whitelist",
+        server_config_.legacy_fallback_allow_auth_whitelist);
+    server_config_.legacy_fallback_allow_critical_msgs = ReadOrDefault(
+        server,
+        "legacy_fallback_allow_critical_msgs",
+        server_config_.legacy_fallback_allow_critical_msgs);
+    server_config_.legacy_fallback_allow_normal_msgs = ReadOrDefault(
+        server,
+        "legacy_fallback_allow_normal_msgs",
+        server_config_.legacy_fallback_allow_normal_msgs);
     server_config_.movement_speed_violation_severity = ReadOrDefault(
         server,
         "movement_speed_violation_severity",
@@ -127,12 +156,6 @@ bool ConfigManager::Load(const std::string& config_path) {
     database_config_.database = ReadOrDefault(database, "database", database_config_.database);
     database_config_.pool_size = ReadOrDefault(database, "pool_size", database_config_.pool_size);
 
-    const YAML::Node redis = root["redis"];
-    redis_config_.host = ReadOrDefault(redis, "host", redis_config_.host);
-    redis_config_.port = ReadOrDefault(redis, "port", redis_config_.port);
-    redis_config_.password = ReadOrDefault(redis, "password", redis_config_.password);
-    redis_config_.db = ReadOrDefault(redis, "db", redis_config_.db);
-
     const YAML::Node log = root["log"];
     log_config_.level = ReadOrDefault(log, "level", log_config_.level);
     log_config_.path = ReadOrDefault(log, "path", log_config_.path);
@@ -140,10 +163,21 @@ bool ConfigManager::Load(const std::string& config_path) {
     log_config_.max_files = ReadOrDefault(log, "max_files", log_config_.max_files);
 
     // 只解析 logic 服务配置（向后兼容：忽略旧的 world/game/db 字段）
+    service_config_.logic = ServiceConfig{}.logic;
     const YAML::Node services = root["services"];
     const YAML::Node logic = services["logic"];
     service_config_.logic.host = ReadOrDefault(logic, "host", service_config_.logic.host);
     service_config_.logic.port = ReadOrDefault(logic, "port", service_config_.logic.port);
+    service_config_.logic.transport = NormalizeTransport(
+        ReadOrDefault(logic, "transport", service_config_.logic.transport));
+    service_config_.logic.uds_path =
+        ReadOrDefault(logic, "uds_path", service_config_.logic.uds_path);
+    if (!IsSupportedTransport(service_config_.logic.transport)) {
+      std::cerr << "Unsupported services.logic.transport='"
+                << service_config_.logic.transport
+                << "', fallback to 'auto'" << std::endl;
+      service_config_.logic.transport = "auto";
+    }
 
     const YAML::Node ecs = root["ecs"];
     ecs_config_.world_registry_reserve =

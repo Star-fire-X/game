@@ -21,12 +21,6 @@ database:
   database: "mir2_game"
   pool_size: 10
 
-redis:
-  host: "127.0.0.1"
-  port: 6379
-  password: ""
-  db: 0
-
 log:
   level: "info"
   path: "logs"
@@ -37,6 +31,8 @@ services:
   logic:
     host: "127.0.0.1"
     port: 8002
+    transport: "auto"  # auto|tcp|uds
+    uds_path: "/tmp/mir2_logic.sock"
 
 # 消息路由表：msg_id -> 目标服务（双进程架构：所有消息路由到logic服务）
 # require_auth: 是否需要认证后才能转发

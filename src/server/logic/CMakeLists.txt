@@ -4,7 +4,9 @@ if(TARGET mir2_server_lib)
     target_sources(mir2_server_lib PRIVATE
         logic_server.cc
         coroutine_executor.cc
+        entity_lane_scheduler.cc
         crash_handler.cc
+        thread_affinity.cc
         services/client_registry.cc
         services/merchant_service.cc
         services/ecs_combat_service.cc

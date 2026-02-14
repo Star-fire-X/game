@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <csignal>
 #include <future>
 #include <limits>
@@ -22,6 +23,7 @@
 #include "storage_engine/backends/storage_engine_backend.h"
 #include "ecs/components/entity_version_component.h"
 #include "ecs/character_snapshot_codec.h"
+#include "ecs/id_types.h"
 #include "ecs/registry_manager.h"
 #include "ecs/systems/combat_system.h"
 #include "ecs/systems/effect_system.h"
@@ -38,6 +40,7 @@
 #include "log/logger.h"
 #include "logic/crash_handler.h"
 #include "logic/coroutine_executor.h"
+#include "logic/entity_lane_scheduler.h"
 #include "logic/events/hot_event_pipeline.h"
 #include "logic/handler_registry.h"
 #include "logic/handlers/attack_handler.h"
@@ -51,6 +54,7 @@
 #include "logic/handlers/skill_handler.h"
 #include "logic/prewarm_manager.h"
 #include "logic/response_sender.h"
+#include "logic/thread_affinity.h"
 #include "logic/services/ecs_combat_service.h"
 #include "logic/services/ecs_inventory_service.h"
 #include "logic/services/player_presence_service.h"
@@ -137,6 +141,18 @@ constexpr const char* kMetricCoroutineHungScanIntervalMs =
     "logic.coroutine.hung_scan_interval_ms";
 constexpr const char* kMetricCoroutineDumpMaxEntries =
     "logic.coroutine.dump_max_entries";
+constexpr const char* kMetricLegacyDispatchBlockedTotal =
+    "logic.legacy_dispatch_blocked_total";
+constexpr const char* kMetricEntityLaneActive = "logic.entity_lane.active";
+constexpr const char* kMetricEntityLanePending = "logic.entity_lane.pending";
+constexpr const char* kMetricEntityVersionMismatchTotal =
+    "logic.entity_version_mismatch_total";
+
+std::string ToLowerAscii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return value;
+}
 
 constexpr std::array<uint16_t, 1> kLoginHandlerMsgIds = {
     static_cast<uint16_t>(common::MsgId::kLoginReq)};
@@ -253,6 +269,14 @@ bool ShouldFallbackOnQueueFull(uint16_t msg_id) {
   return !IsBestEffortMsgId(msg_id);
 }
 
+uint64_t BuildLaneKey(const HandlerContext& context, uint64_t client_id) {
+  constexpr uint64_t kEntityTag = 1ULL << 63;
+  if (context.entity != entt::null) {
+    return kEntityTag | static_cast<uint64_t>(entt::to_integral(context.entity));
+  }
+  return client_id;
+}
+
 RoleRecord BuildRoleRecordFromSnapshot(const common::CharacterData& data,
                                        uint32_t fallback_player_id) {
   RoleRecord record;
@@ -307,6 +331,20 @@ void SendSchemaMismatchKick(const std::shared_ptr<network::TcpSession>& session,
                                  static_cast<uint16_t>(common::MsgId::kKick),
                                  payload);
   session->Send(static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), routed);
+}
+
+std::vector<uint8_t> BuildDuplicateLoginKickPayload() {
+  flatbuffers::FlatBufferBuilder builder;
+  const auto message_offset = builder.CreateString("Account logged in elsewhere");
+  const auto reason_text_offset = builder.CreateString("duplicate login");
+  const auto kick = mir2::proto::CreateKick(
+      builder,
+      mir2::proto::ErrorCode::ERR_KICK_DUPLICATE_LOGIN,
+      message_offset,
+      reason_text_offset);
+  builder.Finish(kick);
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 }  // namespace
 
@@ -400,6 +438,20 @@ bool LogicServer::Initialize(const std::string& config_path) {
       std::max(server_config.coroutine_hung_scan_interval_ms, 1));
   coroutine_dump_max_entries_ = static_cast<size_t>(
       std::clamp(server_config.coroutine_dump_max_entries, 1, 4096));
+  legacy_fallback_enabled_ = server_config.legacy_fallback_enabled;
+  legacy_fallback_allow_auth_whitelist_ =
+      server_config.legacy_fallback_allow_auth_whitelist;
+  legacy_fallback_allow_critical_msgs_ =
+      server_config.legacy_fallback_allow_critical_msgs;
+  legacy_fallback_allow_normal_msgs_ =
+      server_config.legacy_fallback_allow_normal_msgs;
+  SYSLOG_INFO(
+      "LogicServer legacy fallback policy enabled={} allow_auth_whitelist={} "
+      "allow_critical={} allow_normal={}",
+      legacy_fallback_enabled_,
+      legacy_fallback_allow_auth_whitelist_,
+      legacy_fallback_allow_critical_msgs_,
+      legacy_fallback_allow_normal_msgs_);
 
   if (!app_.Initialize(server_config)) {
     SYSLOG_ERROR("LogicServer application init failed");
@@ -442,6 +494,7 @@ bool LogicServer::Initialize(const std::string& config_path) {
   network_ = std::make_unique<network::NetworkManager>(app_.GetIoContext());
 
   executor_ = std::make_unique<CoroutineExecutor>(app_.GetIoContext());
+  entity_lane_scheduler_ = std::make_unique<EntityLaneScheduler>(app_.GetIoContext());
   SYSLOG_INFO(
       "Coroutine timeout semantics: timeout/cancel resumes awaiting coroutine early; "
       "underlying blocking work is not force-cancelled");
@@ -497,10 +550,55 @@ bool LogicServer::Initialize(const std::string& config_path) {
     SYSLOG_WARN("StorageEngine startup recovery had errors");
   }
 
-  if (!network_->Start(server_config.bind_ip, server_config.port, server_config.max_connections)) {
+  const auto& logic_service = config::ConfigManager::Instance().GetServiceConfig().logic;
+  const std::string transport = ToLowerAscii(logic_service.transport);
+  bool started = false;
+  std::string selected_transport = "tcp";
+
+  if (transport == "uds" || (transport == "auto" && !logic_service.uds_path.empty())) {
+    if (logic_service.uds_path.empty()) {
+      if (transport == "uds") {
+        SYSLOG_ERROR("Logic transport 'uds' requires non-empty services.logic.uds_path");
+        return false;
+      }
+    } else {
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+      started = network_->StartUnix(logic_service.uds_path, server_config.max_connections);
+      if (started) {
+        selected_transport = "uds";
+      } else if (transport == "auto") {
+        SYSLOG_WARN(
+            "LogicServer failed to start uds listener(path={}), fallback to tcp {}:{}",
+            logic_service.uds_path,
+            server_config.bind_ip,
+            server_config.port);
+      } else {
+        SYSLOG_ERROR("LogicServer failed to start uds listener(path={})",
+                     logic_service.uds_path);
+        return false;
+      }
+#else
+      if (transport == "uds") {
+        SYSLOG_ERROR("Logic transport 'uds' is not supported on this platform");
+        return false;
+      }
+      SYSLOG_WARN("Logic uds transport unavailable on this platform, fallback to tcp");
+#endif
+    }
+  }
+
+  if (!started) {
+    started = network_->Start(server_config.bind_ip, server_config.port, server_config.max_connections);
+    selected_transport = "tcp";
+  }
+
+  if (!started) {
     SYSLOG_ERROR("LogicServer network start failed");
     return false;
   }
+  SYSLOG_INFO("LogicServer listening via {} endpoint={}{}", selected_transport,
+              selected_transport == "uds" ? logic_service.uds_path : server_config.bind_ip,
+              selected_transport == "uds" ? "" : ":" + std::to_string(server_config.port));
 
   SYSLOG_INFO("LogicServer initialized");
   return true;
@@ -527,6 +625,7 @@ void LogicServer::Run() {
     auto bind_future = bind_promise.get_future();
     asio::post(*io_context_, [this, promise = std::move(bind_promise)]() mutable {
       logic_thread_id_ = std::this_thread::get_id();
+      BindLogicThread(logic_thread_id_);
       if (registry_manager_) {
         registry_manager_->GetCharacterManager().BindToCurrentThread();
       }
@@ -641,6 +740,7 @@ void LogicServer::Shutdown() {
   guild_system_ = nullptr;
   prewarm_manager_.reset();
   executor_.reset();
+  entity_lane_scheduler_.reset();
   role_store_.reset();
   if (storage_engine::StorageEngine::IsInitialized()) {
     storage_engine::StorageEngine::Instance().Flush(10000);
@@ -650,6 +750,7 @@ void LogicServer::Shutdown() {
   tick_timer_.reset();
   signal_set_.reset();
   io_context_ = nullptr;
+  ClearLogicThread();
   logic_thread_id_ = std::thread::id();
   CrashHandler::Shutdown();
 }
@@ -802,15 +903,13 @@ void LogicServer::RegisterHandlers() {
   if (registry_manager_ && !ecs_combat_service_) {
     ecs_combat_service_ = std::make_unique<EcsCombatService>(*registry_manager_);
   }
-  if (executor_ && response_sender_ && ecs_combat_service_ && role_store_ && !attack_handler_) {
-    attack_handler_ = std::make_unique<AttackHandler>(*executor_,
-                                                      *response_sender_,
+  if (response_sender_ && ecs_combat_service_ && role_store_ && !attack_handler_) {
+    attack_handler_ = std::make_unique<AttackHandler>(*response_sender_,
                                                       *ecs_combat_service_,
                                                       *role_store_);
   }
-  if (executor_ && response_sender_ && ecs_combat_service_ && role_store_ && !skill_handler_) {
-    skill_handler_ = std::make_unique<SkillHandler>(*executor_,
-                                                    *response_sender_,
+  if (response_sender_ && ecs_combat_service_ && role_store_ && !skill_handler_) {
+    skill_handler_ = std::make_unique<SkillHandler>(*response_sender_,
                                                     *ecs_combat_service_,
                                                     *role_store_);
   }
@@ -1075,7 +1174,30 @@ void LogicServer::RegisterHandlers() {
                             });
 }
 
+bool LogicServer::IsLegacyBypassAllowed(uint16_t msg_id) const {
+  if (!legacy_fallback_enabled_) {
+    return false;
+  }
+  if (IsAuthWhitelistedMsgId(msg_id)) {
+    return legacy_fallback_allow_auth_whitelist_;
+  }
+  switch (ClassifyMsgPriority(msg_id)) {
+    case events::HotEventPriority::kCritical:
+      return legacy_fallback_allow_critical_msgs_;
+    case events::HotEventPriority::kNormal:
+      return legacy_fallback_allow_normal_msgs_;
+    case events::HotEventPriority::kBestEffort:
+      return false;
+    default:
+      return false;
+  }
+}
+
 HandlerContext LogicServer::BuildHandlerContext(uint64_t client_id) {
+  if (!AssertOnLogicThread("LogicServer::BuildHandlerContext")) {
+    return {};
+  }
+
   HandlerContext context;
   context.client_id = client_id;
 
@@ -1128,6 +1250,13 @@ void LogicServer::DispatchHotEvent(const events::HotEvent& event) {
     return;
   }
 
+  if (!AssertOnLogicThread("LogicServer::DispatchHotEvent")) {
+    if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    return;
+  }
+
   std::vector<events::HotEvent> one_event;
   one_event.reserve(1);
   one_event.push_back(event);
@@ -1147,6 +1276,15 @@ void LogicServer::DispatchHotEventsBatch(std::vector<events::HotEvent> events) {
         if (hot_event_pipeline_ && event.var_ref.length > 0) {
           hot_event_pipeline_->ReleaseVarPayload(event);
         }
+      }
+    }
+    return;
+  }
+
+  if (!AssertOnLogicThread("LogicServer::DispatchHotEventsBatch")) {
+    for (const auto& event : events) {
+      if (hot_event_pipeline_ && event.var_ref.length > 0) {
+        hot_event_pipeline_->ReleaseVarPayload(event);
       }
     }
     return;
@@ -1529,6 +1667,13 @@ bool LogicServer::MaybeSendBackpressurePause(uint64_t client_id,
 }
 
 Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
+  if (!AssertOnLogicThread("LogicServer::ExecuteQueuedEvent")) {
+    if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    co_return;
+  }
+
   if (!IsAuthWhitelistedEvent(event) &&
       !client_registry_.Contains(event.client_id)) {
     if (hot_event_pipeline_ && event.var_ref.length > 0) {
@@ -1546,6 +1691,23 @@ Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
   }
 
   auto context = BuildHandlerContext(event.client_id);
+  if (context.IsValid() && !context.ValidateCacheVersion()) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricEntityVersionMismatchTotal);
+    if (hot_event_pipeline_ && event.var_ref.length > 0) {
+      hot_event_pipeline_->ReleaseVarPayload(event);
+    }
+    SYSLOG_WARN("LogicServer stale context before dispatch client_id={} msg_id={} entity={}",
+                event.client_id,
+                event.msg_id,
+                static_cast<uint64_t>(entt::to_integral(context.entity)));
+    co_return;
+  }
+
+  std::optional<EntityLaneScheduler::ScopedLane> lane_guard;
+  if (entity_lane_scheduler_) {
+    lane_guard.emplace(
+        co_await entity_lane_scheduler_->Enter(BuildLaneKey(context, event.client_id)));
+  }
 
   switch (event.type) {
     case events::HotEventType::kUnknown:
@@ -1699,6 +1861,10 @@ void LogicServer::HandleServiceHello(const std::shared_ptr<network::TcpSession>&
 
 void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>& session,
                                       const std::vector<uint8_t>& payload) {
+  if (!AssertOnLogicThread("LogicServer::HandleRoutedMessage")) {
+    return;
+  }
+
   if (!session) {
     return;
   }
@@ -1812,6 +1978,18 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
 bool LogicServer::DispatchRoutedMessageLegacy(uint64_t client_id,
                                               uint16_t msg_id,
                                               const std::vector<uint8_t>& payload) {
+  if (!AssertOnLogicThread("LogicServer::DispatchRoutedMessageLegacy")) {
+    return false;
+  }
+
+  if (!IsLegacyBypassAllowed(msg_id)) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricLegacyDispatchBlockedTotal);
+    SYSLOG_WARN("LogicServer blocked legacy dispatch by policy msg_id={} client_id={}",
+                msg_id,
+                client_id);
+    return false;
+  }
+
   if (msg_id == static_cast<uint16_t>(common::MsgId::kHeartbeat)) {
     return true;
   }
@@ -2042,18 +2220,31 @@ bool LogicServer::RestoreSessionFromPrewarm(uint64_t client_id,
           }
 
           character_manager.OnLogin(player_id);
-          role_store_->BindClientRole(client_id, player_id);
+          const auto evicted_client_id = role_store_->BindClientRole(client_id, player_id);
+          if (evicted_client_id.has_value() && *evicted_client_id != client_id) {
+            if (auto gateway = GetGatewaySession()) {
+              const auto routed =
+                  common::BuildRoutedMessage(*evicted_client_id,
+                                             static_cast<uint16_t>(common::MsgId::kKick),
+                                             BuildDuplicateLoginKickPayload());
+              gateway->Send(static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), routed);
+            }
+            role_store_->UnbindClient(*evicted_client_id);
+            client_registry_.Remove(*evicted_client_id);
+            SYSLOG_WARN(
+                "LogicServer prewarm evicted old client on duplicate login "
+                "(player_id={}, old_client_id={}, new_client_id={})",
+                player_id,
+                *evicted_client_id,
+                client_id);
+          }
           client_registry_.Track(client_id);
 
           uint64_t resolved_account_id = account_id;
           if (resolved_account_id == 0 && snapshot &&
               !snapshot->account_id.empty()) {
-            try {
-              resolved_account_id = static_cast<uint64_t>(
-                  std::stoull(snapshot->account_id));
-            } catch (...) {
-              resolved_account_id = 0;
-            }
+            resolved_account_id = mir2::ecs::ParseAccountIdOr(
+                snapshot->account_id, mir2::ecs::kInvalidAccountId);
           }
 
           if (resolved_account_id != 0) {
@@ -2252,6 +2443,19 @@ void LogicServer::TickWorldSystems(ecs::World& world,
 }
 
 void LogicServer::Tick(float delta_time) {
+  if (!AssertOnLogicThread("LogicServer::Tick")) {
+    return;
+  }
+
+  if (entity_lane_scheduler_) {
+    monitor::Metrics::Instance().SetGauge(
+        kMetricEntityLaneActive,
+        static_cast<double>(entity_lane_scheduler_->ActiveLanes()));
+    monitor::Metrics::Instance().SetGauge(
+        kMetricEntityLanePending,
+        static_cast<double>(entity_lane_scheduler_->PendingWaiters()));
+  }
+
   if (hot_event_pipeline_) {
     std::size_t drained = 0;
     std::vector<events::HotEvent> drained_events;

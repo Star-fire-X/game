@@ -4,6 +4,7 @@
 
 #include <entt/entt.hpp>
 
+#include "combat_generated.h"
 #include "config/config_manager.h"
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
@@ -11,40 +12,12 @@
 #include "ecs/systems/combat_system.h"
 #include "ecs/world.h"
 #include "log/logger.h"
+#include "logic/services/error_code_adapter.h"
 #include "server/ecs/systems/combat_core.h"
 
 namespace mir2::logic {
 
 namespace {
-
-mir2::common::ErrorCode ToLegacyError(mir2::common::ErrorCode code) {
-  switch (code) {
-    case mir2::common::ErrorCode::SUCCESS:
-      return mir2::common::ErrorCode::kOk;
-    case mir2::common::ErrorCode::INVALID_ACTION:
-      return mir2::common::ErrorCode::kInvalidAction;
-    case mir2::common::ErrorCode::TARGET_NOT_FOUND:
-      return mir2::common::ErrorCode::kTargetNotFound;
-    case mir2::common::ErrorCode::TARGET_OUT_OF_RANGE:
-      return mir2::common::ErrorCode::kTargetOutOfRange;
-    case mir2::common::ErrorCode::INSUFFICIENT_MP:
-      return mir2::common::ErrorCode::kInsufficientMp;
-    case mir2::common::ErrorCode::SKILL_ON_COOLDOWN:
-      return mir2::common::ErrorCode::kSkillCooldown;
-    case mir2::common::ErrorCode::CHARACTER_DEAD:
-      return mir2::common::ErrorCode::kTargetDead;
-    case mir2::common::ErrorCode::ITEM_NOT_FOUND:
-      return mir2::common::ErrorCode::kTargetNotFound;
-    case mir2::common::ErrorCode::INVENTORY_FULL:
-      return mir2::common::ErrorCode::kInvalidAction;
-    case mir2::common::ErrorCode::INVALID_POSITION:
-      return mir2::common::ErrorCode::kInvalidAction;
-    case mir2::common::ErrorCode::POSITION_NOT_WALKABLE:
-      return mir2::common::ErrorCode::kInvalidAction;
-    default:
-      return mir2::common::ErrorCode::kUnknown;
-  }
-}
 
 mir2::ecs::EventBus* ResolveEventBus(mir2::ecs::RegistryManager& registry_manager,
                                     std::optional<uint32_t> map_id) {
@@ -60,9 +33,17 @@ mir2::ecs::EventBus* ResolveEventBus(mir2::ecs::RegistryManager& registry_manage
 EcsCombatService::EcsCombatService(mir2::ecs::RegistryManager& registry_manager)
     : registry_manager_(registry_manager) {}
 
-CombatResult EcsCombatService::Attack(uint64_t attacker_id, uint64_t target_id) {
+CombatResult EcsCombatService::Attack(uint64_t attacker_id,
+                                      uint64_t target_id,
+                                      mir2::proto::EntityType target_type) {
   CombatResult result;
 
+  if (target_type == mir2::proto::EntityType::NONE) {
+    SYSLOG_WARN("EcsCombatService::Attack invalid target_type=NONE (attacker={}, target={})",
+                attacker_id, target_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
   if (attacker_id == 0) {
     SYSLOG_WARN("EcsCombatService::Attack invalid attacker_id=0");
     result.code = mir2::common::ErrorCode::kInvalidAction;
@@ -75,13 +56,14 @@ CombatResult EcsCombatService::Attack(uint64_t attacker_id, uint64_t target_id) 
   }
 
   auto& character_manager = registry_manager_.GetCharacterManager();
-  entt::entity attacker = character_manager.GetOrCreate(static_cast<uint32_t>(attacker_id));
-  if (attacker == entt::null) {
+  auto attacker_opt = character_manager.TryGet(static_cast<uint32_t>(attacker_id));
+  if (!attacker_opt.has_value()) {
     SYSLOG_WARN("EcsCombatService::Attack failed to resolve attacker entity (id={})",
                 attacker_id);
     result.code = mir2::common::ErrorCode::kInvalidAction;
     return result;
   }
+  entt::entity attacker = *attacker_opt;
 
   auto target_opt = character_manager.TryGet(static_cast<uint32_t>(target_id));
   if (!target_opt.has_value()) {
@@ -122,9 +104,11 @@ CombatResult EcsCombatService::Attack(uint64_t attacker_id, uint64_t target_id) 
   }
   result.target_dead = attack_result.target_died;
 
-  SYSLOG_DEBUG("EcsCombatService::Attack attacker={} target={} code={} damage={} hp={} dead={}",
+  SYSLOG_DEBUG(
+      "EcsCombatService::Attack attacker={} target={} target_type={} code={} damage={} hp={} dead={}",
                attacker_id,
                target_id,
+               static_cast<int>(target_type),
                static_cast<int>(result.code),
                result.damage,
                result.target_hp,
@@ -155,13 +139,14 @@ CombatResult EcsCombatService::UseSkill(uint64_t caster_id,
   }
 
   auto& character_manager = registry_manager_.GetCharacterManager();
-  entt::entity caster = character_manager.GetOrCreate(static_cast<uint32_t>(caster_id));
-  if (caster == entt::null) {
+  auto caster_opt = character_manager.TryGet(static_cast<uint32_t>(caster_id));
+  if (!caster_opt.has_value()) {
     SYSLOG_WARN("EcsCombatService::UseSkill failed to resolve caster entity (id={})",
                 caster_id);
     result.code = mir2::common::ErrorCode::kInvalidAction;
     return result;
   }
+  entt::entity caster = *caster_opt;
 
   auto target_opt = character_manager.TryGet(static_cast<uint32_t>(target_id));
   if (!target_opt.has_value()) {

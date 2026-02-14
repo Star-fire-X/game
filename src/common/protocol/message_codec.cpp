@@ -148,11 +148,10 @@ MessageCodecStatus ValidateSkillRequest(const SkillRequest& request) {
     if (request.skill_id == 0) {
         return MessageCodecStatus::kMissingField;
     }
-    if (request.target_type == mir2::proto::EntityType::NONE) {
+    if (request.target_id == 0) {
         return MessageCodecStatus::kMissingField;
     }
-    return ValidateEnumRange(static_cast<uint32_t>(request.target_type),
-                             static_cast<uint32_t>(mir2::proto::EntityType::ITEM));
+    return MessageCodecStatus::kOk;
 }
 
 std::vector<uint8_t> EncodeLoginRequest(const LoginRequest& request,

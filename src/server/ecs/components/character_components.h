@@ -8,14 +8,16 @@
 #ifndef MIR2_SERVER_ECS_CHARACTER_COMPONENTS_H_
 #define MIR2_SERVER_ECS_CHARACTER_COMPONENTS_H_
 
+#include "ecs/id_types.h"
+#include "ecs/components/inventory_snapshot_component.h"
+
 #include "common/types.h"
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <climits>
-#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mir2::ecs {
@@ -24,11 +26,29 @@ namespace mir2::ecs {
  * @brief 角色身份组件
  */
 struct CharacterIdentityComponent {
-    uint32_t id = 0;                      ///< 角色唯一ID
-    std::string account_id;               ///< 账号ID
+    CharacterId id = kInvalidCharacterId; ///< 角色唯一ID
+    std::string account_id;               ///< 账号ID（兼容字符串镜像）
     std::string name;                     ///< 角色名称
     mir2::common::CharacterClass char_class = mir2::common::CharacterClass::WARRIOR;  ///< 职业
     mir2::common::Gender gender = mir2::common::Gender::MALE;                         ///< 性别
+    AccountId account_id_value = kInvalidAccountId;  ///< 账号ID（稳定数值ID）
+
+    void SetAccountIdValue(AccountId value) {
+        account_id_value = value;
+        account_id = AccountIdToString(value);
+    }
+
+    void SetAccountIdString(std::string value) {
+        account_id = std::move(value);
+        account_id_value = ParseAccountIdOr(account_id, kInvalidAccountId);
+    }
+
+    AccountId ResolveAccountIdValue() const {
+        if (account_id_value != kInvalidAccountId) {
+            return account_id_value;
+        }
+        return ParseAccountIdOr(account_id, kInvalidAccountId);
+    }
 };
 
 /**
@@ -116,57 +136,13 @@ struct ChatPreferenceComponent {
 };
 
 /**
- * @brief 物品实例数据（原生 C++ 存储）
- */
-struct ItemData {
-    uint64_t instance_id = 0;
-    uint32_t item_id = 0;
-    int count = 1;
-    int durability = 0;
-    int max_durability = 0;
-    int enhancement_level = 0;
-
-    // 以下字段保留运行态兼容，避免能力回退。
-    int shape = 0;
-    int looks = 0;
-    int std_mode = 0;
-    int luck = 0;
-    int equip_slot = -1;
-};
-
-/**
- * @brief 技能数据（原生 C++ 存储）
- */
-struct SkillData {
-    uint32_t skill_id = 0;
-    uint8_t level = 0;
-    uint64_t cooldown_end_ms = 0;
-};
-
-/**
- * @brief 背包与装备组件（原生 C++ 存储）
- *
- * 说明：
- * - 运行时业务逻辑只操作原生结构；
- * - JSON/FlatBuffers 仅在 DB 与网络边界进行转换。
- */
-struct InventoryComponent {
-    static constexpr std::size_t kMaxSlots = 46;
-    static constexpr std::size_t kMaxEquipmentSlots = 13;
-
-    std::array<std::optional<ItemData>, kMaxSlots> slots;
-    std::array<std::optional<ItemData>, kMaxEquipmentSlots> equipment;
-    std::vector<SkillData> skills;
-};
-
-/**
  * @brief 角色脏标记组件
  */
 struct DirtyComponent {
     bool identity_dirty = false;    ///< 身份数据变更
     bool attributes_dirty = false;  ///< 属性数据变更
     bool state_dirty = false;       ///< 状态数据变更
-    bool inventory_dirty = false;   ///< 旧版背包脏标记（等价于 items/equipment/skills）
+    bool inventory_dirty = false;   ///< 旧版兼容脏标记（快照层）
     bool items_dirty = false;       ///< 物品数据变更
     bool equipment_dirty = false;   ///< 装备数据变更
     bool skills_dirty = false;      ///< 技能数据变更

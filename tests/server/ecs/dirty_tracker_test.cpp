@@ -60,6 +60,34 @@ TEST(DirtyTrackerTest, MarkInventoryDirtyCreatesDirtyComponent) {
     EXPECT_TRUE(dirty_tracker::is_dirty(registry, entity));
 }
 
+TEST(DirtyTrackerTest, MarkItemsDirtyDoesNotSetLegacyInventoryDirty) {
+    entt::registry registry;
+    auto entity = registry.create();
+
+    dirty_tracker::mark_items_dirty(registry, entity);
+
+    auto* dirty = registry.try_get<DirtyComponent>(entity);
+    ASSERT_NE(dirty, nullptr);
+    EXPECT_TRUE(dirty->items_dirty);
+    EXPECT_FALSE(dirty->inventory_dirty);
+    EXPECT_TRUE(dirty_tracker::is_dirty(registry, entity));
+}
+
+TEST(DirtyTrackerTest, MarkEquipmentAndSkillsDirtyDoNotSetLegacyInventoryDirty) {
+    entt::registry registry;
+    auto entity = registry.create();
+
+    dirty_tracker::mark_equipment_dirty(registry, entity);
+    dirty_tracker::mark_skills_dirty(registry, entity);
+
+    auto* dirty = registry.try_get<DirtyComponent>(entity);
+    ASSERT_NE(dirty, nullptr);
+    EXPECT_TRUE(dirty->equipment_dirty);
+    EXPECT_TRUE(dirty->skills_dirty);
+    EXPECT_FALSE(dirty->inventory_dirty);
+    EXPECT_TRUE(dirty_tracker::is_dirty(registry, entity));
+}
+
 TEST(DirtyTrackerTest, IsDirtyReturnsFalseForCleanEntity) {
     entt::registry registry;
     auto entity = registry.create();

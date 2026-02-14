@@ -26,6 +26,10 @@ server:
   coroutine_hung_threshold_ms: 5000
   coroutine_hung_scan_interval_ms: 500
   coroutine_dump_max_entries: 64
+  legacy_fallback_enabled: true
+  legacy_fallback_allow_auth_whitelist: true
+  legacy_fallback_allow_critical_msgs: true
+  legacy_fallback_allow_normal_msgs: false
   movement_speed_violation_severity: 10
   movement_teleport_violation_severity: 5
 
@@ -37,14 +41,15 @@ database:
   database: "mir2_game"
   pool_size: 10
 
-redis:
-  host: "127.0.0.1"
-  port: 6379
-  password: ""
-  db: 0
-
 log:
   level: "info"
   path: "logs"
   max_size_mb: 100
   max_files: 10
+
+services:
+  logic:
+    host: "127.0.0.1"
+    port: 8002
+    transport: "auto"  # auto|tcp|uds
+    uds_path: "/tmp/mir2_logic.sock"

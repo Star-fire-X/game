@@ -16,12 +16,6 @@ database:
   database: "test_db"
   pool_size: 2
 
-redis:
-  host: "127.0.0.1"
-  port: 6379
-  password: ""
-  db: 0
-
 log:
   level: "debug"
   path: "test_logs"

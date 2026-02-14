@@ -88,7 +88,7 @@ entt::entity CreateEntityWithComponents(entt::registry& registry) {
     attributes.speed = 6;
     attributes.gold = 777;
 
-    registry.emplace<mir2::ecs::InventoryComponent>(entity);
+    registry.emplace<mir2::ecs::InventorySnapshotComponent>(entity);
 
     auto& equipment = registry.emplace<mir2::ecs::EquipmentSlotComponent>(entity);
     equipment.slots.fill(entt::null);
@@ -159,8 +159,8 @@ TEST(CharacterCodecTest, LoadCharacterEntity_AllComponents) {
     EXPECT_EQ(state.position.x, data.position.x);
     EXPECT_EQ(state.position.y, data.position.y);
 
-    ASSERT_TRUE(registry.all_of<mir2::ecs::InventoryComponent>(entity));
-    auto& inv = registry.get<mir2::ecs::InventoryComponent>(entity);
+    ASSERT_TRUE(registry.all_of<mir2::ecs::InventorySnapshotComponent>(entity));
+    auto& inv = registry.get<mir2::ecs::InventorySnapshotComponent>(entity);
     ASSERT_TRUE(inv.slots[0].has_value());
     EXPECT_EQ(inv.slots[0]->item_id, 2001u);
     EXPECT_EQ(inv.slots[0]->count, 2);
@@ -182,6 +182,21 @@ TEST(CharacterCodecTest, LoadCharacterEntity_AllComponents) {
     EXPECT_FALSE(dirty.inventory_dirty);
 }
 
+TEST(CharacterCodecTest, LoadCharacterEntity_ParsesNumericAccountId) {
+    entt::registry registry;
+    CharacterData data;
+    data.id = 77;
+    data.account_id = "123456";
+    data.name = "NumericAccount";
+
+    entt::entity entity = LoadCharacterEntity(registry, data);
+    const auto& identity =
+        registry.get<mir2::ecs::CharacterIdentityComponent>(entity);
+    EXPECT_EQ(identity.account_id, "123456");
+    EXPECT_EQ(identity.account_id_value, 123456u);
+    EXPECT_EQ(identity.ResolveAccountIdValue(), 123456u);
+}
+
 TEST(CharacterCodecTest, LoadCharacterEntity_MinimalData) {
     entt::registry registry;
     CharacterData data;
@@ -197,8 +212,8 @@ TEST(CharacterCodecTest, LoadCharacterEntity_MinimalData) {
     EXPECT_TRUE(registry.all_of<mir2::ecs::CharacterAttributesComponent>(entity));
     EXPECT_TRUE(registry.all_of<mir2::ecs::CharacterStateComponent>(entity));
     EXPECT_TRUE(registry.all_of<mir2::ecs::DirtyComponent>(entity));
-    EXPECT_TRUE(registry.all_of<mir2::ecs::InventoryComponent>(entity));
-    const auto& inv = registry.get<mir2::ecs::InventoryComponent>(entity);
+    EXPECT_TRUE(registry.all_of<mir2::ecs::InventorySnapshotComponent>(entity));
+    const auto& inv = registry.get<mir2::ecs::InventorySnapshotComponent>(entity);
     EXPECT_TRUE(std::all_of(inv.slots.begin(), inv.slots.end(),
                             [](const auto& slot) { return !slot.has_value(); }));
     EXPECT_TRUE(std::all_of(inv.equipment.begin(), inv.equipment.end(),
@@ -267,6 +282,30 @@ TEST(CharacterCodecTest, SaveCharacterData_AllComponents) {
 
     EXPECT_EQ(data.created_at, 1700000000);
     EXPECT_EQ(data.last_login, 1700001234);
+}
+
+TEST(CharacterCodecTest, SaveCharacterData_FallsBackToNumericAccountId) {
+    entt::registry registry;
+    const entt::entity entity = registry.create();
+    auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
+    identity.id = 9001;
+    identity.name = "NumericOnly";
+    identity.SetAccountIdValue(778899);
+    identity.account_id.clear();
+
+    CharacterData data = SaveCharacterData(registry, entity);
+    EXPECT_EQ(data.account_id, "778899");
+}
+
+TEST(CharacterCodecTest, SaveCharacterData_KeepsAccountIdEmptyWhenInvalid) {
+    entt::registry registry;
+    const entt::entity entity = registry.create();
+    auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
+    identity.id = 9002;
+    identity.name = "NoAccount";
+
+    CharacterData data = SaveCharacterData(registry, entity);
+    EXPECT_TRUE(data.account_id.empty());
 }
 
 TEST(CharacterCodecTest, SaveCharacterData_MissingComponents) {

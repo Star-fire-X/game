@@ -55,6 +55,23 @@ std::optional<entt::entity> PlayerPresenceService::FindEntity(uint64_t player_id
 
 std::optional<uint64_t> PlayerPresenceService::FindPlayerIdByName(
     const std::string& name) const {
+  if (name.empty()) {
+    return std::nullopt;
+  }
+
+  auto cached = name_lookup_cache_.find(name);
+  if (cached != name_lookup_cache_.end()) {
+    auto entity_opt = FindEntityById(registry_, cached->second);
+    if (entity_opt.has_value()) {
+      const auto* identity = registry_.try_get<ecs::CharacterIdentityComponent>(*entity_opt);
+      const auto* state = registry_.try_get<ecs::CharacterStateComponent>(*entity_opt);
+      if (identity && state && state->is_online && identity->name == name) {
+        return cached->second;
+      }
+    }
+    name_lookup_cache_.erase(cached);
+  }
+
   auto view =
       registry_.view<ecs::CharacterIdentityComponent, ecs::CharacterStateComponent>();
   for (auto entity : view) {
@@ -64,10 +81,16 @@ std::optional<uint64_t> PlayerPresenceService::FindPlayerIdByName(
     }
     const auto& state = view.get<ecs::CharacterStateComponent>(entity);
     if (!state.is_online) {
+      name_lookup_cache_.erase(name);
       return std::nullopt;
     }
+    if (name_lookup_cache_.size() >= kNameLookupCacheMaxEntries) {
+      name_lookup_cache_.clear();
+    }
+    name_lookup_cache_[name] = identity.id;
     return identity.id;
   }
+  name_lookup_cache_.erase(name);
   return std::nullopt;
 }
 

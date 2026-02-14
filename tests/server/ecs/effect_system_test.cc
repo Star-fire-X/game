@@ -79,6 +79,24 @@ TEST(EffectSystemTest, InvisibilityTogglesOnAndOff) {
     EXPECT_EQ(effects->effects[0].category, EffectCategory::POISON);
 }
 
+TEST(EffectSystemTest, ApplyEffectPreservesSourceEntity) {
+    entt::registry registry;
+    EffectSystem system(registry);
+    const auto source = registry.create();
+    const auto target = registry.create();
+
+    ActiveEffect buff = MakeEffect(EffectCategory::STAT_BUFF);
+    buff.source_entity = source;
+    buff.value = 2;
+
+    system.apply_effect(target, buff);
+
+    const auto* effects = registry.try_get<EffectListComponent>(target);
+    ASSERT_NE(effects, nullptr);
+    ASSERT_EQ(effects->effects.size(), 1u);
+    EXPECT_EQ(effects->effects.front().source_entity, source);
+}
+
 TEST(EffectSystemTest, ExpiredEffectsAreRemovedAndStatsRecalculated) {
     entt::registry registry;
     EffectSystem system(registry);

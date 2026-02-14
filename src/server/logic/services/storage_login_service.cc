@@ -162,7 +162,7 @@ Task<void> StorageLoginService::LoginAsync(std::string username,
 bool StorageLoginService::IsMissingAccountCached(const std::string& username) {
   const auto now = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(negative_cache_mutex_);
-  PruneExpiredLocked(now);
+  MaybePruneExpiredLocked(now);
   auto it = negative_cache_.find(username);
   if (it == negative_cache_.end()) {
     return false;
@@ -177,7 +177,7 @@ bool StorageLoginService::IsMissingAccountCached(const std::string& username) {
 void StorageLoginService::CacheMissingAccount(const std::string& username) {
   const auto now = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(negative_cache_mutex_);
-  PruneExpiredLocked(now);
+  MaybePruneExpiredLocked(now);
   if (negative_cache_.size() >= kMaxNegativeCacheEntries) {
     negative_cache_.erase(negative_cache_.begin());
   }
@@ -187,6 +187,15 @@ void StorageLoginService::CacheMissingAccount(const std::string& username) {
 void StorageLoginService::RemoveMissingAccount(const std::string& username) {
   std::lock_guard<std::mutex> lock(negative_cache_mutex_);
   negative_cache_.erase(username);
+}
+
+void StorageLoginService::MaybePruneExpiredLocked(
+    std::chrono::steady_clock::time_point now) {
+  if (now < next_prune_at_) {
+    return;
+  }
+  PruneExpiredLocked(now);
+  next_prune_at_ = now + kNegativeCachePruneInterval;
 }
 
 void StorageLoginService::PruneExpiredLocked(

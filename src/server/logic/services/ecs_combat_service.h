@@ -19,7 +19,9 @@ class EcsCombatService : public CombatService {
  public:
   explicit EcsCombatService(mir2::ecs::RegistryManager& registry_manager);
 
-  CombatResult Attack(uint64_t attacker_id, uint64_t target_id) override;
+  CombatResult Attack(uint64_t attacker_id,
+                      uint64_t target_id,
+                      mir2::proto::EntityType target_type) override;
   CombatResult UseSkill(uint64_t caster_id, uint64_t target_id, uint32_t skill_id) override;
 
  private:

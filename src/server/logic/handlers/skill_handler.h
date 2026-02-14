@@ -19,7 +19,6 @@ struct SkillReq;
 
 namespace mir2::logic {
 
-class CoroutineExecutor;
 class ResponseSender;
 class CombatService;
 class RoleStore;
@@ -30,8 +29,7 @@ namespace mir2::logic {
 
 class SkillHandler {
  public:
-  SkillHandler(CoroutineExecutor& executor,
-               ResponseSender& response_sender,
+  SkillHandler(ResponseSender& response_sender,
                CombatService& service,
                RoleStore& role_store);
 
@@ -40,9 +38,10 @@ class SkillHandler {
   Task<void> Handle(HandlerContext ctx, uint64_t target_id, uint32_t skill_id);
 
  private:
-  Task<void> SendSkillError(HandlerContext ctx, mir2::common::ErrorCode code);
+  Task<void> SendSkillError(HandlerContext ctx,
+                            mir2::common::ErrorCode code,
+                            uint32_t skill_id = 0);
 
-  CoroutineExecutor& executor_;
   ResponseSender& response_sender_;
   CombatService& service_;
   RoleStore& role_store_;

@@ -1,10 +1,11 @@
 #ifndef MIR2_LOGIC_SERVICES_MERCHANT_SERVICE_H_
 #define MIR2_LOGIC_SERVICES_MERCHANT_SERVICE_H_
 
+#include <cstdint>
 #include <entt/entt.hpp>
+#include <string>
 #include <unordered_map>
 #include <vector>
-#include <string>
 
 namespace mir2::ecs { class EventBus; }
 
@@ -37,6 +38,7 @@ private:
     entt::registry& registry_;
     ecs::EventBus& event_bus_;
     std::unordered_map<uint32_t, ShopConfig> shops_;
+    std::unordered_map<uint32_t, uint32_t> open_shop_by_player_id_;
 };
 
 }  // namespace mir2::logic

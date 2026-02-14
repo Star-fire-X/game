@@ -522,7 +522,6 @@ if(BUILD_SERVER)
     endif()
 
     find_package(libpqxx CONFIG QUIET)
-    find_package(hiredis CONFIG QUIET)
     if(LEGEND2_ENABLE_PROMETHEUS)
         find_package(prometheus-cpp CONFIG REQUIRED)
     endif()

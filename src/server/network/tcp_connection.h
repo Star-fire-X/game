@@ -21,6 +21,10 @@
 #include <asio/buffer.hpp>
 #include <asio/error_code.hpp>
 #include <asio/ip/tcp.hpp>
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+#include <asio/local/stream_protocol.hpp>
+#endif
+#include <asio/socket_base.hpp>
 #include <asio/write.hpp>
 
 namespace mir2::network {
@@ -38,7 +42,7 @@ class SocketAdapter {
   virtual ~SocketAdapter() = default;
   virtual void async_read_some(const asio::mutable_buffer& buffer, IoHandler handler) = 0;
   virtual void async_write(const asio::const_buffer& buffer, IoHandler handler) = 0;
-  virtual void shutdown(asio::ip::tcp::socket::shutdown_type type, asio::error_code& ec) = 0;
+  virtual void shutdown(asio::socket_base::shutdown_type type, asio::error_code& ec) = 0;
   virtual void close(asio::error_code& ec) = 0;
   virtual asio::ip::tcp::endpoint remote_endpoint(asio::error_code& ec) const = 0;
   virtual IoExecutor GetExecutor() = 0;
@@ -59,7 +63,7 @@ class AsioSocketAdapter : public SocketAdapter {
     asio::async_write(socket_, buffer, std::move(handler));
   }
 
-  void shutdown(asio::ip::tcp::socket::shutdown_type type, asio::error_code& ec) override {
+  void shutdown(asio::socket_base::shutdown_type type, asio::error_code& ec) override {
     socket_.shutdown(type, ec);
   }
 
@@ -76,6 +80,43 @@ class AsioSocketAdapter : public SocketAdapter {
  private:
   asio::ip::tcp::socket socket_;
 };
+
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+/**
+ * @brief Asio Unix Domain Socket 适配器实现
+ */
+class UdsSocketAdapter : public SocketAdapter {
+ public:
+  explicit UdsSocketAdapter(asio::local::stream_protocol::socket socket)
+      : socket_(std::move(socket)) {}
+
+  void async_read_some(const asio::mutable_buffer& buffer, IoHandler handler) override {
+    socket_.async_read_some(buffer, std::move(handler));
+  }
+
+  void async_write(const asio::const_buffer& buffer, IoHandler handler) override {
+    asio::async_write(socket_, buffer, std::move(handler));
+  }
+
+  void shutdown(asio::socket_base::shutdown_type type, asio::error_code& ec) override {
+    socket_.shutdown(type, ec);
+  }
+
+  void close(asio::error_code& ec) override {
+    socket_.close(ec);
+  }
+
+  asio::ip::tcp::endpoint remote_endpoint(asio::error_code& ec) const override {
+    ec = asio::error::operation_not_supported;
+    return {};
+  }
+
+  IoExecutor GetExecutor() override { return socket_.get_executor(); }
+
+ private:
+  asio::local::stream_protocol::socket socket_;
+};
+#endif
 
 /**
  * @brief TCP连接

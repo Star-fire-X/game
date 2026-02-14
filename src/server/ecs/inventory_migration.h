@@ -1,8 +1,8 @@
 /**
  * @file inventory_migration.h
- * @brief JSON 与结构化组件迁移工具
+ * @brief JSON 与实体化库存快照兼容迁移工具
  *
- * 提供 JSON <-> ECS 结构化组件的转换函数，支持批量迁移。
+ * 提供 JSON <-> ECS 兼容快照组件的转换函数，支持批量迁移。
  */
 
 #ifndef MIR2_SERVER_ECS_INVENTORY_MIGRATION_H_
@@ -15,14 +15,14 @@
 
 namespace mir2::ecs::inventory {
 
-/// JSON → 结构化组件
+/// JSON → 实体化运行时组件 + 快照同步
 void LoadInventoryFromJson(entt::registry& registry,
                            entt::entity character,
                            const std::string& inventory_json,
                            const std::string& equipment_json,
                            const std::string& skills_json);
 
-/// 结构化组件 → JSON（向后兼容）
+/// 快照同步 → JSON（向后兼容）
 std::tuple<std::string, std::string, std::string>
 SaveInventoryToJson(entt::registry& registry, entt::entity character);
 

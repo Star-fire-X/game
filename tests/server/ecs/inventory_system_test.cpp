@@ -129,6 +129,73 @@ TEST(InventorySystemTest, AddItemFailsWhenInventoryFull) {
     EXPECT_FALSE(is_dirty(registry, character));
 }
 
+TEST(InventorySystemTest, AddItemIgnoresCompatibilitySnapshotOccupancy) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+
+    auto& snapshot = registry.emplace<mir2::ecs::InventorySnapshotComponent>(character);
+    for (std::size_t i = 0; i < snapshot.slots.size(); ++i) {
+        mir2::ecs::InventorySnapshotItemData item;
+        item.instance_id = static_cast<uint64_t>(i + 1);
+        item.item_id = 9000u + static_cast<uint32_t>(i);
+        item.count = 1;
+        snapshot.slots[i] = item;
+    }
+
+    auto result = mir2::ecs::InventorySystem::AddItem(
+        registry, character, 202u, 1, nullptr);
+
+    ASSERT_TRUE(result.has_value());
+    const auto item_entity = *result;
+    const auto* owner = registry.try_get<InventoryOwnerComponent>(item_entity);
+    ASSERT_NE(owner, nullptr);
+    EXPECT_EQ(owner->slot_index, 0);
+}
+
+TEST(InventorySystemTest, EquipItemIgnoresCompatibilitySnapshotEquipmentOccupancy) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+
+    auto& snapshot = registry.emplace<mir2::ecs::InventorySnapshotComponent>(character);
+    mir2::ecs::InventorySnapshotItemData equipped_snapshot_item;
+    equipped_snapshot_item.instance_id = 9999;
+    equipped_snapshot_item.item_id = 5001;
+    equipped_snapshot_item.count = 1;
+    snapshot.equipment[0] = equipped_snapshot_item;
+
+    const auto item = CreateItem(registry, character, 0, 300u, 1, 0);
+    bool equipped = mir2::ecs::InventorySystem::EquipItem(registry, character, item, nullptr);
+
+    ASSERT_TRUE(equipped);
+    const auto* equipment = registry.try_get<mir2::ecs::EquipmentSlotComponent>(character);
+    ASSERT_NE(equipment, nullptr);
+    EXPECT_EQ(equipment->slots[0], item);
+
+    const auto* owner = registry.try_get<InventoryOwnerComponent>(item);
+    ASSERT_NE(owner, nullptr);
+    EXPECT_EQ(owner->slot_index, -1);
+}
+
+TEST(InventorySystemTest, LearnSkillIgnoresCompatibilitySnapshotSkills) {
+    entt::registry registry;
+    const auto character = CreateCharacter(registry);
+
+    auto& snapshot = registry.emplace<mir2::ecs::InventorySnapshotComponent>(character);
+    mir2::ecs::InventorySnapshotSkillData snapshot_skill;
+    snapshot_skill.skill_id = 7001u;
+    snapshot_skill.level = 9;
+    snapshot.skills.push_back(snapshot_skill);
+
+    auto learned = mir2::ecs::InventorySystem::LearnSkill(registry, character, 7001u, 1, nullptr);
+    ASSERT_TRUE(learned.has_value());
+
+    const auto skill_entity = *learned;
+    const auto* skill = registry.try_get<SkillComponent>(skill_entity);
+    ASSERT_NE(skill, nullptr);
+    EXPECT_EQ(skill->skill_id, 7001u);
+    EXPECT_EQ(skill->level, 1);
+}
+
 TEST(InventorySystemTest, EquipItemMovesToEquipment) {
     entt::registry registry;
     const auto character = CreateCharacter(registry);

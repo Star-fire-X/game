@@ -57,7 +57,7 @@ TEST(CharacterEntityManagerTest, PreloadCreatesEntityFromData) {
     const auto& identity = registry.get<mir2::ecs::CharacterIdentityComponent>(entity);
     const auto& attributes = registry.get<mir2::ecs::CharacterAttributesComponent>(entity);
     const auto& state = registry.get<mir2::ecs::CharacterStateComponent>(entity);
-    const auto& inventory = registry.get<mir2::ecs::InventoryComponent>(entity);
+    const auto& inventory = registry.get<mir2::ecs::InventorySnapshotComponent>(entity);
 
     EXPECT_EQ(identity.id, data.id);
     EXPECT_EQ(identity.account_id, data.account_id);

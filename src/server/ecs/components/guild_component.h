@@ -6,6 +6,8 @@
 #ifndef MIR2_ECS_COMPONENTS_GUILD_COMPONENT_H_
 #define MIR2_ECS_COMPONENTS_GUILD_COMPONENT_H_
 
+#include "ecs/id_types.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,14 +43,15 @@ constexpr uint64_t GUILD_WAR_DURATION = 10800000; // 战争时长3小时(ms)
 struct GuildRank {
     uint8_t rank = GUILD_RANK_MEMBER;
     std::string rank_name;
-    std::vector<std::string> member_names;
+    std::vector<CharacterId> member_ids;  // stable rank mapping
+    std::vector<std::string> member_names;  // compatibility mirror for legacy APIs
 };
 
 /**
  * @brief 战争信息
  */
 struct GuildWarInfo {
-    uint32_t enemy_guild_id = 0;
+    GuildId enemy_guild_id = kInvalidGuildId;
     uint64_t start_time = 0;
     uint64_t remain_time = GUILD_WAR_DURATION;
 };
@@ -57,7 +60,7 @@ struct GuildWarInfo {
  * @brief 行会组件（附加到行会实体）
  */
 struct GuildComponent {
-    uint32_t guild_id = 0;
+    GuildId guild_id = kInvalidGuildId;
     std::string guild_name;
     entt::entity leader = entt::null;
     std::vector<entt::entity> members;
@@ -73,7 +76,7 @@ struct GuildComponent {
     std::vector<GuildWarInfo> war_guilds;
 
     // 同盟系统
-    std::vector<uint32_t> ally_guild_ids;
+    std::vector<GuildId> ally_guild_ids;
     bool allow_ally = true;
 
     // 城堡归属
@@ -94,14 +97,14 @@ struct GuildComponent {
         return false;
     }
 
-    bool IsAtWarWith(uint32_t guild_id) const {
+    bool IsAtWarWith(GuildId guild_id) const {
         for (const auto& war : war_guilds) {
             if (war.enemy_guild_id == guild_id) return true;
         }
         return false;
     }
 
-    bool IsAlliedWith(uint32_t guild_id) const {
+    bool IsAlliedWith(GuildId guild_id) const {
         for (const auto& ally_id : ally_guild_ids) {
             if (ally_id == guild_id) return true;
         }
@@ -113,10 +116,10 @@ struct GuildComponent {
  * @brief 行会成员标记组件（附加到玩家）
  */
 struct GuildMemberComponent {
-    uint32_t guild_id = 0;
+    GuildId guild_id = kInvalidGuildId;
     uint8_t rank = GUILD_RANK_MEMBER;
     std::string rank_name;
-    uint32_t character_id = 0;
+    CharacterId character_id = kInvalidCharacterId;
 };
 
 }  // namespace mir2::ecs

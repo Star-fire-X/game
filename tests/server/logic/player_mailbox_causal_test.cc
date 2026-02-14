@@ -109,7 +109,7 @@ class OrderingCombatService final : public CombatService {
  public:
   explicit OrderingCombatService(OrderState& state) : state_(state) {}
 
-  CombatResult Attack(uint64_t, uint64_t) override { return {}; }
+  CombatResult Attack(uint64_t, uint64_t, mir2::proto::EntityType) override { return {}; }
 
   CombatResult UseSkill(uint64_t, uint64_t, uint32_t) override {
     std::lock_guard<std::mutex> lock(state_.mutex);
@@ -140,8 +140,7 @@ class PlayerMailboxCausalTest : public ::testing::Test {
     server_->logic_thread_id_ = io_thread_.get_id();
 
     combat_service_ = std::make_unique<OrderingCombatService>(order_state_);
-    server_->skill_handler_ = std::make_unique<SkillHandler>(*server_->executor_,
-                                                             *response_sender_,
+    server_->skill_handler_ = std::make_unique<SkillHandler>(*response_sender_,
                                                              *combat_service_,
                                                              *server_->role_store_);
   }
@@ -387,6 +386,25 @@ TEST_F(PlayerMailboxCausalTest, LegacyDispatchAllowsWhitelistedLogin) {
   }
 
   EXPECT_EQ(handled.load(std::memory_order_relaxed), 1);
+}
+
+TEST_F(PlayerMailboxCausalTest, LegacyDispatchCanBeDisabledByPolicy) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->handler_registry_, nullptr);
+  server_->legacy_fallback_enabled_ = false;
+
+  std::atomic<int> handled{0};
+  server_->handler_registry_->RegisterHandler(
+      static_cast<uint16_t>(mir2::common::MsgId::kLoginReq),
+      [&handled](HandlerContext, const uint8_t*, size_t) -> Task<void> {
+        handled.fetch_add(1, std::memory_order_relaxed);
+        co_return;
+      });
+
+  EXPECT_FALSE(server_->DispatchRoutedMessageLegacy(
+      30006, static_cast<uint16_t>(mir2::common::MsgId::kLoginReq), {}));
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
 }
 
 TEST_F(PlayerMailboxCausalTest, LegacyDispatchDropsUnauthenticatedGenericMessage) {

@@ -161,13 +161,13 @@ if(BUILD_LUA_SUPPORT)
     )
 endif()
 
-# Database sources (optional, requires libpqxx and hiredis)
+# Database sources (optional, requires libpqxx)
 set(LEGEND2_BUILD_DB OFF)
 if(BUILD_DB)
-    if(TARGET libpqxx::pqxx AND TARGET hiredis::hiredis)
+    if(TARGET libpqxx::pqxx)
         set(LEGEND2_BUILD_DB ON)
     else()
-        message(WARNING "BUILD_DB=ON but libpqxx/hiredis not found; database support disabled.")
+        message(WARNING "BUILD_DB=ON but libpqxx not found; database support disabled.")
     endif()
 endif()
 
@@ -183,9 +183,6 @@ if(LEGEND2_BUILD_DB)
     # Optional DB adapters/repository path (not part of default server main chain).
     list(APPEND LEGEND2_DB_OPTIONAL_SOURCES
         storage_engine/backends/postgres/postgres_database.cc
-        storage_engine/backends/repository/character_repository.cc
-        storage_engine/backends/redis/redis_cache.cc
-        storage_engine/backends/redis/redis_manager.cc
     )
 endif()
 
@@ -211,7 +208,6 @@ if(LEGEND2_BUILD_DB)
         spdlog::spdlog
         nlohmann_json::nlohmann_json
         libpqxx::pqxx
-        hiredis::hiredis
     )
 endif()
 
@@ -247,7 +243,6 @@ endif()
 if(LEGEND2_BUILD_DB)
     target_link_libraries(mir2_server_lib PUBLIC
         libpqxx::pqxx
-        hiredis::hiredis
     )
 endif()
 

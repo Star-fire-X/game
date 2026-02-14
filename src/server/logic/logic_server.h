@@ -65,6 +65,7 @@ struct HotEvent;
 enum class SpawnResult : uint8_t;
 
 class CoroutineExecutor;
+class EntityLaneScheduler;
 class PrewarmManager;
 struct PrewarmEntry;
 class HandlerRegistry;
@@ -136,6 +137,7 @@ class LogicServer {
                         float delta_time,
                         int64_t now_ms);
   void RegisterHandlers();
+  bool IsLegacyBypassAllowed(uint16_t msg_id) const;
   HandlerContext BuildHandlerContext(uint64_t client_id);
   void DispatchHotEvent(const events::HotEvent& event);
   void DispatchHotEventsBatch(std::vector<events::HotEvent> events);
@@ -174,6 +176,7 @@ class LogicServer {
   asio::io_context* io_context_ = nullptr;
   std::unique_ptr<network::NetworkManager> network_;
   std::unique_ptr<CoroutineExecutor> executor_;
+  std::unique_ptr<EntityLaneScheduler> entity_lane_scheduler_;
   std::unique_ptr<PrewarmManager> prewarm_manager_;
   std::unique_ptr<events::HotEventPipeline> hot_event_pipeline_;
   std::unique_ptr<HandlerRegistry> handler_registry_;
@@ -232,6 +235,10 @@ class LogicServer {
   std::chrono::steady_clock::time_point next_coroutine_scan_time_{};
   size_t hot_event_max_drain_per_tick_ = 2048;
   std::chrono::milliseconds hot_event_max_drain_duration_per_tick_{5};
+  bool legacy_fallback_enabled_ = true;
+  bool legacy_fallback_allow_auth_whitelist_ = true;
+  bool legacy_fallback_allow_critical_msgs_ = true;
+  bool legacy_fallback_allow_normal_msgs_ = false;
   uint32_t backpressure_pause_ms_ = 100;
   int64_t backpressure_signal_cooldown_ms_ = 100;
   uint32_t mailbox_soft_backpressure_pause_ms_ = 100;

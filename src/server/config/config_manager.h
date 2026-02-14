@@ -47,6 +47,10 @@ struct ServerConfig {
   int coroutine_hung_threshold_ms = 5000;
   int coroutine_hung_scan_interval_ms = 500;
   int coroutine_dump_max_entries = 64;
+  bool legacy_fallback_enabled = true;
+  bool legacy_fallback_allow_auth_whitelist = true;
+  bool legacy_fallback_allow_critical_msgs = true;
+  bool legacy_fallback_allow_normal_msgs = false;
   int movement_speed_violation_severity = 10;
   int movement_teleport_violation_severity = 5;
   int login_ip_rate_limit_capacity = 5;
@@ -67,16 +71,6 @@ struct DatabaseConfig {
 };
 
 /**
- * @brief Redis配置
- */
-struct RedisConfig {
-  std::string host = "127.0.0.1";
-  uint16_t port = 6379;
-  std::string password;
-  int db = 0;
-};
-
-/**
  * @brief 日志配置
  */
 struct LogConfig {
@@ -92,13 +86,15 @@ struct LogConfig {
 struct ServiceEndpoint {
   std::string host = "127.0.0.1";
   uint16_t port = 0;
+  std::string transport = "auto";
+  std::string uds_path;
 };
 
 /**
  * @brief 服务集群配置
  */
 struct ServiceConfig {
-  ServiceEndpoint logic{ "127.0.0.1", 8002 };
+  ServiceEndpoint logic{ "127.0.0.1", 8002, "auto", "" };
 };
 
 /**
@@ -136,7 +132,6 @@ class ConfigManager : public core::Singleton<ConfigManager> {
 
   const ServerConfig& GetServerConfig() const { return server_config_; }
   const DatabaseConfig& GetDatabaseConfig() const { return database_config_; }
-  const RedisConfig& GetRedisConfig() const { return redis_config_; }
   const LogConfig& GetLogConfig() const { return log_config_; }
   const ServiceConfig& GetServiceConfig() const { return service_config_; }
   const EcsConfig& GetEcsConfig() const { return ecs_config_; }
@@ -152,7 +147,6 @@ class ConfigManager : public core::Singleton<ConfigManager> {
   std::string combat_config_path_;
   ServerConfig server_config_;
   DatabaseConfig database_config_;
-  RedisConfig redis_config_;
   LogConfig log_config_;
   ServiceConfig service_config_;
   EcsConfig ecs_config_;

@@ -5,7 +5,12 @@
 #include <cstdint>
 #include <vector>
 
+#include <entt/entt.hpp>
+
 namespace mir2::ecs {
+
+static_assert(sizeof(entt::entity) >= sizeof(uint32_t),
+              "entt::entity size must not be narrower than uint32_t");
 
 /**
  * @brief Categories of timed or persistent effects.
@@ -32,7 +37,7 @@ enum class EffectCategory {
  */
 struct ActiveEffect {
     uint32_t skill_id = 0;
-    uint32_t source_entity = 0;
+    entt::entity source_entity = entt::null;
     EffectCategory category = EffectCategory::STAT_BUFF;
     int value = 0;
     int magic_attack_bonus = 0;

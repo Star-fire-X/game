@@ -23,6 +23,7 @@
 #include "login_generated.h"
 #include "logic/mock_response_sender.h"
 #include "logic/services/session_role_store.h"
+#include "system_generated.h"
 
 namespace mir2::logic::test {
 namespace {
@@ -380,6 +381,55 @@ TEST_F(CharacterHandlerTest, HandleSelectRoleSuccess) {
   EXPECT_EQ(*bound_role, record.player_id);
 
   EXPECT_TRUE(entity_manager_->TryGet(static_cast<uint32_t>(record.player_id)).has_value());
+}
+
+TEST_F(CharacterHandlerTest, HandleSelectRoleDuplicateLoginKicksOldClient) {
+  const uint64_t account_id = 109;
+  const uint64_t old_client_id = 5008;
+  const uint64_t new_client_id = 5009;
+
+  RoleRecord record;
+  ASSERT_EQ(role_store_->CreateRole(account_id, "DupLoginRole", 1, 0, &record),
+            mir2::common::ErrorCode::kOk);
+
+  role_store_->BindClientAccount(old_client_id, account_id);
+  role_store_->BindClientRole(old_client_id, record.player_id);
+  client_registry_.Track(old_client_id);
+
+  HandlerContext context;
+  context.client_id = new_client_id;
+  context.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kSelectRoleReq);
+  role_store_->BindClientAccount(new_client_id, account_id);
+
+  const auto payload = BuildSelectRoleReq(record.player_id);
+  executor_->Spawn(handler_->HandleMessage(context, payload.data(), payload.size()));
+  RunIoContext();
+
+  const auto responses = response_sender_->GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 3u);
+  EXPECT_EQ(responses[0].client_id, new_client_id);
+  EXPECT_EQ(responses[0].msg_id,
+            static_cast<uint16_t>(mir2::common::MsgId::kSelectRoleRsp));
+  EXPECT_EQ(responses[1].client_id, old_client_id);
+  EXPECT_EQ(responses[1].msg_id,
+            static_cast<uint16_t>(mir2::common::MsgId::kKick));
+  EXPECT_EQ(responses[2].client_id, new_client_id);
+  EXPECT_EQ(responses[2].msg_id,
+            static_cast<uint16_t>(mir2::common::MsgId::kEnterGameRsp));
+
+  flatbuffers::Verifier kick_verifier(responses[1].payload.data(),
+                                      responses[1].payload.size());
+  ASSERT_TRUE(kick_verifier.VerifyBuffer<mir2::proto::Kick>(nullptr));
+  const auto* kick_rsp =
+      flatbuffers::GetRoot<mir2::proto::Kick>(responses[1].payload.data());
+  ASSERT_NE(kick_rsp, nullptr);
+  EXPECT_EQ(kick_rsp->reason(), mir2::proto::ErrorCode::ERR_KICK_DUPLICATE_LOGIN);
+
+  EXPECT_FALSE(client_registry_.Contains(old_client_id));
+  EXPECT_FALSE(role_store_->GetAccountId(old_client_id).has_value());
+  EXPECT_FALSE(role_store_->GetRoleId(old_client_id).has_value());
+  ASSERT_TRUE(role_store_->GetRoleId(new_client_id).has_value());
+  EXPECT_EQ(*role_store_->GetRoleId(new_client_id), record.player_id);
 }
 
 // 未绑定账号时选择角色应失败且不绑定角色。

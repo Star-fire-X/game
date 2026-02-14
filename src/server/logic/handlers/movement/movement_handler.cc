@@ -25,11 +25,15 @@
 #include "logic/handlers/handler_error_utils.h"
 #include "logic/response_sender.h"
 #include "logic/services/session_role_store.h"
+#include "monitor/metrics.h"
 #include "security/anti_cheat.h"
 
 namespace mir2::logic {
 
 namespace {
+
+constexpr const char* kMetricEntityVersionMismatchTotal =
+    "logic.entity_version_mismatch_total";
 
 std::vector<uint8_t> BuildMoveRsp(mir2::common::ErrorCode code, int x, int y) {
   mir2::common::MoveResponse response;
@@ -232,6 +236,12 @@ Task<void> MovementHandler::HandleMove(HandlerContext ctx,
   entt::entity entity = ctx.entity;
   std::optional<mir2::game::map::GateInfo> triggered_gate;
   entt::registry* registry = ctx.registry != nullptr ? ctx.registry : &ecs_registry_;
+
+  if (ctx.IsValid() && !ctx.ValidateCacheVersion()) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricEntityVersionMismatchTotal);
+    co_await SendMoveResponse(ctx.client_id, mir2::common::ErrorCode::kInvalidAction, x, y);
+    co_return;
+  }
 
   if (!registry || entity == entt::null || !registry->valid(entity)) {
     result = mir2::common::ErrorCode::kInvalidAction;

@@ -4,6 +4,9 @@
 
 #include <asio/connect.hpp>
 #include <asio/ip/tcp.hpp>
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+#include <asio/local/stream_protocol.hpp>
+#endif
 
 namespace mir2::network {
 
@@ -52,6 +55,46 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
   connection_->Start();
   connected_.store(true);
   return true;
+}
+
+bool TcpClient::ConnectUnix(const std::string& socket_path) {
+  if (connected_.load()) {
+    return true;
+  }
+
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+  if (socket_path.empty()) {
+    return false;
+  }
+
+  asio::error_code ec;
+  asio::local::stream_protocol::socket socket(io_context_);
+  socket.connect(asio::local::stream_protocol::endpoint(socket_path), ec);
+  if (ec) {
+    return false;
+  }
+
+  connection_ = std::make_shared<TcpConnection>(
+      std::make_unique<UdsSocketAdapter>(std::move(socket)),
+      1,
+      kServiceWriteQueueSize);
+  protocol_version_ = ProtocolVersion::kV1;
+  protocol_version_detected_ = false;
+  send_sequence_.store(0, std::memory_order_relaxed);
+  recv_sequence_.store(0, std::memory_order_relaxed);
+  read_buffer_.clear();
+  read_offset_ = 0;
+  connection_->SetReadHandler([this](const uint8_t* data, size_t size) {
+    HandleBytes(data, size);
+  });
+  connection_->SetDisconnectHandler([this](uint64_t id) { HandleDisconnect(id); });
+  connection_->Start();
+  connected_.store(true);
+  return true;
+#else
+  (void)socket_path;
+  return false;
+#endif
 }
 
 void TcpClient::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {

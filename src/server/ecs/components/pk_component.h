@@ -6,6 +6,7 @@
 #ifndef MIR2_SERVER_ECS_PK_COMPONENT_H_
 #define MIR2_SERVER_ECS_PK_COMPONENT_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 

@@ -20,7 +20,7 @@ entt::entity CreateCharacterEntity(entt::registry& registry,
 
     auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
     identity.id = id;
-    identity.account_id = request.account_id;
+    identity.SetAccountIdString(request.account_id);
     identity.name = request.name;
     identity.char_class = request.char_class;
     identity.gender = request.gender;
@@ -66,7 +66,7 @@ entt::entity LoadCharacterEntity(entt::registry& registry,
 
     auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
     identity.id = data.id;
-    identity.account_id = data.account_id;
+    identity.SetAccountIdString(data.account_id);
     identity.name = data.name;
     identity.char_class = data.char_class;
     identity.gender = data.gender;
@@ -110,7 +110,16 @@ mir2::common::CharacterData SaveCharacterData(entt::registry& registry, entt::en
 
     if (const auto* identity = registry.try_get<mir2::ecs::CharacterIdentityComponent>(entity)) {
         data.id = identity->id;
-        data.account_id = identity->account_id;
+        if (!identity->account_id.empty()) {
+            data.account_id = identity->account_id;
+        } else {
+            const mir2::ecs::AccountId resolved_account_id =
+                identity->ResolveAccountIdValue();
+            data.account_id =
+                resolved_account_id == mir2::ecs::kInvalidAccountId
+                    ? std::string()
+                    : mir2::ecs::AccountIdToString(resolved_account_id);
+        }
         data.name = identity->name;
         data.char_class = identity->char_class;
         data.gender = identity->gender;

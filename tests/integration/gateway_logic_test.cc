@@ -121,7 +121,9 @@ std::string EnvOrDefault(const char* key, const char* default_value) {
 }
 
 std::string BuildGatewayConfig(const TestPorts& ports,
-                               const std::filesystem::path& log_dir) {
+                               const std::filesystem::path& log_dir,
+                               const std::string& transport = "tcp",
+                               const std::string& uds_path = "") {
   std::ostringstream out;
   out << "server:\n"
       << "  id: 110\n"
@@ -140,12 +142,18 @@ std::string BuildGatewayConfig(const TestPorts& ports,
       << "services:\n"
       << "  logic:\n"
       << "    host: \"" << kHost << "\"\n"
-      << "    port: " << ports.logic_tcp << "\n";
+      << "    port: " << ports.logic_tcp << "\n"
+      << "    transport: \"" << transport << "\"\n";
+  if (!uds_path.empty()) {
+    out << "    uds_path: \"" << uds_path << "\"\n";
+  }
   return out.str();
 }
 
 std::string BuildLogicConfig(const TestPorts& ports,
-                             const std::filesystem::path& log_dir) {
+                             const std::filesystem::path& log_dir,
+                             const std::string& transport = "tcp",
+                             const std::string& uds_path = "") {
   const std::string postgres_host = EnvOrDefault("POSTGRES_HOST", kHost);
   const std::string postgres_port = EnvOrDefault("POSTGRES_PORT", "5432");
   const std::string postgres_user = EnvOrDefault("POSTGRES_USER", "mir2");
@@ -176,7 +184,11 @@ std::string BuildLogicConfig(const TestPorts& ports,
       << "  logic:\n"
       << "    host: \"" << kHost << "\"\n"
       << "    port: " << ports.logic_tcp << "\n"
-      << "database:\n"
+      << "    transport: \"" << transport << "\"\n";
+  if (!uds_path.empty()) {
+    out << "    uds_path: \"" << uds_path << "\"\n";
+  }
+  out << "database:\n"
       << "  host: \"" << db_host << "\"\n"
       << "  port: " << db_port << "\n"
       << "  user: \"" << db_user << "\"\n"
@@ -218,17 +230,22 @@ struct GatewayIpcProbe {
 
 class GatewayLogicIntegrationTest : public ::testing::Test {
  protected:
+  virtual std::string IpcTransport() const { return "tcp"; }
+  virtual std::string IpcUdsPath() const { return ""; }
+
   void SetUp() override {
     ports_ = AllocateTestPorts();
     temp_dir_ = CreateTempDir("mir2_gateway_logic");
+    const std::string transport = IpcTransport();
+    const std::string uds_path = IpcUdsPath();
     gateway_config_path_ = WriteTempConfig(
         temp_dir_,
         "gateway.yaml",
-        BuildGatewayConfig(ports_, temp_dir_ / "gateway_logs"));
+        BuildGatewayConfig(ports_, temp_dir_ / "gateway_logs", transport, uds_path));
     logic_config_path_ = WriteTempConfig(
         temp_dir_,
         "logic.yaml",
-        BuildLogicConfig(ports_, temp_dir_ / "logic_logs"));
+        BuildLogicConfig(ports_, temp_dir_ / "logic_logs", transport, uds_path));
 
     gateway_ = std::make_unique<GatewayServer>();
     ASSERT_TRUE(gateway_->Initialize(gateway_config_path_));
@@ -437,6 +454,14 @@ class GatewayLogicIntegrationTest : public ::testing::Test {
   GatewayIpcProbe ipc_probe_;
 };
 
+class GatewayLogicUdsIntegrationTest : public GatewayLogicIntegrationTest {
+ protected:
+  std::string IpcTransport() const override { return "auto"; }
+  std::string IpcUdsPath() const override {
+    return (temp_dir_ / "gateway_logic.sock").string();
+  }
+};
+
 TEST_F(GatewayLogicIntegrationTest, ForwardingAndHandshake) {
   ASSERT_TRUE(ConnectClient());
   ASSERT_TRUE(WaitForLogicConnected(3s));
@@ -513,6 +538,34 @@ TEST_F(GatewayLogicIntegrationTest, PerformanceTargets) {
 
   const auto rtt_stats = rtt_monitor.GetLatencyStats();
   EXPECT_LT(rtt_stats.p50_ms, 30.0);
+}
+
+TEST_F(GatewayLogicUdsIntegrationTest, ForwardingAndHandshakeOverUds) {
+  ASSERT_TRUE(ConnectClient());
+  ASSERT_TRUE(WaitForLogicConnected(3s));
+
+  ASSERT_TRUE(WaitForCondition(
+      [this]() { return logic_->last_context_request_id_.load() > 0; },
+      3s,
+      10ms,
+      [this]() { client_->update(); }));
+
+  ASSERT_TRUE(WaitForCondition(
+      [this]() {
+        return logic_->gateway_session_ != nullptr;
+      },
+      3s,
+      10ms,
+      [this]() { client_->update(); }));
+  ASSERT_NE(logic_->gateway_session_, nullptr);
+  EXPECT_TRUE(logic_->gateway_session_->GetRemoteAddress().empty());
+
+  const auto login_payload = BuildLoginPayload();
+  ASSERT_FALSE(login_payload.empty());
+  client_->send(kLoginReqMsgId, login_payload);
+
+  auto login_rsp = WaitForPacket(kLoginRspMsgId, 3s);
+  ASSERT_TRUE(login_rsp.has_value());
 }
 
 }  // namespace

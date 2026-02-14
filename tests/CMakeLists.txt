@@ -28,6 +28,9 @@ set(LEGEND2_TEST_SOURCES
     server/logic/login_handler_test.cc
     server/logic/storage_login_service_test.cc
     server/logic/chat_handler_test.cc
+    server/logic/combat_handlers_auth_test.cc
+    server/logic/ecs_services_character_resolution_test.cc
+    server/logic/session_role_store_test.cc
     server/guild/guild_handler_test.cc
     server/logic/npc_command_handler_test.cc
     server/logic/hot_event_layout_test.cc
@@ -36,6 +39,8 @@ set(LEGEND2_TEST_SOURCES
     server/logic/mpsc_ring_test.cc
     server/logic/metrics_smoke_test.cc
     server/logic/player_mailbox_causal_test.cc
+    server/logic/thread_affinity_test.cc
+    server/logic/handler_context_test.cc
     common/snowflake_id_test.cpp
     # client/message_dispatcher_test.cpp  # disabled
     # client/network_manager_test.cpp  # disabled
@@ -120,6 +125,7 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/character_entity_manager_test.cpp
     server/ecs/registry_manager_test.cpp
     server/ecs/pathfinding_helper_test.cpp
+    server/ecs/component_defaults_test.cc
     server/ecs/movement_system_test.cpp
     server/ecs/combat_system_test.cpp
     server/ecs/effect_system_test.cc
@@ -186,12 +192,6 @@ set(LEGEND2_PQXX_TEST_SOURCES
     server/db/account_storage_backend_test.cpp
 )
 
-set(LEGEND2_HIREDIS_TEST_SOURCES
-    server/db/redis_cache_test.cpp
-    server/db/character_repository_test.cpp
-    integration/db_integration_test.cpp
-)
-
 set(LEGEND2_CLIENT_HANDLER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/client/handlers/character_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/npc_handler.cpp
@@ -214,17 +214,6 @@ else()
         message(STATUS "libpqxx not found; skipping tests: ${LEGEND2_PQXX_TESTS_DISPLAY}")
     else()
         message(STATUS "DB disabled; skipping tests: ${LEGEND2_PQXX_TESTS_DISPLAY}")
-    endif()
-endif()
-
-if(LEGEND2_BUILD_DB AND (TARGET hiredis::hiredis OR hiredis_FOUND))
-    list(APPEND LEGEND2_TEST_SOURCES ${LEGEND2_HIREDIS_TEST_SOURCES})
-else()
-    string(REPLACE ";" ", " LEGEND2_HIREDIS_TESTS_DISPLAY "${LEGEND2_HIREDIS_TEST_SOURCES}")
-    if(LEGEND2_BUILD_DB)
-        message(STATUS "hiredis not found; skipping tests: ${LEGEND2_HIREDIS_TESTS_DISPLAY}")
-    else()
-        message(STATUS "DB disabled; skipping tests: ${LEGEND2_HIREDIS_TESTS_DISPLAY}")
     endif()
 endif()
 
@@ -273,13 +262,8 @@ if(WIN32)
     target_link_libraries(legend2_tests PRIVATE psapi)
 endif()
 
-if(LEGEND2_BUILD_DB)
-    if(TARGET libpqxx::pqxx)
-        target_link_libraries(legend2_tests PRIVATE libpqxx::pqxx)
-    endif()
-    if(TARGET hiredis::hiredis)
-        target_link_libraries(legend2_tests PRIVATE hiredis::hiredis)
-    endif()
+if(LEGEND2_BUILD_DB AND TARGET libpqxx::pqxx)
+    target_link_libraries(legend2_tests PRIVATE libpqxx::pqxx)
 endif()
 
 if(BUILD_LUA_SUPPORT)

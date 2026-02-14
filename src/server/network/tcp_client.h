@@ -37,6 +37,11 @@ class TcpClient {
   bool Connect(const std::string& host, uint16_t port);
 
   /**
+   * @brief 通过 UDS 连接到服务器（仅 Unix 平台）
+   */
+  bool ConnectUnix(const std::string& socket_path);
+
+  /**
    * @brief 发送消息
    */
   void Send(uint16_t msg_id, const std::vector<uint8_t>& payload);

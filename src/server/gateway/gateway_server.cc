@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <utility>
 #include <flatbuffers/flatbuffers.h>
 
@@ -66,6 +67,17 @@ std::vector<uint8_t> BuildLoginRateLimitedPayload() {
 
   response.code = mir2::proto::ErrorCode::ERR_UNKNOWN;
   return common::EncodeLoginResponse(response, nullptr);
+}
+
+std::string ToLowerAscii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return value;
+}
+
+bool IsLoopbackHost(const std::string& host) {
+  const std::string normalized = ToLowerAscii(host);
+  return normalized == "127.0.0.1" || normalized == "::1" || normalized == "localhost";
 }
 
 void UpdateSessionContextFromLogicMessage(
@@ -485,11 +497,63 @@ bool GatewayServer::ConnectToLogicService() {
   });
 
   const auto& logic_endpoint = services.logic;
-  if (!logic_client_->Connect(logic_endpoint.host, logic_endpoint.port)) {
+  const std::string transport = ToLowerAscii(logic_endpoint.transport);
+  const bool prefer_uds_in_auto =
+      !logic_endpoint.uds_path.empty() && IsLoopbackHost(logic_endpoint.host);
+  bool connected = false;
+  std::string selected_transport = "tcp";
+
+  if (transport == "uds" || (transport == "auto" && prefer_uds_in_auto)) {
+    if (logic_endpoint.uds_path.empty()) {
+      if (transport == "uds") {
+        SYSLOG_ERROR("Logic transport 'uds' requires non-empty services.logic.uds_path");
+        monitor::Metrics::Instance().IncrementCounter("gateway.service.disconnected.logic");
+        return false;
+      }
+    } else {
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+      connected = logic_client_->ConnectUnix(logic_endpoint.uds_path);
+      if (connected) {
+        selected_transport = "uds";
+      } else if (transport == "auto") {
+        SYSLOG_WARN(
+            "Gateway failed to connect to Logic via uds(path={}), fallback to tcp {}:{}",
+            logic_endpoint.uds_path,
+            logic_endpoint.host,
+            logic_endpoint.port);
+      } else {
+        SYSLOG_ERROR("Failed to connect Logic service via uds path={}",
+                     logic_endpoint.uds_path);
+      }
+#else
+      if (transport == "uds") {
+        SYSLOG_ERROR("Logic transport 'uds' is not supported on this platform");
+        monitor::Metrics::Instance().IncrementCounter("gateway.service.disconnected.logic");
+        return false;
+      }
+      if (transport == "auto") {
+        SYSLOG_WARN("Logic uds transport unavailable on this platform, fallback to tcp");
+      }
+#endif
+    }
+  }
+
+  if (!connected) {
+    connected = logic_client_->Connect(logic_endpoint.host, logic_endpoint.port);
+    selected_transport = "tcp";
+  }
+
+  if (!connected) {
     SYSLOG_ERROR("Failed to connect Logic service");
     monitor::Metrics::Instance().IncrementCounter("gateway.service.disconnected.logic");
     return false;
   }
+
+  SYSLOG_INFO("Gateway connected to Logic via {} endpoint={}{}", selected_transport,
+              selected_transport == "uds" ? logic_endpoint.uds_path : logic_endpoint.host,
+              selected_transport == "uds"
+                  ? ""
+                  : ":" + std::to_string(logic_endpoint.port));
   monitor::Metrics::Instance().IncrementCounter("gateway.service.connected.logic");
   logic_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kServiceHello),
                       common::BuildServiceHello(common::ServiceType::kGateway));

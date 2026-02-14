@@ -297,6 +297,105 @@ TEST_F(GuildSystemTest, UpdateRankStructure_Success) {
   EXPECT_EQ(member_comp->rank_name, "Member");
 }
 
+TEST_F(GuildSystemTest, UpdateRankStructure_UsesStableMemberIds) {
+  const int initial_gold = static_cast<int>(GUILD_CREATE_FEE) + 500;
+  auto leader = CreatePlayer("Leader", initial_gold);
+  auto officer = CreatePlayer("Officer", 0);
+  auto member = CreatePlayer("Member", 0);
+
+  const uint32_t guild_id = CreateGuildWithLeader(leader, "StableIds");
+  ASSERT_NE(guild_id, 0u);
+  ASSERT_TRUE(guild_system_->JoinGuild(*registry_, officer, guild_id));
+  ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member, guild_id));
+
+  const auto leader_id =
+      registry_->get<CharacterIdentityComponent>(leader).id;
+  const auto officer_id =
+      registry_->get<CharacterIdentityComponent>(officer).id;
+  const auto member_id =
+      registry_->get<CharacterIdentityComponent>(member).id;
+
+  std::vector<GuildRank> new_ranks = {
+      GuildRank{.rank = GUILD_RANK_LEADER,
+                .rank_name = "Master",
+                .member_ids = {leader_id}},
+      GuildRank{.rank = GUILD_RANK_VICE_LEADER,
+                .rank_name = "Officer",
+                .member_ids = {officer_id}},
+      GuildRank{.rank = GUILD_RANK_MEMBER,
+                .rank_name = "Member",
+                .member_ids = {member_id}}};
+
+  const int result =
+      guild_system_->UpdateRankStructure(*registry_, leader, new_ranks);
+  EXPECT_EQ(result, 0);
+
+  auto* guild = GetGuild(guild_id);
+  ASSERT_NE(guild, nullptr);
+  ASSERT_EQ(guild->ranks.size(), 3u);
+  EXPECT_THAT(guild->ranks[0].member_ids, testing::ElementsAre(leader_id));
+  EXPECT_THAT(guild->ranks[1].member_ids, testing::ElementsAre(officer_id));
+  EXPECT_THAT(guild->ranks[2].member_ids, testing::ElementsAre(member_id));
+  EXPECT_THAT(guild->ranks[0].member_names, testing::ElementsAre("Leader"));
+  EXPECT_THAT(guild->ranks[1].member_names, testing::ElementsAre("Officer"));
+  EXPECT_THAT(guild->ranks[2].member_names, testing::ElementsAre("Member"));
+
+  auto* leader_comp = registry_->try_get<GuildMemberComponent>(leader);
+  auto* officer_comp = registry_->try_get<GuildMemberComponent>(officer);
+  auto* member_comp = registry_->try_get<GuildMemberComponent>(member);
+  ASSERT_NE(leader_comp, nullptr);
+  ASSERT_NE(officer_comp, nullptr);
+  ASSERT_NE(member_comp, nullptr);
+  EXPECT_EQ(leader_comp->rank, GUILD_RANK_LEADER);
+  EXPECT_EQ(officer_comp->rank, GUILD_RANK_VICE_LEADER);
+  EXPECT_EQ(member_comp->rank, GUILD_RANK_MEMBER);
+}
+
+TEST_F(GuildSystemTest, UpdateRankStructure_RemainsValidAfterRenameWhenUsingIds) {
+  const int initial_gold = static_cast<int>(GUILD_CREATE_FEE) + 500;
+  auto leader = CreatePlayer("Leader", initial_gold);
+  auto member = CreatePlayer("Member", 0);
+
+  const uint32_t guild_id = CreateGuildWithLeader(leader, "RenameSafe");
+  ASSERT_NE(guild_id, 0u);
+  ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member, guild_id));
+
+  const auto leader_id =
+      registry_->get<CharacterIdentityComponent>(leader).id;
+  const auto member_id =
+      registry_->get<CharacterIdentityComponent>(member).id;
+
+  std::vector<GuildRank> initial_ranks = {
+      GuildRank{.rank = GUILD_RANK_LEADER,
+                .rank_name = "Master",
+                .member_ids = {leader_id}},
+      GuildRank{.rank = GUILD_RANK_MEMBER,
+                .rank_name = "Member",
+                .member_ids = {member_id}}};
+
+  ASSERT_EQ(guild_system_->UpdateRankStructure(*registry_, leader, initial_ranks), 0);
+
+  auto& member_identity =
+      registry_->get<CharacterIdentityComponent>(member);
+  member_identity.name = "MemberRenamed";
+
+  std::vector<GuildRank> renamed_ranks = {
+      GuildRank{.rank = GUILD_RANK_LEADER,
+                .rank_name = "Master",
+                .member_ids = {leader_id}},
+      GuildRank{.rank = GUILD_RANK_VICE_LEADER,
+                .rank_name = "Officer",
+                .member_ids = {member_id}}};
+
+  EXPECT_EQ(
+      guild_system_->UpdateRankStructure(*registry_, leader, renamed_ranks), 0);
+
+  auto* member_comp = registry_->try_get<GuildMemberComponent>(member);
+  ASSERT_NE(member_comp, nullptr);
+  EXPECT_EQ(member_comp->rank, GUILD_RANK_VICE_LEADER);
+  EXPECT_EQ(member_comp->rank_name, "Officer");
+}
+
 TEST_F(GuildSystemTest, UpdateRankStructure_NotLeader) {
   const int initial_gold = static_cast<int>(GUILD_CREATE_FEE) + 500;
   auto leader = CreatePlayer("Leader", initial_gold);

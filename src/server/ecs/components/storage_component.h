@@ -19,7 +19,12 @@ constexpr int kMaxStorageSlots = 40;
  * @brief Storage slots attached to a character (POD).
  */
 struct StorageComponent {
-    std::array<entt::entity, kMaxStorageSlots> slots{};
+    // EnTT's null sentinel is not guaranteed to be zero; initialize explicitly.
+    std::array<entt::entity, kMaxStorageSlots> slots = [] {
+        std::array<entt::entity, kMaxStorageSlots> value{};
+        value.fill(entt::null);
+        return value;
+    }();
 
     int FindFreeSlot() const {
         for (int i = 0; i < kMaxStorageSlots; ++i) {

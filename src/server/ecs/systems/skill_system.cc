@@ -684,7 +684,7 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
 
         ActiveEffect stun_effect;
         stun_effect.skill_id = skill.id;
-        stun_effect.source_entity = static_cast<uint32_t>(caster);
+        stun_effect.source_entity = caster;
         stun_effect.category = EffectCategory::STUN;
         stun_effect.start_time_ms = current_time_ms_;
         stun_effect.end_time_ms = current_time_ms_ + 2000;
@@ -864,7 +864,7 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
 
             ActiveEffect stun_effect;
             stun_effect.skill_id = mir2::common::constants::SKILL_ID_TRAPSPELL;
-            stun_effect.source_entity = static_cast<uint32_t>(caster);
+            stun_effect.source_entity = caster;
             stun_effect.category = EffectCategory::STUN;
             stun_effect.start_time_ms = current_time_ms_;
             stun_effect.end_time_ms = expire_time_ms;
@@ -975,7 +975,7 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
         case mir2::common::SkillType::DEBUFF: {
             ActiveEffect effect;
             effect.skill_id = skill.id;
-            effect.source_entity = static_cast<uint32_t>(caster);
+            effect.source_entity = caster;
             effect.category = (skill.skill_type == mir2::common::SkillType::BUFF)
                 ? EffectCategory::STAT_BUFF
                 : EffectCategory::STAT_DEBUFF;
@@ -999,7 +999,7 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
     if (skill.dot_damage != 0 && skill.duration_ms > 0) {
         ActiveEffect dot_effect;
         dot_effect.skill_id = skill.id;
-        dot_effect.source_entity = static_cast<uint32_t>(caster);
+        dot_effect.source_entity = caster;
         dot_effect.category = skill.dot_damage > 0
             ? EffectCategory::DAMAGE_OVER_TIME
             : EffectCategory::HEAL_OVER_TIME;

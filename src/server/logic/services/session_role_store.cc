@@ -23,11 +23,12 @@ std::optional<uint64_t> RoleStore::GetAccountId(uint64_t client_id) const {
   return it->second;
 }
 
-void RoleStore::BindClientRole(uint64_t client_id, uint64_t player_id) {
+std::optional<uint64_t> RoleStore::BindClientRole(uint64_t client_id, uint64_t player_id) {
   if (client_id == 0 || player_id == 0) {
-    return;
+    return std::nullopt;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  std::optional<uint64_t> evicted_client_id;
 
   // Remove old reverse mapping if this client was bound to another role
   auto old_it = client_roles_.find(client_id);
@@ -38,11 +39,13 @@ void RoleStore::BindClientRole(uint64_t client_id, uint64_t player_id) {
   // Remove old client if this role was bound to another client
   auto old_client_it = role_clients_.find(player_id);
   if (old_client_it != role_clients_.end() && old_client_it->second != client_id) {
+    evicted_client_id = old_client_it->second;
     client_roles_.erase(old_client_it->second);
   }
 
   client_roles_[client_id] = player_id;
   role_clients_[player_id] = client_id;
+  return evicted_client_id;
 }
 
 std::optional<uint64_t> RoleStore::GetRoleId(uint64_t client_id) const {

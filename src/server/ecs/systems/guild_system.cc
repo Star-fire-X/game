@@ -28,6 +28,14 @@ std::string GetEntityName(entt::registry& registry, entt::entity entity) {
     return identity->name;
 }
 
+CharacterId ResolveCharacterId(const CharacterIdentityComponent& identity,
+                               const GuildMemberComponent* member) {
+    if (member && member->character_id != kInvalidCharacterId) {
+        return member->character_id;
+    }
+    return identity.id;
+}
+
 entt::entity FindGuildCreateItem(entt::registry& registry, entt::entity player) {
     if (kGuildCreateItemId == 0) {
         return entt::null;
@@ -73,9 +81,9 @@ void ConsumeGuildCreateItem(entt::registry& registry, entt::entity player,
     }
 }
 
-uint64_t MakeGuildPairKey(uint32_t guild_id_a, uint32_t guild_id_b) {
-    const uint32_t min_id = std::min(guild_id_a, guild_id_b);
-    const uint32_t max_id = std::max(guild_id_a, guild_id_b);
+uint64_t MakeGuildPairKey(GuildId guild_id_a, GuildId guild_id_b) {
+    const GuildId min_id = std::min(guild_id_a, guild_id_b);
+    const GuildId max_id = std::max(guild_id_a, guild_id_b);
     return (static_cast<uint64_t>(min_id) << 32) | max_id;
 }
 
@@ -167,8 +175,8 @@ int GuildSystem::CreateGuild(entt::registry& registry, entt::entity player,
 }
 
 bool GuildSystem::JoinGuild(entt::registry& registry, entt::entity player,
-                            uint32_t guild_id) {
-    if (!registry.valid(player) || guild_id == 0) {
+                            GuildId guild_id) {
+    if (!registry.valid(player) || guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -214,7 +222,7 @@ bool GuildSystem::LeaveGuild(entt::registry& registry, entt::entity player) {
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -260,7 +268,7 @@ int GuildSystem::DissolveGuild(entt::registry& registry, entt::entity player) {
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return -1;
     }
 
@@ -350,7 +358,7 @@ int GuildSystem::TransferLeadership(entt::registry& registry,
     }
 
     auto* current_member = registry.try_get<GuildMemberComponent>(current_leader);
-    if (!current_member || current_member->guild_id == 0) {
+    if (!current_member || current_member->guild_id == kInvalidGuildId) {
         return -1;
     }
 
@@ -390,7 +398,7 @@ int GuildSystem::UpdateRankStructure(entt::registry& registry,
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return -7;
     }
 
@@ -408,8 +416,44 @@ int GuildSystem::UpdateRankStructure(entt::registry& registry,
     bool invalid_rank = false;
     bool member_mismatch = false;
     std::unordered_set<uint8_t> seen_ranks;
-    std::unordered_set<std::string> new_member_names;
-    std::unordered_set<std::string> leader_names;
+    std::unordered_set<CharacterId> guild_member_ids;
+    std::unordered_map<CharacterId, std::string> guild_member_names;
+    std::unordered_map<std::string, CharacterId> guild_member_name_to_id;
+
+    auto member_view = registry.view<CharacterIdentityComponent, GuildMemberComponent>();
+    for (auto entity : member_view) {
+        auto& member_comp = member_view.get<GuildMemberComponent>(entity);
+        if (member_comp.guild_id != guild->guild_id) {
+            continue;
+        }
+
+        const auto& identity = member_view.get<CharacterIdentityComponent>(entity);
+        const CharacterId character_id = ResolveCharacterId(identity, &member_comp);
+        if (character_id == kInvalidCharacterId) {
+            member_mismatch = true;
+            continue;
+        }
+
+        member_comp.character_id = character_id;
+        if (!guild_member_ids.insert(character_id).second) {
+            member_mismatch = true;
+            continue;
+        }
+
+        if (!identity.name.empty()) {
+            const auto inserted =
+                guild_member_name_to_id.emplace(identity.name, character_id);
+            if (!inserted.second && inserted.first->second != character_id) {
+                member_mismatch = true;
+            }
+            guild_member_names[character_id] = identity.name;
+        }
+    }
+
+    std::unordered_set<CharacterId> new_member_ids;
+    std::unordered_set<CharacterId> leader_ids;
+    std::vector<GuildRank> canonical_ranks;
+    canonical_ranks.reserve(new_ranks.size());
 
     for (const auto& rank : new_ranks) {
         if (rank.rank < GUILD_RANK_LEADER || rank.rank > GUILD_RANK_MEMBER) {
@@ -426,18 +470,56 @@ int GuildSystem::UpdateRankStructure(entt::registry& registry,
             }
         }
 
+        GuildRank canonical_rank;
+        canonical_rank.rank = rank.rank;
+        canonical_rank.rank_name = rank.rank_name;
+        std::unordered_set<CharacterId> rank_member_ids;
+        rank_member_ids.reserve(rank.member_ids.size() + rank.member_names.size());
+
+        auto add_rank_member = [&](CharacterId character_id) {
+            if (character_id == kInvalidCharacterId ||
+                guild_member_ids.find(character_id) == guild_member_ids.end()) {
+                member_mismatch = true;
+                return;
+            }
+
+            if (!rank_member_ids.insert(character_id).second) {
+                member_mismatch = true;
+                return;
+            }
+
+            canonical_rank.member_ids.push_back(character_id);
+            if (const auto name_it = guild_member_names.find(character_id);
+                name_it != guild_member_names.end()) {
+                canonical_rank.member_names.push_back(name_it->second);
+            }
+
+            if (!new_member_ids.insert(character_id).second) {
+                member_mismatch = true;
+            }
+            if (rank.rank == GUILD_RANK_LEADER) {
+                leader_ids.insert(character_id);
+            }
+        };
+
+        for (CharacterId character_id : rank.member_ids) {
+            add_rank_member(character_id);
+        }
+
         for (const auto& name : rank.member_names) {
             if (name.empty()) {
                 member_mismatch = true;
                 continue;
             }
-            if (!new_member_names.insert(name).second) {
+            const auto name_it = guild_member_name_to_id.find(name);
+            if (name_it == guild_member_name_to_id.end()) {
                 member_mismatch = true;
+                continue;
             }
-            if (rank.rank == GUILD_RANK_LEADER) {
-                leader_names.insert(name);
-            }
+            add_rank_member(name_it->second);
         }
+
+        canonical_ranks.push_back(std::move(canonical_rank));
     }
 
     if (!has_leader_rank) {
@@ -446,68 +528,19 @@ int GuildSystem::UpdateRankStructure(entt::registry& registry,
     if (leader_name_empty) {
         return -3;
     }
-    if (leader_names.size() > 2) {
+    if (leader_ids.size() > 2) {
         return -4;
     }
 
-    bool leader_online = false;
-    if (!leader_names.empty()) {
-        auto view = registry.view<CharacterIdentityComponent, GuildMemberComponent>();
-        for (auto entity : view) {
-            const auto& member_comp = view.get<GuildMemberComponent>(entity);
-            if (member_comp.guild_id != guild->guild_id) {
-                continue;
-            }
-
-            const auto& identity = view.get<CharacterIdentityComponent>(entity);
-            if (leader_names.find(identity.name) != leader_names.end()) {
-                leader_online = true;
-                break;
-            }
-        }
-    }
-
-    if (!leader_online) {
+    if (leader_ids.empty()) {
         return -5;
     }
 
-    std::unordered_set<std::string> existing_member_names;
-    if (!guild->ranks.empty()) {
-        for (const auto& rank : guild->ranks) {
-            for (const auto& name : rank.member_names) {
-                if (name.empty()) {
-                    member_mismatch = true;
-                    continue;
-                }
-                if (!existing_member_names.insert(name).second) {
-                    member_mismatch = true;
-                }
-            }
-        }
-    } else {
-        auto view = registry.view<CharacterIdentityComponent, GuildMemberComponent>();
-        for (auto entity : view) {
-            const auto& member_comp = view.get<GuildMemberComponent>(entity);
-            if (member_comp.guild_id != guild->guild_id) {
-                continue;
-            }
-
-            const auto& identity = view.get<CharacterIdentityComponent>(entity);
-            if (identity.name.empty()) {
-                member_mismatch = true;
-                continue;
-            }
-            if (!existing_member_names.insert(identity.name).second) {
-                member_mismatch = true;
-            }
-        }
-    }
-
-    if (existing_member_names.size() != new_member_names.size()) {
+    if (guild_member_ids.size() != new_member_ids.size()) {
         member_mismatch = true;
     } else {
-        for (const auto& name : new_member_names) {
-            if (existing_member_names.find(name) == existing_member_names.end()) {
+        for (CharacterId character_id : guild_member_ids) {
+            if (new_member_ids.find(character_id) == new_member_ids.end()) {
                 member_mismatch = true;
                 break;
             }
@@ -521,25 +554,30 @@ int GuildSystem::UpdateRankStructure(entt::registry& registry,
         return -7;
     }
 
-    guild->ranks = new_ranks;
+    guild->ranks = std::move(canonical_ranks);
 
-    std::unordered_map<std::string, std::pair<uint8_t, std::string>> rank_lookup;
-    rank_lookup.reserve(new_member_names.size());
-    for (const auto& rank : new_ranks) {
-        for (const auto& name : rank.member_names) {
-            rank_lookup[name] = std::make_pair(rank.rank, rank.rank_name);
+    std::unordered_map<CharacterId, std::pair<uint8_t, std::string>> rank_lookup;
+    rank_lookup.reserve(new_member_ids.size());
+    for (const auto& rank : guild->ranks) {
+        for (CharacterId character_id : rank.member_ids) {
+            rank_lookup[character_id] = std::make_pair(rank.rank, rank.rank_name);
         }
     }
 
-    auto view = registry.view<CharacterIdentityComponent, GuildMemberComponent>();
-    for (auto entity : view) {
-        auto& member_comp = view.get<GuildMemberComponent>(entity);
+    for (auto entity : member_view) {
+        auto& member_comp = member_view.get<GuildMemberComponent>(entity);
         if (member_comp.guild_id != guild->guild_id) {
             continue;
         }
 
-        const auto& identity = view.get<CharacterIdentityComponent>(entity);
-        auto it = rank_lookup.find(identity.name);
+        const auto& identity = member_view.get<CharacterIdentityComponent>(entity);
+        const CharacterId character_id = ResolveCharacterId(identity, &member_comp);
+        if (character_id == kInvalidCharacterId) {
+            continue;
+        }
+        member_comp.character_id = character_id;
+
+        auto it = rank_lookup.find(character_id);
         if (it == rank_lookup.end()) {
             continue;
         }
@@ -560,7 +598,7 @@ bool GuildSystem::SetMemberRank(entt::registry& registry,
     }
 
     auto* operator_member = registry.try_get<GuildMemberComponent>(operator_entity);
-    if (!operator_member || operator_member->guild_id == 0) {
+    if (!operator_member || operator_member->guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -588,6 +626,7 @@ bool GuildSystem::SetMemberRank(entt::registry& registry,
     }
 
     entt::entity target = entt::null;
+    CharacterId target_character_id = kInvalidCharacterId;
     auto view = registry.view<CharacterIdentityComponent, GuildMemberComponent>();
     for (auto entity : view) {
         const auto& member_comp = view.get<GuildMemberComponent>(entity);
@@ -598,22 +637,34 @@ bool GuildSystem::SetMemberRank(entt::registry& registry,
         const auto& identity = view.get<CharacterIdentityComponent>(entity);
         if (identity.name == member_name) {
             target = entity;
+            target_character_id = ResolveCharacterId(identity, &member_comp);
             break;
         }
     }
 
-    if (target == entt::null) {
+    if (target == entt::null || target_character_id == kInvalidCharacterId) {
         return false;
     }
 
     for (auto& rank : guild->ranks) {
+        auto& member_ids = rank.member_ids;
+        auto id_it =
+            std::remove(member_ids.begin(), member_ids.end(), target_character_id);
+        if (id_it != member_ids.end()) {
+            member_ids.erase(id_it, member_ids.end());
+        }
+
         auto& names = rank.member_names;
-        auto it = std::remove(names.begin(), names.end(), member_name);
-        if (it != names.end()) {
-            names.erase(it, names.end());
+        auto name_it = std::remove(names.begin(), names.end(), member_name);
+        if (name_it != names.end()) {
+            names.erase(name_it, names.end());
         }
     }
 
+    if (std::find(rank_it->member_ids.begin(), rank_it->member_ids.end(),
+                  target_character_id) == rank_it->member_ids.end()) {
+        rank_it->member_ids.push_back(target_character_id);
+    }
     if (std::find(rank_it->member_names.begin(), rank_it->member_names.end(),
                   member_name) == rank_it->member_names.end()) {
         rank_it->member_names.push_back(member_name);
@@ -624,6 +675,7 @@ bool GuildSystem::SetMemberRank(entt::registry& registry,
         return false;
     }
 
+    target_member->character_id = target_character_id;
     target_member->rank = new_rank;
     target_member->rank_name = rank_it->rank_name;
 
@@ -631,8 +683,8 @@ bool GuildSystem::SetMemberRank(entt::registry& registry,
 }
 
 int GuildSystem::DeclareWar(entt::registry& registry, entt::entity player,
-                            uint32_t target_guild_id) {
-    if (!registry.valid(player) || target_guild_id == 0) {
+                            GuildId target_guild_id) {
+    if (!registry.valid(player) || target_guild_id == kInvalidGuildId) {
         return -3;
     }
 
@@ -676,8 +728,8 @@ int GuildSystem::DeclareWar(entt::registry& registry, entt::entity player,
 }
 
 bool GuildSystem::CancelWar(entt::registry& registry, entt::entity player,
-                            uint32_t target_guild_id) {
-    if (!registry.valid(player) || target_guild_id == 0) {
+                            GuildId target_guild_id) {
+    if (!registry.valid(player) || target_guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -701,13 +753,13 @@ bool GuildSystem::CancelWar(entt::registry& registry, entt::entity player,
 }
 
 int GuildSystem::MakeAlliance(entt::registry& registry, entt::entity player,
-                              uint32_t target_guild_id) {
+                              GuildId target_guild_id) {
     if (!registry.valid(player)) {
         return -1;
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return -1;
     }
 
@@ -716,7 +768,7 @@ int GuildSystem::MakeAlliance(entt::registry& registry, entt::entity player,
         return -1;
     }
 
-    if (target_guild_id == 0 || target_guild_id == member->guild_id) {
+    if (target_guild_id == kInvalidGuildId || target_guild_id == member->guild_id) {
         return -2;
     }
 
@@ -754,13 +806,13 @@ int GuildSystem::MakeAlliance(entt::registry& registry, entt::entity player,
 }
 
 bool GuildSystem::BreakAlliance(entt::registry& registry, entt::entity player,
-                                uint32_t target_guild_id) {
-    if (!registry.valid(player) || target_guild_id == 0) {
+                                GuildId target_guild_id) {
+    if (!registry.valid(player) || target_guild_id == kInvalidGuildId) {
         return false;
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -809,7 +861,7 @@ std::vector<std::string> GuildSystem::GetNotice(entt::registry& registry,
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return {};
     }
 
@@ -827,7 +879,7 @@ bool GuildSystem::StartTeamFight(entt::registry& registry, entt::entity player) 
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -852,7 +904,7 @@ bool GuildSystem::EndTeamFight(entt::registry& registry, entt::entity player) {
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -875,7 +927,7 @@ bool GuildSystem::JoinTeamFight(entt::registry& registry, entt::entity player) {
     }
 
     auto* member = registry.try_get<GuildMemberComponent>(player);
-    if (!member || member->guild_id == 0) {
+    if (!member || member->guild_id == kInvalidGuildId) {
         return false;
     }
 
@@ -908,7 +960,7 @@ void GuildSystem::RecordTeamFightKill(entt::registry& registry,
         return;
     }
 
-    if (killer_member->guild_id == 0 || victim_member->guild_id == 0) {
+    if (killer_member->guild_id == 0 || victim_member->guild_id == kInvalidGuildId) {
         return;
     }
 
@@ -943,7 +995,7 @@ void GuildSystem::CheckWarTimeout(entt::registry& registry) {
     for (auto entity : view) {
         auto& guild = view.get<GuildComponent>(entity);
         for (auto& war : guild.war_guilds) {
-            if (guild.guild_id == 0 || war.enemy_guild_id == 0) {
+            if (guild.guild_id == 0 || war.enemy_guild_id == kInvalidGuildId) {
                 continue;
             }
 

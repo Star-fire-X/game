@@ -19,6 +19,7 @@
 #include "logic/response_sender.h"
 #include "logic/services/session_role_store.h"
 #include "login_generated.h"
+#include "system_generated.h"
 
 namespace mir2::logic {
 
@@ -82,6 +83,20 @@ std::vector<uint8_t> BuildEnterGameRsp(mir2::proto::ErrorCode code,
 
   const auto rsp = mir2::proto::CreateEnterGameRsp(builder, code, player_offset);
   builder.Finish(rsp);
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
+}
+
+std::vector<uint8_t> BuildDuplicateLoginKick() {
+  flatbuffers::FlatBufferBuilder builder;
+  const auto message_offset = builder.CreateString("Account logged in elsewhere");
+  const auto reason_text_offset = builder.CreateString("duplicate login");
+  const auto kick = mir2::proto::CreateKick(
+      builder,
+      mir2::proto::ErrorCode::ERR_KICK_DUPLICATE_LOGIN,
+      message_offset,
+      reason_text_offset);
+  builder.Finish(kick);
   const uint8_t* data = builder.GetBufferPointer();
   return std::vector<uint8_t>(data, data + builder.GetSize());
 }
@@ -417,7 +432,21 @@ Task<void> CharacterHandler::HandleSelectRole(HandlerContext ctx,
 
   if (can_login) {
     entity_manager_.OnLogin(static_cast<uint32_t>(player_id));
-    role_store_.BindClientRole(ctx.client_id, player_id);
+    const auto evicted_client_id = role_store_.BindClientRole(ctx.client_id, player_id);
+    if (evicted_client_id.has_value() && *evicted_client_id != ctx.client_id) {
+      co_await response_sender_.SendAsync(
+          *evicted_client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kKick),
+          BuildDuplicateLoginKick());
+      role_store_.UnbindClient(*evicted_client_id);
+      client_registry_.Remove(*evicted_client_id);
+      SYSLOG_WARN(
+          "CharacterHandler SelectRole evicted old client on duplicate login "
+          "(player_id={}, old_client_id={}, new_client_id={})",
+          player_id,
+          *evicted_client_id,
+          ctx.client_id);
+    }
   }
 
   // Send EnterGameRsp with real HP/MP values if available.

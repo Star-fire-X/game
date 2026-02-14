@@ -1,9 +1,9 @@
 /**
  * @file inventory_serialization_test.cc
- * @brief Tests for Phase 4 serialization boundary (JSON ↔ Native structures)
+ * @brief Tests for Phase 4 serialization boundary (JSON ↔ compatibility snapshots)
  *
  * CRITICAL: These tests ensure DB compatibility and prevent data corruption
- * during the transition from JSON strings to native C++ structures.
+ * during the transition from JSON strings to compatibility snapshots.
  */
 
 #include <gtest/gtest.h>
@@ -11,14 +11,14 @@
 #include <entt/entt.hpp>
 #include <nlohmann/json.hpp>
 
-#include "ecs/components/character_components.h"
+#include "ecs/components/inventory_snapshot_component.h"
 #include "ecs/inventory_migration.h"
 
 namespace {
 
-using mir2::ecs::InventoryComponent;
-using mir2::ecs::ItemData;
-using mir2::ecs::SkillData;
+using mir2::ecs::InventorySnapshotComponent;
+using mir2::ecs::InventorySnapshotItemData;
+using mir2::ecs::InventorySnapshotSkillData;
 using nlohmann::json;
 
 namespace legend2 {
@@ -70,12 +70,12 @@ void LoadSkillsFromJson(entt::registry& registry,
 std::string SaveInventoryToJson(entt::registry& registry, entt::entity character) {
   json legacy;
   legacy["slots"] = json::array();
-  const auto* inventory = registry.try_get<InventoryComponent>(character);
+  const auto* inventory = registry.try_get<InventorySnapshotComponent>(character);
   if (!inventory) {
     return legacy.dump();
   }
 
-  for (size_t i = 0; i < InventoryComponent::kMaxSlots; ++i) {
+  for (size_t i = 0; i < InventorySnapshotComponent::kMaxSlots; ++i) {
     if (!inventory->slots[i].has_value()) {
       legacy["slots"].push_back(json::object());
       continue;
@@ -96,12 +96,12 @@ std::string SaveInventoryToJson(entt::registry& registry, entt::entity character
 std::string SaveEquipmentToJson(entt::registry& registry, entt::entity character) {
   json legacy;
   legacy["slots"] = json::array();
-  const auto* inventory = registry.try_get<InventoryComponent>(character);
+  const auto* inventory = registry.try_get<InventorySnapshotComponent>(character);
   if (!inventory) {
     return legacy.dump();
   }
 
-  for (size_t i = 0; i < InventoryComponent::kMaxEquipmentSlots; ++i) {
+  for (size_t i = 0; i < InventorySnapshotComponent::kMaxEquipmentSlots; ++i) {
     if (!inventory->equipment[i].has_value()) {
       legacy["slots"].push_back(json::object());
       continue;
@@ -122,7 +122,7 @@ std::string SaveEquipmentToJson(entt::registry& registry, entt::entity character
 std::string SaveSkillsToJson(entt::registry& registry, entt::entity character) {
   json legacy;
   legacy["skills"] = json::array();
-  const auto* inventory = registry.try_get<InventoryComponent>(character);
+  const auto* inventory = registry.try_get<InventorySnapshotComponent>(character);
   if (!inventory) {
     return legacy.dump();
   }
@@ -213,15 +213,15 @@ class InventorySerializationTest : public ::testing::Test {
   entt::entity entity_ = entt::null;
 };
 
-TEST_F(InventorySerializationTest, LoadInventoryFromJsonPopulatesNativeSlots) {
+TEST_F(InventorySerializationTest, LoadInventoryFromJsonPopulatesSnapshotSlots) {
   json inventory_json = CreateSampleInventoryJson();
   std::string json_str = inventory_json.dump();
 
   // Load from JSON
   legend2::LoadInventoryFromJson(registry_, entity_, json_str, 1);
 
-  // Verify native structure populated
-  const auto* inventory = registry_.try_get<InventoryComponent>(entity_);
+  // Verify snapshot structure populated
+  const auto* inventory = registry_.try_get<InventorySnapshotComponent>(entity_);
   ASSERT_NE(inventory, nullptr);
 
   // Check first item
@@ -245,11 +245,11 @@ TEST_F(InventorySerializationTest, LoadInventoryFromJsonPopulatesNativeSlots) {
   EXPECT_EQ(inventory->slots[3]->item_id, 102u);
 }
 
-TEST_F(InventorySerializationTest, SaveInventoryToJsonSerializesFromNativeSlots) {
-  // Create native inventory
-  auto& inventory = registry_.emplace<InventoryComponent>(entity_);
+TEST_F(InventorySerializationTest, SaveInventoryToJsonSerializesFromSnapshotSlots) {
+  // Create snapshot inventory
+  auto& inventory = registry_.emplace<InventorySnapshotComponent>(entity_);
 
-  ItemData item1;
+  InventorySnapshotItemData item1;
   item1.instance_id = 1;
   item1.item_id = 100;
   item1.count = 1;
@@ -257,7 +257,7 @@ TEST_F(InventorySerializationTest, SaveInventoryToJsonSerializesFromNativeSlots)
   item1.max_durability = 100;
   inventory.slots[0] = item1;
 
-  ItemData item2;
+  InventorySnapshotItemData item2;
   item2.instance_id = 2;
   item2.item_id = 101;
   item2.count = 5;
@@ -321,15 +321,15 @@ TEST_F(InventorySerializationTest, RoundTripPreservesAllData) {
   }
 }
 
-TEST_F(InventorySerializationTest, LoadEquipmentFromJsonPopulatesNativeEquipment) {
+TEST_F(InventorySerializationTest, LoadEquipmentFromJsonPopulatesSnapshotEquipment) {
   json equipment_json = CreateSampleEquipmentJson();
   std::string json_str = equipment_json.dump();
 
   // Load from JSON
   legend2::LoadEquipmentFromJson(registry_, entity_, json_str, 1);
 
-  // Verify native structure
-  const auto* inventory = registry_.try_get<InventoryComponent>(entity_);
+  // Verify snapshot structure
+  const auto* inventory = registry_.try_get<InventorySnapshotComponent>(entity_);
   ASSERT_NE(inventory, nullptr);
 
   // Check weapon slot
@@ -346,17 +346,17 @@ TEST_F(InventorySerializationTest, LoadEquipmentFromJsonPopulatesNativeEquipment
   EXPECT_EQ(inventory->equipment[2]->item_id, 201u);
 }
 
-TEST_F(InventorySerializationTest, SaveEquipmentToJsonSerializesFromNativeEquipment) {
-  // Create native equipment
-  auto& inventory = registry_.emplace<InventoryComponent>(entity_);
+TEST_F(InventorySerializationTest, SaveEquipmentToJsonSerializesFromSnapshotEquipment) {
+  // Create snapshot equipment
+  auto& inventory = registry_.emplace<InventorySnapshotComponent>(entity_);
 
-  ItemData weapon;
+  InventorySnapshotItemData weapon;
   weapon.instance_id = 10;
   weapon.item_id = 200;
   weapon.count = 1;
   inventory.equipment[0] = weapon;
 
-  ItemData armor;
+  InventorySnapshotItemData armor;
   armor.instance_id = 11;
   armor.item_id = 201;
   armor.count = 1;
@@ -376,15 +376,15 @@ TEST_F(InventorySerializationTest, SaveEquipmentToJsonSerializesFromNativeEquipm
   EXPECT_EQ(parsed["slots"][2]["item_id"], 201u);
 }
 
-TEST_F(InventorySerializationTest, LoadSkillsFromJsonPopulatesNativeSkills) {
+TEST_F(InventorySerializationTest, LoadSkillsFromJsonPopulatesSnapshotSkills) {
   json skills_json = CreateSampleSkillsJson();
   std::string json_str = skills_json.dump();
 
   // Load from JSON
   legend2::LoadSkillsFromJson(registry_, entity_, json_str, 1);
 
-  // Verify native structure
-  const auto* inventory = registry_.try_get<InventoryComponent>(entity_);
+  // Verify snapshot structure
+  const auto* inventory = registry_.try_get<InventorySnapshotComponent>(entity_);
   ASSERT_NE(inventory, nullptr);
   ASSERT_EQ(inventory->skills.size(), 2u);
 
@@ -397,17 +397,17 @@ TEST_F(InventorySerializationTest, LoadSkillsFromJsonPopulatesNativeSkills) {
   EXPECT_EQ(inventory->skills[1].cooldown_end_ms, 0u);
 }
 
-TEST_F(InventorySerializationTest, SaveSkillsToJsonSerializesFromNativeSkills) {
-  // Create native skills
-  auto& inventory = registry_.emplace<InventoryComponent>(entity_);
+TEST_F(InventorySerializationTest, SaveSkillsToJsonSerializesFromSnapshotSkills) {
+  // Create snapshot skills
+  auto& inventory = registry_.emplace<InventorySnapshotComponent>(entity_);
 
-  SkillData skill1;
+  InventorySnapshotSkillData skill1;
   skill1.skill_id = 28;
   skill1.level = 3;
   skill1.cooldown_end_ms = 0;
   inventory.skills.push_back(skill1);
 
-  SkillData skill2;
+  InventorySnapshotSkillData skill2;
   skill2.skill_id = 29;
   skill2.level = 5;
   skill2.cooldown_end_ms = 1000000;
@@ -429,7 +429,7 @@ TEST_F(InventorySerializationTest, SaveSkillsToJsonSerializesFromNativeSkills) {
 
 TEST_F(InventorySerializationTest, EmptyInventorySerializesCorrectly) {
   // Create empty inventory
-  registry_.emplace<InventoryComponent>(entity_);
+  registry_.emplace<InventorySnapshotComponent>(entity_);
 
   // Save to JSON
   std::string json_str = legend2::SaveInventoryToJson(registry_, entity_);
@@ -444,10 +444,10 @@ TEST_F(InventorySerializationTest, EmptyInventorySerializesCorrectly) {
 
 TEST_F(InventorySerializationTest, FullInventorySerializesCorrectly) {
   // Create full inventory
-  auto& inventory = registry_.emplace<InventoryComponent>(entity_);
+  auto& inventory = registry_.emplace<InventorySnapshotComponent>(entity_);
 
-  for (size_t i = 0; i < InventoryComponent::kMaxSlots; ++i) {
-    ItemData item;
+  for (size_t i = 0; i < InventorySnapshotComponent::kMaxSlots; ++i) {
+    InventorySnapshotItemData item;
     item.instance_id = i + 1;
     item.item_id = 1000 + static_cast<uint32_t>(i);
     item.count = 1;
@@ -460,12 +460,12 @@ TEST_F(InventorySerializationTest, FullInventorySerializesCorrectly) {
   // Parse and verify
   json parsed = json::parse(json_str);
   ASSERT_TRUE(parsed.contains("slots"));
-  EXPECT_EQ(parsed["slots"].size(), InventoryComponent::kMaxSlots);
+  EXPECT_EQ(parsed["slots"].size(), InventorySnapshotComponent::kMaxSlots);
 
   // Spot check first and last
   EXPECT_EQ(parsed["slots"][0]["instance_id"], 1u);
-  EXPECT_EQ(parsed["slots"][InventoryComponent::kMaxSlots - 1]["instance_id"],
-            InventoryComponent::kMaxSlots);
+  EXPECT_EQ(parsed["slots"][InventorySnapshotComponent::kMaxSlots - 1]["instance_id"],
+            InventorySnapshotComponent::kMaxSlots);
 }
 
 TEST_F(InventorySerializationTest, LegacyJsonFormatCompatibility) {
@@ -487,7 +487,7 @@ TEST_F(InventorySerializationTest, LegacyJsonFormatCompatibility) {
 
   // Option 1: Convert legacy format
   // legend2::LoadInventoryFromJson(registry_, entity_, legacy_str, 1);
-  // const auto* inventory = registry_.try_get<InventoryComponent>(entity_);
+  // const auto* inventory = registry_.try_get<InventorySnapshotComponent>(entity_);
   // EXPECT_NE(inventory, nullptr);
 
   // Option 2: Reject with error
@@ -504,7 +504,7 @@ TEST_F(InventorySerializationTest, MalformedJsonHandledGracefully) {
   });
 
   // Inventory should remain empty or have default state
-  const auto* inventory = registry_.try_get<InventoryComponent>(entity_);
+  const auto* inventory = registry_.try_get<InventorySnapshotComponent>(entity_);
   if (inventory) {
     // All slots should be empty after failed load
     for (const auto& slot : inventory->slots) {
@@ -526,7 +526,7 @@ TEST_F(InventorySerializationTest, ExcessiveDataTruncatedSafely) {
   json excessive_json;
   excessive_json["slots"] = json::array();
 
-  for (size_t i = 0; i < InventoryComponent::kMaxSlots + 10; ++i) {
+  for (size_t i = 0; i < InventorySnapshotComponent::kMaxSlots + 10; ++i) {
     excessive_json["slots"].push_back(CreateSampleItemJson(i, 100, 1));
   }
 
@@ -537,7 +537,7 @@ TEST_F(InventorySerializationTest, ExcessiveDataTruncatedSafely) {
     legend2::LoadInventoryFromJson(registry_, entity_, json_str, 1);
   });
 
-  const auto* inventory = registry_.try_get<InventoryComponent>(entity_);
+  const auto* inventory = registry_.try_get<InventorySnapshotComponent>(entity_);
   ASSERT_NE(inventory, nullptr);
 
   // Should have exactly max slots, not more
@@ -547,7 +547,7 @@ TEST_F(InventorySerializationTest, ExcessiveDataTruncatedSafely) {
       ++filled_count;
     }
   }
-  EXPECT_LE(filled_count, static_cast<int>(InventoryComponent::kMaxSlots));
+  EXPECT_LE(filled_count, static_cast<int>(InventorySnapshotComponent::kMaxSlots));
 }
 
 }  // namespace

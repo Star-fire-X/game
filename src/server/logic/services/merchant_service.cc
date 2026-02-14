@@ -9,7 +9,6 @@
 #include <cmath>
 #include <filesystem>
 #include <initializer_list>
-#include <iostream>
 #include <limits>
 
 #include <yaml-cpp/yaml.h>
@@ -104,11 +103,6 @@ ShopItem* FindItemInShop(ShopConfig& shop, uint32_t item_id) {
     return &(*it);
 }
 
-std::unordered_map<uint32_t, uint32_t>& OpenShopMap() {
-    static std::unordered_map<uint32_t, uint32_t> map;
-    return map;
-}
-
 void PersistCriticalCharacter(entt::registry& registry,
                               entt::entity player,
                               const char* context) {
@@ -144,7 +138,11 @@ MerchantService::MerchantService(entt::registry& registry, ecs::EventBus& event_
             if (!registry_.valid(event.player) || event.store_id == 0) {
                 return;
             }
-            OpenShopMap()[static_cast<uint32_t>(entt::to_integral(event.player))] = event.store_id;
+            const auto* identity = registry_.try_get<ecs::CharacterIdentityComponent>(event.player);
+            if (!identity || identity->id == 0) {
+                return;
+            }
+            open_shop_by_player_id_[identity->id] = event.store_id;
         });
 }
 
@@ -260,7 +258,7 @@ void MerchantService::LoadShops(const std::string& config_path) {
             }
         }
     } catch (const std::exception& ex) {
-        std::cerr << "Merchant shop load failed: " << ex.what() << std::endl;
+        SYSLOG_ERROR("MerchantService::LoadShops failed: {}", ex.what());
     }
 }
 
@@ -342,10 +340,12 @@ bool MerchantService::SellItem(entt::entity player, entt::entity item, int count
     ShopItem* selected_item = nullptr;
     int64_t unit_price = -1;
 
-    const uint32_t player_key = static_cast<uint32_t>(entt::to_integral(player));
-    auto& open_shop_map = OpenShopMap();
-    auto open_it = open_shop_map.find(player_key);
-    if (open_it != open_shop_map.end()) {
+    const auto* identity = registry_.try_get<ecs::CharacterIdentityComponent>(player);
+    auto open_it = open_shop_by_player_id_.end();
+    if (identity && identity->id != 0) {
+        open_it = open_shop_by_player_id_.find(identity->id);
+    }
+    if (open_it != open_shop_by_player_id_.end()) {
         auto shop_it = shops_.find(open_it->second);
         if (shop_it != shops_.end()) {
             ShopItem* shop_item = FindItemInShop(shop_it->second, item_component->item_id);
@@ -387,6 +387,12 @@ bool MerchantService::SellItem(entt::entity player, entt::entity item, int count
         return false;
     }
     if (attributes->gold > std::numeric_limits<int>::max() - total_price) {
+        return false;
+    }
+    if (selected_item->stock >= 0 &&
+        selected_item->stock > std::numeric_limits<int>::max() - count) {
+        SYSLOG_WARN("MerchantService::SellItem stock overflow (item_id={}, stock={}, count={})",
+                    selected_item->item_id, selected_item->stock, count);
         return false;
     }
 

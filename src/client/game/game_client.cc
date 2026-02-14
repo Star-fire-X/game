@@ -2509,7 +2509,6 @@ void GameClient::send_skill_request(uint32_t skill_id, uint64_t target_id) {
     mir2::common::SkillRequest request;
     request.skill_id = skill_id;
     request.target_id = target_id;
-    request.target_type = mir2::proto::EntityType::PLAYER;
 
     mir2::common::MessageCodecStatus status = mir2::common::MessageCodecStatus::kOk;
     const auto payload = mir2::common::EncodeSkillRequest(request, &status);

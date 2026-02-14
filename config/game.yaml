@@ -24,12 +24,6 @@ database:
   database: "mir2_game"
   pool_size: 10
 
-redis:
-  host: "127.0.0.1"
-  port: 6379
-  password: ""
-  db: 0
-
 log:
   level: "info"
   path: "logs"

@@ -16,41 +16,13 @@
 #include "ecs/systems/inventory_system.h"
 #include "ecs/world.h"
 #include "log/logger.h"
+#include "logic/services/error_code_adapter.h"
 
 namespace mir2::logic {
 
 namespace {
 
 constexpr int kMaxInventorySlots = mir2::common::constants::MAX_INVENTORY_SIZE;
-
-mir2::common::ErrorCode ToLegacyError(mir2::common::ErrorCode code) {
-  switch (code) {
-    case mir2::common::ErrorCode::SUCCESS:
-      return mir2::common::ErrorCode::kOk;
-    case mir2::common::ErrorCode::INVALID_ACTION:
-      return mir2::common::ErrorCode::kInvalidAction;
-    case mir2::common::ErrorCode::TARGET_NOT_FOUND:
-      return mir2::common::ErrorCode::kTargetNotFound;
-    case mir2::common::ErrorCode::TARGET_OUT_OF_RANGE:
-      return mir2::common::ErrorCode::kTargetOutOfRange;
-    case mir2::common::ErrorCode::INSUFFICIENT_MP:
-      return mir2::common::ErrorCode::kInsufficientMp;
-    case mir2::common::ErrorCode::SKILL_ON_COOLDOWN:
-      return mir2::common::ErrorCode::kSkillCooldown;
-    case mir2::common::ErrorCode::CHARACTER_DEAD:
-      return mir2::common::ErrorCode::kTargetDead;
-    case mir2::common::ErrorCode::ITEM_NOT_FOUND:
-      return mir2::common::ErrorCode::kTargetNotFound;
-    case mir2::common::ErrorCode::INVENTORY_FULL:
-      return mir2::common::ErrorCode::kInvalidAction;
-    case mir2::common::ErrorCode::INVALID_POSITION:
-      return mir2::common::ErrorCode::kInvalidAction;
-    case mir2::common::ErrorCode::POSITION_NOT_WALKABLE:
-      return mir2::common::ErrorCode::kInvalidAction;
-    default:
-      return mir2::common::ErrorCode::kUnknown;
-  }
-}
 
 bool IsValidSlot(int slot) {
   return slot >= 0 && slot < kMaxInventorySlots;
@@ -124,6 +96,9 @@ entt::entity FindGroundItem(entt::registry& registry,
     auto* item = registry.try_get<mir2::ecs::ItemComponent>(entity);
     auto* owner = registry.try_get<mir2::ecs::InventoryOwnerComponent>(entity);
     if (!item || !owner) {
+      return false;
+    }
+    if (item->instance_id != item_id) {
       return false;
     }
     if (owner->slot_index >= 0) {
@@ -230,7 +205,8 @@ ItemPickupResult EcsInventoryService::PickupItem(uint64_t character_id, uint32_t
   }
 
   auto& character_manager = registry_manager_.GetCharacterManager();
-  entt::entity character = character_manager.GetOrCreate(static_cast<uint32_t>(character_id));
+  auto character_opt = character_manager.TryGet(static_cast<uint32_t>(character_id));
+  entt::entity character = character_opt.has_value() ? *character_opt : entt::null;
   entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(character_id));
   if (!registry || character == entt::null || !registry->valid(character)) {
     SYSLOG_WARN("EcsInventoryService::PickupItem invalid registry (character_id={})",
@@ -254,6 +230,11 @@ ItemPickupResult EcsInventoryService::PickupItem(uint64_t character_id, uint32_t
     return result;
   }
 
+  std::optional<mir2::ecs::ItemComponent> picked_item_snapshot;
+  if (auto* picked_item = registry->try_get<mir2::ecs::ItemComponent>(ground_item)) {
+    picked_item_snapshot = *picked_item;
+  }
+
   const int free_slot = FindFreeSlot(*registry, character);
   if (free_slot < 0) {
     SYSLOG_WARN("EcsInventoryService::PickupItem inventory full (character_id={})",
@@ -272,10 +253,10 @@ ItemPickupResult EcsInventoryService::PickupItem(uint64_t character_id, uint32_t
 
   result.code = mir2::common::ErrorCode::kOk;
 
-  if (auto* picked_item = registry->try_get<mir2::ecs::ItemComponent>(ground_item)) {
+  if (picked_item_snapshot.has_value()) {
     TryPersistCriticalPickup(character_manager,
                              static_cast<uint32_t>(character_id),
-                             *picked_item);
+                             *picked_item_snapshot);
   }
 
   SYSLOG_DEBUG("EcsInventoryService::PickupItem character_id={} item_id={} slot={}",
@@ -306,7 +287,8 @@ ItemUseResult EcsInventoryService::UseItem(uint64_t character_id,
   }
 
   auto& character_manager = registry_manager_.GetCharacterManager();
-  entt::entity character = character_manager.GetOrCreate(static_cast<uint32_t>(character_id));
+  auto character_opt = character_manager.TryGet(static_cast<uint32_t>(character_id));
+  entt::entity character = character_opt.has_value() ? *character_opt : entt::null;
   entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(character_id));
   if (!registry || character == entt::null || !registry->valid(character)) {
     SYSLOG_WARN("EcsInventoryService::UseItem invalid registry (character_id={})",
@@ -380,7 +362,8 @@ ItemDropResult EcsInventoryService::DropItem(uint64_t character_id,
   }
 
   auto& character_manager = registry_manager_.GetCharacterManager();
-  entt::entity character = character_manager.GetOrCreate(static_cast<uint32_t>(character_id));
+  auto character_opt = character_manager.TryGet(static_cast<uint32_t>(character_id));
+  entt::entity character = character_opt.has_value() ? *character_opt : entt::null;
   entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(character_id));
   if (!registry || character == entt::null || !registry->valid(character)) {
     SYSLOG_WARN("EcsInventoryService::DropItem invalid registry (character_id={})",

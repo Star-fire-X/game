@@ -10,6 +10,8 @@
 
 #include <entt/entt.hpp>
 
+#include "ecs/components/entity_version_component.h"
+
 namespace mir2::ecs {
 class World;
 }  // namespace mir2::ecs
@@ -66,6 +68,25 @@ struct HandlerContext {
       return false;
     }
     return registry->valid(entity);
+  }
+
+  /**
+   * @brief Validate cached registry/entity and ensure entity version is unchanged.
+   *
+   * This should be called after co_await before mutating ECS state.
+   */
+  bool ValidateCacheVersion() const {
+    if (!ValidateCache()) {
+      return false;
+    }
+    if (entity_version == 0) {
+      return false;
+    }
+    const auto* version = registry->try_get<mir2::ecs::EntityVersionComponent>(entity);
+    if (!version) {
+      return false;
+    }
+    return version->version == entity_version;
   }
 };
 

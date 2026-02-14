@@ -35,6 +35,11 @@ class NetworkManager {
   bool Start(const std::string& bind_ip, uint16_t port, int max_connections);
 
   /**
+   * @brief 通过 UDS 启动监听（仅 Unix 平台）
+   */
+  bool StartUnix(const std::string& socket_path, int max_connections);
+
+  /**
    * @brief 停止网络
    */
   void Stop();

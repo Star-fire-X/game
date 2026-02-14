@@ -598,7 +598,7 @@ void MonsterAISystem::UpdateBossCowKingAI(entt::registry& registry,
         EffectSystem effect_system(registry);
         ActiveEffect frenzy_effect;
         frenzy_effect.skill_id = kBossCowKingFrenzySkillId;
-        frenzy_effect.source_entity = static_cast<uint32_t>(entity);
+        frenzy_effect.source_entity = entity;
         frenzy_effect.category = EffectCategory::FRENZY;
         frenzy_effect.attack_multiplier = 2.0f;   // 攻击力x2
         frenzy_effect.defense_multiplier = 0.5f;  // 防御力x0.5

@@ -10,6 +10,10 @@
 
 #include "server/common/error_codes.h"
 
+namespace mir2::proto {
+enum class EntityType : uint8_t;
+}
+
 namespace mir2::logic {
 
 /**
@@ -30,7 +34,9 @@ class CombatService {
  public:
   virtual ~CombatService() = default;
 
-  virtual CombatResult Attack(uint64_t attacker_id, uint64_t target_id) = 0;
+  virtual CombatResult Attack(uint64_t attacker_id,
+                              uint64_t target_id,
+                              mir2::proto::EntityType target_type) = 0;
   virtual CombatResult UseSkill(uint64_t caster_id, uint64_t target_id, uint32_t skill_id) = 0;
 };
 

@@ -1,5 +1,6 @@
 #include "logic/handlers/attack_handler.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -39,24 +40,29 @@ std::vector<uint8_t> BuildAttackRsp(const CombatResult& result,
   response.damage = 0;
   response.target_hp = 0;
   response.target_dead = false;
-  return mir2::common::EncodeAttackResponse(response, nullptr);
+  mir2::common::MessageCodecStatus fallback_status = mir2::common::MessageCodecStatus::kOk;
+  auto fallback_payload = mir2::common::EncodeAttackResponse(response, &fallback_status);
+  if (fallback_status != mir2::common::MessageCodecStatus::kOk) {
+    SYSLOG_ERROR("BuildAttackRsp fallback encode failed (status={})",
+                 static_cast<int>(fallback_status));
+    return {};
+  }
+  return fallback_payload;
 }
 
 uint64_t ResolveAttackerId(const RoleStore& role_store, uint64_t client_id) {
   if (const auto role_id = role_store.GetRoleId(client_id)) {
     return *role_id;
   }
-  return client_id;
+  return 0;
 }
 
 }  // namespace
 
-AttackHandler::AttackHandler(CoroutineExecutor& executor,
-                             ResponseSender& response_sender,
+AttackHandler::AttackHandler(ResponseSender& response_sender,
                              CombatService& service,
                              RoleStore& role_store)
-    : executor_(executor),
-      response_sender_(response_sender),
+    : response_sender_(response_sender),
       service_(service),
       role_store_(role_store) {}
 
@@ -90,7 +96,8 @@ Task<void> AttackHandler::HandleMessage(HandlerContext ctx,
     co_return;
   }
 
-  co_await Handle(std::move(ctx), request.target_id);
+  co_await Handle(
+      std::move(ctx), request.target_id, static_cast<uint16_t>(request.target_type));
 }
 
 Task<void> AttackHandler::HandleHot(HandlerContext ctx,
@@ -106,23 +113,45 @@ Task<void> AttackHandler::HandleHot(HandlerContext ctx,
     co_return;
   }
 
-  co_await Handle(std::move(ctx), target_id);
+  co_await Handle(std::move(ctx), target_id, target_type);
 }
 
-Task<void> AttackHandler::Handle(HandlerContext ctx, uint64_t target_id) {
-  const uint64_t attacker_id = ResolveAttackerId(role_store_, ctx.client_id);
-  CombatResult result = service_.Attack(attacker_id, target_id);
+Task<void> AttackHandler::Handle(HandlerContext ctx,
+                                 uint64_t target_id,
+                                 uint16_t target_type) {
+  const auto role_id = role_store_.GetRoleId(ctx.client_id);
+  if (!role_id.has_value()) {
+    SYSLOG_WARN("AttackHandler rejected unbound client (client_id={}, target_id={})",
+                ctx.client_id,
+                target_id);
+    co_await SendAttackError(std::move(ctx), mir2::common::ErrorCode::kInvalidAction);
+    co_return;
+  }
+  const uint64_t attacker_id = *role_id;
+  const auto proto_target_type = static_cast<mir2::proto::EntityType>(target_type);
+  CombatResult result = service_.Attack(attacker_id, target_id, proto_target_type);
   auto payload = BuildAttackRsp(result, attacker_id, target_id);
+  if (payload.empty()) {
+    SYSLOG_ERROR(
+        "AttackHandler failed to build response payload (client_id={}, attacker_id={}, target_id={})",
+        ctx.client_id,
+        attacker_id,
+        target_id);
+    co_return;
+  }
   co_await response_sender_.SendAsync(
       ctx.client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kAttackRsp),
       std::move(payload));
 
-  SYSLOG_DEBUG("AttackHandler attack client_id={} attacker_id={} target_id={} code={}",
+  SYSLOG_DEBUG(
+      "AttackHandler attack client_id={} attacker_id={} target_id={} target_type={} code={} ({})",
                ctx.client_id,
                attacker_id,
                target_id,
-               static_cast<int>(result.code));
+               target_type,
+               static_cast<int>(result.code),
+               mir2::common::error_code_to_string(result.code));
 }
 
 Task<void> AttackHandler::SendAttackError(HandlerContext ctx, mir2::common::ErrorCode code) {
@@ -130,6 +159,12 @@ Task<void> AttackHandler::SendAttackError(HandlerContext ctx, mir2::common::Erro
   result.code = code;
   const uint64_t attacker_id = ResolveAttackerId(role_store_, ctx.client_id);
   auto payload = BuildAttackRsp(result, attacker_id, 0);
+  if (payload.empty()) {
+    SYSLOG_ERROR("AttackHandler failed to build error payload (client_id={}, code={})",
+                 ctx.client_id,
+                 static_cast<int>(code));
+    co_return;
+  }
   co_await response_sender_.SendAsync(
       ctx.client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kAttackRsp),

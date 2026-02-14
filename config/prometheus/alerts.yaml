@@ -29,3 +29,43 @@ groups:
         annotations:
           summary: "Handler latency p99 above 200ms"
           description: "P99 handler latency is above 200ms for 5m. Investigate slow handlers or backpressure."
+
+      - alert: LogicThreadAffinityViolationDetected
+        expr: increase(logic_thread_affinity_violation_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: logic
+        annotations:
+          summary: "Logic thread affinity violation detected"
+          description: "Thread affinity violations occurred in the last 5m. ECS/thread-safety assumptions may be broken."
+
+      - alert: EntityVersionMismatchHigh
+        expr: rate(logic_entity_version_mismatch_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Entity version mismatch rate is high"
+          description: "Entity version mismatches are sustained above 1/s for 5m, indicating stale context or cross-thread ordering issues."
+
+      - alert: LegacyDispatchBlockedHigh
+        expr: rate(logic_legacy_dispatch_blocked_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Legacy dispatch blocked rate is high"
+          description: "Legacy dispatch policy blocks are above 10/s for 5m. Check fallback policy and client traffic mix."
+
+      - alert: QueueFullFallbackHigh
+        expr: rate(logic_hot_event_queue_full_fallback_total[5m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Queue-full fallback rate is high"
+          description: "Hot-event queue-full fallbacks are above 20/s for 5m, indicating sustained overload."

@@ -56,7 +56,7 @@ void TcpConnection::Close() {
       return;
     }
     asio::error_code ec;
-    socket_->shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+    socket_->shutdown(asio::socket_base::shutdown_both, ec);
     socket_->close(ec);
     if (disconnect_handler_) {
       disconnect_handler_(connection_id_);

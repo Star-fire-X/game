@@ -1095,6 +1095,33 @@ TEST(StorageEngineSensitiveAccountCacheTest,
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEngineSyncWritePrefixTest,
+     SyncWritePrefixRoutesToSyncPathWhileNonPrefixWriteIsRejected) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.l2_path = "/dev/null/mir2_storage_engine_sync_prefix";
+    config.enable_strict_write_guarantee = false;
+    config.queue_capacity = 0;
+    config.sync_write_key_prefixes = {"sync:"};
+    config.critical_key_prefixes = {"persist:"};
+
+    auto backend = std::make_unique<SaveCountingBackend>();
+    auto* backend_ptr = backend.get();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    EXPECT_TRUE(engine.Set("sync:entity:1", std::vector<uint8_t>{1, 2, 3}));
+    EXPECT_EQ(backend_ptr->save_calls.load(std::memory_order_relaxed), 1U);
+
+    EXPECT_FALSE(engine.Set("normal:entity:1", std::vector<uint8_t>{4, 5, 6}));
+    EXPECT_EQ(backend_ptr->save_calls.load(std::memory_order_relaxed), 1U);
+
+    StorageEngine::Shutdown();
+}
+
 TEST(CircuitBreakerHotPathTest, IsOpenTransitionsToHalfOpenWithoutGetStateUpgradePath) {
     using mir2::storage_engine::utils::CircuitBreaker;
 

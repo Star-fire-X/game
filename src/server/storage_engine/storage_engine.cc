@@ -92,6 +92,7 @@ bool IsValidStorageKey(const std::string& key) {
 }
 
 bool IsSensitiveStorageKey(const std::string& key) {
+    // Account payload is backend-only source-of-truth and bypasses L1/L2 read caches.
     return std::string_view(key).starts_with(kSensitiveAccountKeyPrefix);
 }
 
@@ -292,7 +293,7 @@ public:
         return GetFromL2Internal(key);
     }
 
-    bool IsCriticalKey(const std::string& key) const {
+    bool IsPersistentTierCriticalKey(const std::string& key) const {
         if (IsSensitiveStorageKey(key)) {
             return true;
         }
@@ -306,9 +307,22 @@ public:
         return false;
     }
 
+    bool IsSyncWriteCriticalKey(const std::string& key) const {
+        if (IsSensitiveStorageKey(key)) {
+            return true;
+        }
+        for (const auto& prefix : config_.sync_write_key_prefixes) {
+            if (!prefix.empty() &&
+                std::string_view(key).starts_with(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     l2::RocksDBCache::DataTier ResolveDataTier(
         const std::string& key) const {
-        return (config_.critical_data_no_ttl && IsCriticalKey(key))
+        return (config_.critical_data_no_ttl && IsPersistentTierCriticalKey(key))
             ? l2::RocksDBCache::DataTier::kPersistent
             : l2::RocksDBCache::DataTier::kTtl;
     }
@@ -420,6 +434,32 @@ public:
 
         if (!backend_persisted && async_queue_) {
             queued_for_persistence = async_queue_->Enqueue(key, data, priority);
+            if (!queued_for_persistence) {
+                const bool requires_sync_compensation =
+                    priority == Priority::CRITICAL || IsSyncWriteCriticalKey(key);
+                if (requires_sync_compensation) {
+                    backend_persisted = PersistToBackendSync(key, data);
+                    if (!backend_persisted) {
+                        IncrementStorageCounter(kStrictWriteFailMetric);
+                        auto logger = spdlog::get("mir2");
+                        if (logger) {
+                            logger->warn(
+                                "StorageEngine Set rejected: outbox enqueue rejected and sync compensation failed, key={}",
+                                key);
+                        }
+                        return false;
+                    }
+                    IncrementStorageCounter(kStrictWriteFallbackMetric);
+                } else {
+                    auto logger = spdlog::get("mir2");
+                    if (logger) {
+                        logger->warn(
+                            "StorageEngine Set rejected: outbox enqueue rejected for non-critical key={}",
+                            key);
+                    }
+                    return false;
+                }
+            }
         }
 
         if (!l2_persisted && !backend_persisted && !queued_for_persistence) {
@@ -488,7 +528,20 @@ public:
         }
 
         if (l2_success && async_queue_) {
-            async_queue_->Enqueue(key, data, priority);
+            const bool queued = async_queue_->Enqueue(key, data, priority);
+            if (!queued) {
+                if (!PersistToBackendSync(key, data)) {
+                    IncrementStorageCounter(kStrictWriteFailMetric);
+                    auto logger = spdlog::get("mir2");
+                    if (logger) {
+                        logger->warn(
+                            "StorageEngine SetSync rejected: outbox enqueue rejected and sync compensation failed, key={}",
+                            key);
+                    }
+                    return false;
+                }
+                IncrementStorageCounter(kStrictWriteFallbackMetric);
+            }
         }
 
         stats_.total_sets.fetch_add(1, std::memory_order_relaxed);
@@ -587,9 +640,12 @@ public:
                     detail::GetCurrentTimeMs()
                 };
 
-                const bool write_success = IsCriticalKey(key)
-                    ? SetSyncInternal(key, new_versioned_data, priority)
-                    : SetInternal(key, new_versioned_data, priority);
+                const bool is_sync_write_key = IsSyncWriteCriticalKey(key);
+                const Priority effective_priority =
+                    is_sync_write_key ? Priority::CRITICAL : priority;
+                const bool write_success = is_sync_write_key
+                    ? SetSyncInternal(key, new_versioned_data, effective_priority)
+                    : SetInternal(key, new_versioned_data, effective_priority);
                 if (!write_success) {
                     RecordUpdateLatency(update_start);
                     return false;
@@ -1454,8 +1510,8 @@ bool StorageEngine::Set(const std::string& key,
         data,
         detail::GetCurrentTimeMs()
     };
-    if (pimpl_->IsCriticalKey(key)) {
-        return pimpl_->SetSyncInternal(key, versioned, priority);
+    if (pimpl_->IsSyncWriteCriticalKey(key)) {
+        return pimpl_->SetSyncInternal(key, versioned, Priority::CRITICAL);
     }
     return pimpl_->SetInternal(key, versioned, priority);
 }
@@ -1498,8 +1554,8 @@ bool StorageEngine::CompareAndSet(const std::string& key,
         data,
         detail::GetCurrentTimeMs()
     };
-    if (pimpl_->IsCriticalKey(key)) {
-        return pimpl_->SetSyncInternal(key, versioned, priority);
+    if (pimpl_->IsSyncWriteCriticalKey(key)) {
+        return pimpl_->SetSyncInternal(key, versioned, Priority::CRITICAL);
     }
     return pimpl_->SetInternal(key, versioned, priority);
 }

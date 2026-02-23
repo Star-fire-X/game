@@ -70,6 +70,7 @@ public:
         size_t dead_letter_max_items = 10000;
         bool enable_strict_write_guarantee = true;
         std::vector<std::string> critical_key_prefixes;
+        std::vector<std::string> sync_write_key_prefixes = {"char:"};
         bool critical_data_no_ttl = true;
         bool enable_outbox = false;
         size_t outbox_replay_limit = 0;  // 0 means replay all.

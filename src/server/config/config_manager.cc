@@ -254,6 +254,14 @@ bool ConfigManager::Load(const std::string& config_path) {
     storage_engine_config_.queue_retry_delay_ms = ReadOrDefault(
         storage_engine, "queue_retry_delay_ms",
         storage_engine_config_.queue_retry_delay_ms);
+    storage_engine_config_.account_cache_ttl_seconds = ReadOrDefault(
+        storage_engine,
+        "account_cache_ttl_seconds",
+        storage_engine_config_.account_cache_ttl_seconds);
+    storage_engine_config_.account_cache_max_entries = ReadOrDefault(
+        storage_engine,
+        "account_cache_max_entries",
+        storage_engine_config_.account_cache_max_entries);
     storage_engine_config_.dead_letter_max_items = ReadOrDefault(
         storage_engine, "dead_letter_max_items",
         storage_engine_config_.dead_letter_max_items);
@@ -299,6 +307,16 @@ bool ConfigManager::Load(const std::string& config_path) {
       }
       if (storage_engine_config_.critical_key_prefixes.empty()) {
         storage_engine_config_.critical_key_prefixes = {"char:", "account:username:"};
+      }
+    }
+    if (storage_engine && storage_engine["sync_write_key_prefixes"]) {
+      storage_engine_config_.sync_write_key_prefixes.clear();
+      for (const auto& prefix_node : storage_engine["sync_write_key_prefixes"]) {
+        storage_engine_config_.sync_write_key_prefixes.push_back(
+            prefix_node.as<std::string>());
+      }
+      if (storage_engine_config_.sync_write_key_prefixes.empty()) {
+        storage_engine_config_.sync_write_key_prefixes = {"char:"};
       }
     }
 

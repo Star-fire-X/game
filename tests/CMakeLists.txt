@@ -24,6 +24,7 @@ set(LEGEND2_TEST_SOURCES
     server/network/dual_channel_manager_test.cc
     server/storage_engine_test.cc  # 新增：StorageEngine测试
     server/storage_engine/async_test.cc
+    server/storage_engine/async_outbox_backpressure_test.cc
     server/storage_engine/blocking_queue_test.cc
     server/storage_engine/rocksdb_cache_test.cc
     server/logic/coroutine_executor_test.cc
@@ -237,6 +238,7 @@ set(LEGEND2_TEST_SOURCES
 set(LEGEND2_PQXX_TEST_SOURCES
     server/db/postgres_database_test.cpp
     server/db/account_storage_backend_test.cpp
+    server/db/account_storage_backend_cache_test.cpp
     server/logic/auction_handler_persistence_test.cc
     server/logic/mail_handler_persistence_test.cc
     server/logic/ranking_service_persistence_test.cc
@@ -352,6 +354,7 @@ target_compile_definitions(legend2_tests PRIVATE
 add_executable(storage_engine_focus_tests
     server/storage_engine_test.cc
     server/storage_engine/async_test.cc
+    server/storage_engine/async_outbox_backpressure_test.cc
     server/storage_engine/rocksdb_cache_test.cc
     server/config/config_manager_storage_engine_test.cc
 )

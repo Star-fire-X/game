@@ -89,18 +89,29 @@ class AlwaysFailBackend : public test::NoopStorageBackend {
     return StorageResult{false, "forced batch failure", 0};
   }
 
-  StorageResult SaveBatchAtomic(
-      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
-      override {
-    return StorageResult{false, "forced atomic batch failure", 0};
-  }
-
   bool IsHealthy() const override {
     return true;
   }
 };
 
-class AtomicBatchCountingBackend : public test::NoopStorageBackend {
+class BatchCountingBackend : public test::NoopStorageBackend {
+ public:
+  StorageResult SaveBatch(
+      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
+      override {
+    save_batch_calls.fetch_add(1, std::memory_order_relaxed);
+    return StorageResult{true, "", 0};
+  }
+
+  bool IsHealthy() const override {
+    return true;
+  }
+
+  std::atomic<uint32_t> save_batch_calls{0};
+};
+
+class AtomicBatchCountingBackend : public test::NoopStorageBackend,
+                                   public IAtomicBatchStorageBackend {
  public:
   StorageResult SaveBatch(
       const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
@@ -311,7 +322,27 @@ TEST(AsyncPersistenceQueueP1TailTest, FailedItemsEnterDeadLetterQueue) {
   EXPECT_GE(snapshot[0].attempts, 1U);
 }
 
-TEST(AsyncPersistenceQueueP1TailTest, BatchWorkerUsesAtomicBatchSave) {
+TEST(AsyncPersistenceQueueP1TailTest, BatchWorkerFallsBackToSaveBatchWithoutAtomicSupport) {
+  BatchCountingBackend backend;
+  persistence::AsyncPersistenceQueue::Config queue_config;
+  queue_config.worker_threads = 2;
+  queue_config.batch_size = 1;
+  queue_config.batch_interval_ms = 10;
+  queue_config.retry_count = 0;
+  queue_config.retry_delay_ms = 0;
+
+  persistence::AsyncPersistenceQueue queue(&backend, queue_config);
+  VersionedData data{
+      .version = 6,
+      .data = std::vector<uint8_t>{6},
+      .timestamp_ms = 6};
+  ASSERT_TRUE(queue.Enqueue("batch:non_atomic:key", data, Priority::NORMAL));
+  ASSERT_TRUE(queue.FlushAll(2000));
+
+  EXPECT_GT(backend.save_batch_calls.load(std::memory_order_relaxed), 0U);
+}
+
+TEST(AsyncPersistenceQueueP1TailTest, BatchWorkerUsesAtomicBatchSaveWhenSupported) {
   AtomicBatchCountingBackend backend;
   persistence::AsyncPersistenceQueue::Config queue_config;
   queue_config.worker_threads = 2;

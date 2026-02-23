@@ -612,16 +612,24 @@ bool LogicServer::Initialize(const std::string& config_path) {
     SYSLOG_ERROR("StorageEngine backend init failed");
     return false;
   }
+  const auto& loaded_storage_config =
+      config::ConfigManager::Instance().GetStorageEngineConfig();
+  db::AccountStorageBackend::AccountCacheOptions account_cache_options;
+  account_cache_options.ttl_seconds =
+      loaded_storage_config.account_cache_ttl_seconds;
+  account_cache_options.max_entries =
+      loaded_storage_config.account_cache_max_entries;
   auto backend =
       std::make_unique<db::AccountStorageBackend>(
-          std::move(kv_backend), db_config, storage_pool);
+          std::move(kv_backend),
+          db_config,
+          storage_pool,
+          account_cache_options);
   if (!backend->Initialize()) {
     SYSLOG_ERROR("AccountStorageBackend init failed");
     return false;
   }
 
-  const auto& loaded_storage_config =
-      config::ConfigManager::Instance().GetStorageEngineConfig();
   storage_engine::StorageEngine::Config storage_config;
   storage_config.l1_max_entries = loaded_storage_config.l1_max_entries;
   storage_config.l1_ttl_seconds = loaded_storage_config.l1_ttl_seconds;
@@ -639,6 +647,8 @@ bool LogicServer::Initialize(const std::string& config_path) {
   storage_config.enable_strict_write_guarantee =
       loaded_storage_config.enable_strict_write_guarantee;
   storage_config.critical_key_prefixes = loaded_storage_config.critical_key_prefixes;
+  storage_config.sync_write_key_prefixes =
+      loaded_storage_config.sync_write_key_prefixes;
   storage_config.critical_data_no_ttl = loaded_storage_config.critical_data_no_ttl;
   storage_config.enable_outbox = loaded_storage_config.enable_outbox;
   storage_config.outbox_replay_limit = loaded_storage_config.outbox_replay_limit;

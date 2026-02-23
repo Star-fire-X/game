@@ -129,6 +129,8 @@ struct StorageEngineConfig {
   size_t queue_worker_threads = 2;
   uint32_t queue_retry_count = 3;
   uint32_t queue_retry_delay_ms = 100;
+  uint32_t account_cache_ttl_seconds = 300;
+  size_t account_cache_max_entries = 10000;
   size_t dead_letter_max_items = 10000;
   bool enable_strict_write_guarantee = true;
   bool critical_data_no_ttl = true;
@@ -144,6 +146,7 @@ struct StorageEngineConfig {
   bool require_auth_for_reads = false;
   std::string access_control_token;
   std::vector<std::string> critical_key_prefixes = {"char:", "account:username:"};
+  std::vector<std::string> sync_write_key_prefixes = {"char:"};
 };
 
 /**

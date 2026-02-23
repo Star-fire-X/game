@@ -1,11 +1,28 @@
 #include <gtest/gtest.h>
 
+#include <type_traits>
+#include <utility>
+
 #include "storage_engine/backends/postgres/postgres_database.h"
 
 using namespace mir2::db;
 using namespace mir2::common;
 using mir2::common::CharacterData;
 using mir2::common::ErrorCode;
+
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<PostgresDatabase>().load_characters_by_account(
+            std::declval<uint64_t>())),
+        DbResult<std::vector<CharacterData>>>,
+    "load_characters_by_account signature must keep uint64_t account_id");
+
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<PostgresDatabase>().generate_id(
+            std::declval<const std::string&>())),
+        DbResult<uint64_t>>,
+    "generate_id return type must keep uint64_t");
 
 TEST(PostgresDatabaseTest, InitializeFailsWhenPoolNotReady) {
     auto pool = std::make_shared<PgConnectionPool>();

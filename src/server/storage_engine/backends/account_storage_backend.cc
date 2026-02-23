@@ -1,30 +1,78 @@
 #include "storage_engine/backends/account_storage_backend.h"
 
+#include <chrono>
+#include <utility>
+
 #include <pqxx/pqxx>
 #include <spdlog/spdlog.h>
 
 #include "common/types/database_types.h"
+#include "monitor/metrics.h"
 #include "storage_engine/backends/common/account_storage_codec.h"
 
 namespace mir2::db {
 
 namespace {
 constexpr uint64_t kDefaultVersion = 1;
+constexpr const char* kAccountUpsertSql =
+    "INSERT INTO accounts (username, password_hash, email, created_at, last_login, banned) "
+    "VALUES ($1, $2, $3, "
+    "CASE WHEN $4::BIGINT > 0 THEN TO_TIMESTAMP($4::DOUBLE PRECISION / 1000.0) ELSE NOW() END, "
+    "CASE WHEN $5::BIGINT > 0 THEN TO_TIMESTAMP($5::DOUBLE PRECISION / 1000.0) ELSE NULL END, "
+    "$6) "
+    "ON CONFLICT (username) DO UPDATE "
+    "SET password_hash = EXCLUDED.password_hash, "
+    "email = EXCLUDED.email, "
+    "last_login = EXCLUDED.last_login, "
+    "banned = EXCLUDED.banned";
+constexpr const char* kAccountCacheHitMetric = "storage.account_cache.hit_total";
+constexpr const char* kAccountCacheMissMetric = "storage.account_cache.miss_total";
+constexpr const char* kAccountCacheSizeMetric = "storage.account_cache.size";
+
+int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+}
 }
 
 AccountStorageBackend::AccountStorageBackend(
     std::unique_ptr<mir2::storage_engine::IStorageBackend> kv_backend,
     const config::DatabaseConfig& db_config)
     : AccountStorageBackend(
-          std::move(kv_backend), db_config, std::make_shared<PgConnectionPool>()) {}
+          std::move(kv_backend),
+          db_config,
+          std::make_shared<PgConnectionPool>(),
+          AccountCacheOptions{}) {}
+
+AccountStorageBackend::AccountStorageBackend(
+    std::unique_ptr<mir2::storage_engine::IStorageBackend> kv_backend,
+    const config::DatabaseConfig& db_config,
+    const AccountCacheOptions& cache_options)
+    : AccountStorageBackend(
+          std::move(kv_backend),
+          db_config,
+          std::make_shared<PgConnectionPool>(),
+          cache_options) {}
 
 AccountStorageBackend::AccountStorageBackend(
     std::unique_ptr<mir2::storage_engine::IStorageBackend> kv_backend,
     const config::DatabaseConfig& db_config,
     std::shared_ptr<PgConnectionPool> pool)
+    : AccountStorageBackend(
+          std::move(kv_backend),
+          db_config,
+          std::move(pool),
+          AccountCacheOptions{}) {}
+
+AccountStorageBackend::AccountStorageBackend(
+    std::unique_ptr<mir2::storage_engine::IStorageBackend> kv_backend,
+    const config::DatabaseConfig& db_config,
+    std::shared_ptr<PgConnectionPool> pool,
+    const AccountCacheOptions& cache_options)
     : kv_backend_(std::move(kv_backend)),
       db_config_(db_config),
-      pool_(std::move(pool)) {}
+      pool_(std::move(pool)),
+      cache_options_(cache_options) {}
 
 bool AccountStorageBackend::Initialize() {
   if (initialized_) {
@@ -39,6 +87,7 @@ bool AccountStorageBackend::Initialize() {
   if (!pool_->Initialize(db_config_)) {
     return false;
   }
+  ReportAccountCacheSize(0);
   initialized_ = true;
   return true;
 }
@@ -50,23 +99,90 @@ mir2::storage_engine::IStorageBackend::StorageResult AccountStorageBackend::Save
   if (!kv_backend_) {
     return StorageResult{false, "kv backend unavailable", 0};
   }
-  return kv_backend_->Save(key, version, data);
+
+  const auto username = ParseAccountStorageKey(key);
+  if (!username) {
+    return kv_backend_->Save(key, version, data);
+  }
+
+  std::vector<AccountWriteItem> account_items;
+  BatchItems non_account_items;
+  const BatchItems single_item = {{key, version, data}};
+  auto split_result = BuildWriteBatches(single_item, &account_items, &non_account_items);
+  if (!split_result.success) {
+    return split_result;
+  }
+
+  return UpsertAccounts(account_items);
 }
 
 mir2::storage_engine::IStorageBackend::StorageResult AccountStorageBackend::SaveBatch(
-    const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) {
+    const BatchItems& items) {
   if (!kv_backend_) {
     return StorageResult{false, "kv backend unavailable", 0};
   }
-  return kv_backend_->SaveBatch(items);
+
+  if (items.empty()) {
+    return StorageResult{true, "", 0};
+  }
+
+  std::vector<AccountWriteItem> account_items;
+  BatchItems non_account_items;
+  auto split_result = BuildWriteBatches(items, &account_items, &non_account_items);
+  if (!split_result.success) {
+    return split_result;
+  }
+
+  int64_t op_time_ms = 0;
+  if (!account_items.empty()) {
+    auto account_result = UpsertAccounts(account_items);
+    op_time_ms += account_result.operation_time_ms;
+    if (!account_result.success) {
+      account_result.operation_time_ms = op_time_ms;
+      return account_result;
+    }
+  }
+
+  if (!non_account_items.empty()) {
+    auto kv_result = kv_backend_->SaveBatch(non_account_items);
+    kv_result.operation_time_ms += op_time_ms;
+    return kv_result;
+  }
+
+  return StorageResult{true, "", op_time_ms};
 }
 
 mir2::storage_engine::IStorageBackend::StorageResult AccountStorageBackend::SaveBatchAtomic(
-    const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) {
+    const BatchItems& items) {
   if (!kv_backend_) {
     return StorageResult{false, "kv backend unavailable", 0};
   }
-  return kv_backend_->SaveBatchAtomic(items);
+
+  if (items.empty()) {
+    return StorageResult{true, "", 0};
+  }
+
+  std::vector<AccountWriteItem> account_items;
+  BatchItems non_account_items;
+  auto split_result = BuildWriteBatches(items, &account_items, &non_account_items);
+  if (!split_result.success) {
+    return split_result;
+  }
+
+  if (!account_items.empty() && !non_account_items.empty()) {
+    return StorageResult{false, "cross-store atomic batch unsupported", 0};
+  }
+
+  if (!account_items.empty()) {
+    return UpsertAccounts(account_items);
+  }
+
+  auto* atomic_kv_backend =
+      dynamic_cast<mir2::storage_engine::IAtomicBatchStorageBackend*>(kv_backend_.get());
+  if (atomic_kv_backend != nullptr) {
+    return atomic_kv_backend->SaveBatchAtomic(non_account_items);
+  }
+  return kv_backend_->SaveBatch(non_account_items);
 }
 
 std::optional<std::pair<uint64_t, std::vector<uint8_t>>> AccountStorageBackend::Load(
@@ -112,11 +228,216 @@ bool AccountStorageBackend::IsHealthy() const {
          pool_ && pool_->IsReady();
 }
 
+mir2::storage_engine::IStorageBackend::StorageResult
+AccountStorageBackend::BuildWriteBatches(const BatchItems& items,
+                                         std::vector<AccountWriteItem>* account_items,
+                                         BatchItems* non_account_items) const {
+  if (account_items == nullptr || non_account_items == nullptr) {
+    return StorageResult{false, "invalid output pointer", 0};
+  }
+
+  account_items->clear();
+  non_account_items->clear();
+  account_items->reserve(items.size());
+  non_account_items->reserve(items.size());
+
+  for (const auto& [key, version, data] : items) {
+    const auto username = ParseAccountStorageKey(key);
+    if (!username) {
+      non_account_items->push_back({key, version, data});
+      continue;
+    }
+
+    auto account_opt = DecodeAccountData(data);
+    if (!account_opt) {
+      return StorageResult{
+          false, "failed to decode account payload for key '" + key + "'", 0};
+    }
+
+    AccountData account = std::move(*account_opt);
+    if (account.username.empty()) {
+      account.username = *username;
+    } else if (account.username != *username) {
+      return StorageResult{
+          false,
+          "account payload username mismatch for key '" + key + "'",
+          0};
+    }
+
+    account_items->push_back(AccountWriteItem{
+        .username = *username,
+        .account = std::move(account),
+        .fallback_version = version,
+        .encoded_payload = data,
+    });
+  }
+
+  return StorageResult{true, "", 0};
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult
+AccountStorageBackend::UpsertAccounts(const std::vector<AccountWriteItem>& items) {
+  if (items.empty()) {
+    return StorageResult{true, "", 0};
+  }
+  if (!pool_ || !pool_->IsReady()) {
+    return StorageResult{false, "account pool not ready", 0};
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  try {
+    auto conn = pool_->Acquire();
+    if (!conn) {
+      return StorageResult{false, "failed to acquire connection", ElapsedMs(start)};
+    }
+
+    PgConnectionGuard guard(*pool_, conn);
+    pqxx::work txn(*conn);
+    for (const auto& item : items) {
+      txn.exec(
+          kAccountUpsertSql,
+          pqxx::params{
+              item.username,
+              item.account.password_hash,
+              item.account.email,
+              item.account.created_at,
+              item.account.last_login,
+              item.account.banned});
+    }
+    txn.commit();
+  } catch (const std::exception& ex) {
+    return StorageResult{false, ex.what(), ElapsedMs(start)};
+  }
+
+  for (const auto& item : items) {
+    const auto payload = item.encoded_payload.empty()
+                             ? EncodeAccountData(item.account)
+                             : item.encoded_payload;
+    PutCachedAccount(
+        item.username,
+        ResolveAccountVersion(item.account, item.fallback_version),
+        payload);
+  }
+  return StorageResult{true, "", ElapsedMs(start)};
+}
+
+uint64_t AccountStorageBackend::ResolveAccountVersion(const AccountData& account,
+                                                      uint64_t fallback_version) const {
+  if (fallback_version > 0) {
+    return fallback_version;
+  }
+  if (account.last_login > 0) {
+    return static_cast<uint64_t>(account.last_login);
+  }
+  if (account.created_at > 0) {
+    return static_cast<uint64_t>(account.created_at);
+  }
+  if (account.id > 0) {
+    return account.id;
+  }
+  return kDefaultVersion;
+}
+
+std::optional<std::pair<uint64_t, std::vector<uint8_t>>>
+AccountStorageBackend::GetCachedAccount(const std::string& username) {
+  if (cache_options_.max_entries == 0 || cache_options_.ttl_seconds == 0) {
+    monitor::Metrics::Instance().IncrementCounter(kAccountCacheMissMetric);
+    return std::nullopt;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(account_cache_mutex_);
+  auto it = account_cache_.find(username);
+  if (it == account_cache_.end()) {
+    monitor::Metrics::Instance().IncrementCounter(kAccountCacheMissMetric);
+    return std::nullopt;
+  }
+  if (it->second.expires_at <= now) {
+    account_cache_lru_.erase(it->second.lru_it);
+    account_cache_.erase(it);
+    ReportAccountCacheSize(account_cache_.size());
+    monitor::Metrics::Instance().IncrementCounter(kAccountCacheMissMetric);
+    return std::nullopt;
+  }
+
+  account_cache_lru_.splice(account_cache_lru_.begin(),
+                            account_cache_lru_,
+                            it->second.lru_it);
+  it->second.lru_it = account_cache_lru_.begin();
+  monitor::Metrics::Instance().IncrementCounter(kAccountCacheHitMetric);
+  return it->second.payload;
+}
+
+void AccountStorageBackend::PutCachedAccount(const std::string& username,
+                                             uint64_t version,
+                                             const std::vector<uint8_t>& payload) {
+  if (cache_options_.max_entries == 0 || cache_options_.ttl_seconds == 0) {
+    return;
+  }
+
+  const auto expire_at = std::chrono::steady_clock::now() +
+                         std::chrono::seconds(cache_options_.ttl_seconds);
+  std::lock_guard<std::mutex> lock(account_cache_mutex_);
+  auto it = account_cache_.find(username);
+  if (it != account_cache_.end()) {
+    it->second.payload = std::make_pair(version, payload);
+    it->second.expires_at = expire_at;
+    account_cache_lru_.splice(account_cache_lru_.begin(),
+                              account_cache_lru_,
+                              it->second.lru_it);
+    it->second.lru_it = account_cache_lru_.begin();
+    ReportAccountCacheSize(account_cache_.size());
+    return;
+  }
+
+  if (account_cache_.size() >= cache_options_.max_entries &&
+      !account_cache_lru_.empty()) {
+    const std::string& to_evict = account_cache_lru_.back();
+    account_cache_.erase(to_evict);
+    account_cache_lru_.pop_back();
+  }
+
+  account_cache_lru_.push_front(username);
+  account_cache_[username] = AccountCacheEntry{
+      .payload = std::make_pair(version, payload),
+      .expires_at = expire_at,
+      .lru_it = account_cache_lru_.begin(),
+  };
+  ReportAccountCacheSize(account_cache_.size());
+}
+
+void AccountStorageBackend::InvalidateCachedAccount(const std::string& username) {
+  if (cache_options_.max_entries == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(account_cache_mutex_);
+  auto it = account_cache_.find(username);
+  if (it == account_cache_.end()) {
+    return;
+  }
+  account_cache_lru_.erase(it->second.lru_it);
+  account_cache_.erase(it);
+  ReportAccountCacheSize(account_cache_.size());
+}
+
+void AccountStorageBackend::ReportAccountCacheSize(size_t size) const {
+  monitor::Metrics::Instance().SetGauge(
+      kAccountCacheSizeMetric, static_cast<double>(size));
+}
+
 std::optional<std::pair<uint64_t, std::vector<uint8_t>>>
 AccountStorageBackend::LoadAccountByUsername(const std::string& username) {
   auto logger = spdlog::get("mir2");
 
-  if (username.empty() || !pool_ || !pool_->IsReady()) {
+  if (username.empty()) {
+    return std::nullopt;
+  }
+
+  if (auto cached = GetCachedAccount(username); cached) {
+    return cached;
+  }
+
+  if (!pool_ || !pool_->IsReady()) {
     return std::nullopt;
   }
 
@@ -140,6 +461,7 @@ AccountStorageBackend::LoadAccountByUsername(const std::string& username) {
         pqxx::params{username});
 
     if (result.empty()) {
+      InvalidateCachedAccount(username);
       return std::nullopt;
     }
 
@@ -153,16 +475,10 @@ AccountStorageBackend::LoadAccountByUsername(const std::string& username) {
     account.last_login = row[5].as<int64_t>(0);
     account.banned = row[6].as<bool>(false);
 
-    uint64_t version = kDefaultVersion;
-    if (account.last_login > 0) {
-      version = static_cast<uint64_t>(account.last_login);
-    } else if (account.created_at > 0) {
-      version = static_cast<uint64_t>(account.created_at);
-    } else if (account.id > 0) {
-      version = account.id;
-    }
-
-    return std::make_pair(version, EncodeAccountData(account));
+    const uint64_t version = ResolveAccountVersion(account, kDefaultVersion);
+    const auto payload = EncodeAccountData(account);
+    PutCachedAccount(username, version, payload);
+    return std::make_pair(version, payload);
   } catch (const pqxx::broken_connection& ex) {
     if (logger) {
       logger->error("AccountStorageBackend::LoadAccountByUsername: connection lost for user '{}': {}",

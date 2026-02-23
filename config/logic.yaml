@@ -74,10 +74,13 @@ storage_engine:
   queue_worker_threads: 2
   queue_retry_count: 3
   queue_retry_delay_ms: 100
+  account_cache_ttl_seconds: 300
+  account_cache_max_entries: 10000
   dead_letter_max_items: 10000
   enable_strict_write_guarantee: true
   critical_data_no_ttl: true
   critical_key_prefixes: ["char:", "account:username:"]
+  sync_write_key_prefixes: ["char:"]
   enable_outbox: true
   outbox_replay_limit: 0
   outbox_max_items: 200000

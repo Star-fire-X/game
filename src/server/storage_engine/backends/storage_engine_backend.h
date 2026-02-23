@@ -14,7 +14,8 @@
 
 namespace mir2::db {
 
-class StorageEngineBackend final : public mir2::storage_engine::IStorageBackend {
+class StorageEngineBackend final : public mir2::storage_engine::IStorageBackend,
+                                   public mir2::storage_engine::IAtomicBatchStorageBackend {
  public:
   explicit StorageEngineBackend(const config::DatabaseConfig& db_config);
   StorageEngineBackend(const config::DatabaseConfig& db_config,
@@ -26,11 +27,9 @@ class StorageEngineBackend final : public mir2::storage_engine::IStorageBackend 
                      uint64_t version,
                      const std::vector<uint8_t>& data) override;
 
-  StorageResult SaveBatch(
-      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) override;
+  StorageResult SaveBatch(const BatchItems& items) override;
 
-  StorageResult SaveBatchAtomic(
-      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) override;
+  StorageResult SaveBatchAtomic(const BatchItems& items) override;
 
   std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(
       const std::string& key) override;

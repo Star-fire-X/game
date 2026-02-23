@@ -44,7 +44,8 @@ using namespace std::chrono_literals;
 /**
  * @brief Mock storage backend for testing
  */
-class MockStorageBackend : public storage_engine::IStorageBackend {
+class MockStorageBackend : public storage_engine::IStorageBackend,
+                           public storage_engine::IAtomicBatchStorageBackend {
  public:
   using StorageResult = storage_engine::IStorageBackend::StorageResult;
   using BatchItems =

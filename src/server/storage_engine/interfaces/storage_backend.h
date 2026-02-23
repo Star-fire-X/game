@@ -31,6 +31,9 @@ public:
         int64_t operation_time_ms = 0;
     };
 
+    using BatchItems =
+        std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>;
+
     /**
      * @brief 保存单个实体
      */
@@ -42,18 +45,7 @@ public:
     /**
      * @brief 批量保存
      */
-    virtual StorageResult SaveBatch(
-        const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) = 0;
-
-    /**
-     * @brief 原子批量保存（同一事务全成全败）
-     *
-     * 默认实现回退到 SaveBatch；若后端支持事务，建议覆写该方法。
-     */
-    virtual StorageResult SaveBatchAtomic(
-        const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) {
-      return SaveBatch(items);
-    }
+    virtual StorageResult SaveBatch(const BatchItems& items) = 0;
 
     /**
      * @brief 加载数据
@@ -75,6 +67,19 @@ public:
      * @brief 健康检查
      */
     virtual bool IsHealthy() const = 0;
+};
+
+/**
+ * @brief 原子批量扩展能力接口
+ *
+ * 注意：新增后端能力必须通过扩展接口提供，避免直接扩展 IStorageBackend ABI。
+ */
+class IAtomicBatchStorageBackend {
+ public:
+  virtual ~IAtomicBatchStorageBackend() = default;
+
+  virtual IStorageBackend::StorageResult SaveBatchAtomic(
+      const IStorageBackend::BatchItems& items) = 0;
 };
 
 }  // namespace mir2::storage_engine

@@ -16,6 +16,8 @@ constexpr const char* kOutboxReplayMetric = "storage.outbox.replay_total";
 constexpr const char* kOutboxAckMetric = "storage.outbox.ack_total";
 constexpr const char* kOutboxFailMetric = "storage.outbox.fail_total";
 constexpr const char* kOutboxRejectedMetric = "storage.outbox.rejected_total";
+constexpr const char* kOutboxRejectedCriticalMetric =
+    "storage.outbox.rejected_critical_total";
 constexpr const char* kQueuePendingMetric = "storage.queue.pending";
 constexpr const char* kQueueHighDepthMetric = "storage.queue.high_depth";
 constexpr const char* kQueueNormalDepthMetric = "storage.queue.normal_depth";
@@ -134,13 +136,19 @@ bool AsyncPersistenceQueue::Enqueue(const std::string& key,
         if (!CanAppendOutbox()) {
             stats_.outbox_rejected.fetch_add(1, std::memory_order_relaxed);
             IncrementMetricCounter(kOutboxRejectedMetric);
+            if (priority == Priority::CRITICAL) {
+                stats_.outbox_rejected_critical.fetch_add(
+                    1, std::memory_order_relaxed);
+                IncrementMetricCounter(kOutboxRejectedCriticalMetric);
+            }
             auto logger = spdlog::get("mir2");
             if (logger) {
                 logger->warn(
-                    "Durable outbox full, reject enqueue key={} depth={} limit={}",
+                    "Durable outbox full, reject enqueue key={} depth={} limit={} priority={}",
                     key,
                     durable_outbox_depth_cached_.load(std::memory_order_acquire),
-                    config_.outbox_max_items);
+                    config_.outbox_max_items,
+                    static_cast<int>(priority));
             }
             return false;
         }
@@ -290,6 +298,8 @@ AsyncPersistenceQueue::Stats AsyncPersistenceQueue::GetStats() const {
         .outbox_acked = stats_.outbox_acked.load(std::memory_order_relaxed),
         .outbox_failed = stats_.outbox_failed.load(std::memory_order_relaxed),
         .outbox_rejected = stats_.outbox_rejected.load(std::memory_order_relaxed),
+        .outbox_rejected_critical =
+            stats_.outbox_rejected_critical.load(std::memory_order_relaxed),
         .dead_letter_depth = dead_letter_depth,
         .dead_letter_enqueued =
             stats_.dead_letter_enqueued.load(std::memory_order_relaxed),
@@ -600,7 +610,11 @@ bool AsyncPersistenceQueue::PersistBatch(const std::vector<PersistenceItem>& bat
             *attempts_out = retry + 1;
         }
         if (backend_->IsHealthy()) {
-            auto result = backend_->SaveBatchAtomic(batch_data);
+            auto* atomic_backend =
+                dynamic_cast<IAtomicBatchStorageBackend*>(backend_);
+            auto result = atomic_backend != nullptr
+                              ? atomic_backend->SaveBatchAtomic(batch_data)
+                              : backend_->SaveBatch(batch_data);
             if (result.success) {
                 return true;
             }

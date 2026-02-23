@@ -79,6 +79,7 @@ public:
         uint64_t outbox_acked = 0;
         uint64_t outbox_failed = 0;
         uint64_t outbox_rejected = 0;
+        uint64_t outbox_rejected_critical = 0;
         size_t dead_letter_depth = 0;
         uint64_t dead_letter_enqueued = 0;
         uint64_t dead_letter_dropped = 0;
@@ -168,6 +169,7 @@ private:
         std::atomic<uint64_t> outbox_acked{0};
         std::atomic<uint64_t> outbox_failed{0};
         std::atomic<uint64_t> outbox_rejected{0};
+        std::atomic<uint64_t> outbox_rejected_critical{0};
         std::atomic<uint64_t> dead_letter_enqueued{0};
         std::atomic<uint64_t> dead_letter_dropped{0};
     };

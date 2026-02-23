@@ -38,13 +38,16 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
       << "  queue_worker_threads: 3\n"
       << "  queue_retry_count: 7\n"
       << "  queue_retry_delay_ms: 250\n"
+      << "  account_cache_ttl_seconds: 45\n"
+      << "  account_cache_max_entries: 2222\n"
       << "  dead_letter_max_items: 123\n"
       << "  enable_outbox: true\n"
       << "  outbox_max_items: 777\n"
       << "  enable_access_control: true\n"
       << "  require_auth_for_reads: true\n"
       << "  access_control_token: \"token-xyz\"\n"
-      << "  critical_key_prefixes: [\"char:\", \"account:username:\", \"trade:\"]\n";
+      << "  critical_key_prefixes: [\"char:\", \"account:username:\", \"trade:\"]\n"
+      << "  sync_write_key_prefixes: [\"char:\", \"trade:\"]\n";
   out.close();
 
   ASSERT_TRUE(ConfigManager::Instance().Load(path.string()));
@@ -56,6 +59,8 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
   EXPECT_EQ(cfg.queue_worker_threads, 3u);
   EXPECT_EQ(cfg.queue_retry_count, 7u);
   EXPECT_EQ(cfg.queue_retry_delay_ms, 250u);
+  EXPECT_EQ(cfg.account_cache_ttl_seconds, 45u);
+  EXPECT_EQ(cfg.account_cache_max_entries, 2222u);
   EXPECT_EQ(cfg.dead_letter_max_items, 123u);
   EXPECT_TRUE(cfg.enable_outbox);
   EXPECT_EQ(cfg.outbox_max_items, 777u);
@@ -64,6 +69,8 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
   EXPECT_EQ(cfg.access_control_token, "token-xyz");
   ASSERT_EQ(cfg.critical_key_prefixes.size(), 3u);
   EXPECT_EQ(cfg.critical_key_prefixes[2], "trade:");
+  ASSERT_EQ(cfg.sync_write_key_prefixes.size(), 2u);
+  EXPECT_EQ(cfg.sync_write_key_prefixes[1], "trade:");
 
   std::error_code ec;
   std::filesystem::remove(path, ec);

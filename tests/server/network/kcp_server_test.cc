@@ -298,3 +298,18 @@ TEST(KcpServerTest, HandleReceiveDispatchesValidPacket) {
   std::memcpy(server.recv_buffer_.data(), packet.data(), packet.size());
   server.HandleReceive(asio::error_code{}, packet.size());
 }
+
+TEST(KcpServerTest, SendRawRecordsUdpSendErrors) {
+  asio::io_context io_context;
+  KcpServer server(io_context);
+  ASSERT_TRUE(server.Start("127.0.0.1", 0));
+
+  const auto endpoint = MakeEndpoint(9004);
+  std::vector<uint8_t> oversized_payload(70000, 0xAB);
+  server.SendRaw(endpoint, oversized_payload.data(), oversized_payload.size());
+
+  RunIoContextFor(io_context, std::chrono::milliseconds(50));
+
+  EXPECT_GE(server.udp_send_error_count_.load(std::memory_order_relaxed), 1u);
+  server.Stop();
+}

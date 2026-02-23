@@ -7,6 +7,7 @@
 #define MIR2_NETWORK_KCP_SERVER_H_
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <shared_mutex>
@@ -87,6 +88,8 @@ class KcpServer : public IKcpServer {
   std::unordered_map<uint32_t, SessionPtr> sessions_;
   KcpSession::MessageHandler message_handler_;
   int64_t last_cleanup_ms_ = 0;
+  std::atomic<uint64_t> udp_send_error_count_{0};
+  std::atomic<int64_t> last_udp_send_warn_ms_{0};
 };
 
 }  // namespace mir2::network

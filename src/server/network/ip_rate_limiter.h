@@ -13,7 +13,7 @@
 namespace mir2::network {
 
 /**
- * @brief Sliding-window rate limiter for UDP packets per IP.
+ * @brief Weighted sliding-window rate limiter for UDP packets per IP.
  */
 class IpRateLimiter {
  public:
@@ -41,7 +41,7 @@ class IpRateLimiter {
   struct Bucket {
     bool initialized = false;
     int64_t window_start_ms = 0;
-    uint32_t count = 0;
+    uint32_t curr_count = 0;
     uint32_t prev_count = 0;
     int64_t last_seen_ms = 0;
   };

@@ -11,8 +11,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include <asio/strand.hpp>
 
 #include "network/packet_codec.h"
 #include "network/tcp_connection.h"
@@ -122,6 +125,7 @@ class TcpSession : public ITcpSession,
   void CompactReadBufferIfNeeded(size_t incoming_bytes = 0);
 
   std::shared_ptr<TcpConnection> connection_;
+  std::optional<asio::strand<IoExecutor>> send_strand_;
   uint64_t connection_id_ = 0;
   std::atomic<SessionState> state_{SessionState::kInit};
   std::atomic<AuthState> auth_state_{AuthState::kUnknown};

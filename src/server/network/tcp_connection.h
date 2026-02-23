@@ -25,6 +25,7 @@
 #include <asio/local/stream_protocol.hpp>
 #endif
 #include <asio/socket_base.hpp>
+#include <asio/strand.hpp>
 #include <asio/write.hpp>
 
 namespace mir2::network {
@@ -184,6 +185,7 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
   void DoWrite();
 
   std::unique_ptr<SocketAdapter> socket_;
+  asio::strand<IoExecutor> write_strand_;
   uint64_t connection_id_ = 0;
   std::array<uint8_t, 4096> read_buffer_{};
   std::deque<std::vector<uint8_t>> write_queue_;

@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <asio/error.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 
+#include <atomic>
 #include <cstring>
+#include <thread>
 
 #include "common/enums.h"
 #include "mocks/mock_socket.h"
@@ -28,12 +31,15 @@ std::vector<uint8_t> BuildLegacyV1Packet(uint16_t msg_id) {
 }
 
 std::shared_ptr<TcpConnection> CreateConnection(asio::io_context& io_context,
-                                                MockSocket** out_socket) {
+                                                MockSocket** out_socket,
+                                                size_t max_write_queue_size =
+                                                    TcpConnection::kDefaultMaxWriteQueueSize) {
   auto mock_socket = std::make_unique<MockSocket>(io_context.get_executor());
   if (out_socket) {
     *out_socket = mock_socket.get();
   }
-  return std::make_shared<TcpConnection>(std::move(mock_socket), 1);
+  return std::make_shared<TcpConnection>(
+      std::move(mock_socket), 1, max_write_queue_size);
 }
 
 }  // namespace
@@ -166,6 +172,66 @@ TEST(TcpConnectionTest, SendWritesEncodedPacket) {
   ASSERT_EQ(writes.size(), 1u);
   const auto expected = PacketCodec::EncodeV2(100, payload.data(), payload.size(), 0);
   EXPECT_EQ(writes.front(), expected);
+}
+
+TEST(TcpConnectionTest, ConcurrentSessionSendKeepsWireSequenceMonotonic) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(
+      io_context, &mock_socket, /*max_write_queue_size=*/8192);
+  auto session = std::make_shared<TcpSession>(connection);
+  session->Start();
+
+  constexpr uint16_t kMsgId =
+      static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+  constexpr int kThreadCount = 8;
+  constexpr int kMessagesPerThread = 512;
+  constexpr int kTotalMessages = kThreadCount * kMessagesPerThread;
+  constexpr int kIoThreadCount = 4;
+
+  auto work_guard = asio::make_work_guard(io_context);
+  std::vector<std::thread> io_threads;
+  io_threads.reserve(kIoThreadCount);
+  for (int i = 0; i < kIoThreadCount; ++i) {
+    io_threads.emplace_back([&io_context]() {
+      io_context.run();
+    });
+  }
+
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+  for (int thread_index = 0; thread_index < kThreadCount; ++thread_index) {
+    threads.emplace_back([&]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int i = 0; i < kMessagesPerThread; ++i) {
+        session->Send(kMsgId, {});
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  work_guard.reset();
+  for (auto& thread : io_threads) {
+    thread.join();
+  }
+
+  const auto& writes = mock_socket->GetWrites();
+  ASSERT_EQ(writes.size(), static_cast<size_t>(kTotalMessages));
+  for (size_t i = 0; i < writes.size(); ++i) {
+    Packet packet{};
+    uint16_t sequence = 0;
+    ASSERT_EQ(PacketCodec::DecodeV2(writes[i].data(), writes[i].size(), &packet, &sequence),
+              DecodeStatus::kOk);
+    EXPECT_EQ(packet.msg_id, kMsgId);
+    EXPECT_EQ(sequence, static_cast<uint16_t>(i));
+  }
 }
 
 TEST(TcpConnectionTest, PauseReadBlocksUntilResume) {

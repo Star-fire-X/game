@@ -1,5 +1,6 @@
 #include "network/tcp_connection.h"
 
+#include <asio/bind_executor.hpp>
 #include <asio/dispatch.hpp>
 #include <asio/post.hpp>
 
@@ -12,6 +13,7 @@ TcpConnection::TcpConnection(std::unique_ptr<SocketAdapter> socket,
                              uint64_t connection_id,
                              size_t max_write_queue_size)
     : socket_(std::move(socket)),
+      write_strand_(asio::make_strand(socket_->GetExecutor())),
       connection_id_(connection_id),
       max_write_queue_size_(max_write_queue_size) {
   asio::error_code ec;
@@ -35,7 +37,10 @@ void TcpConnection::SendRaw(const std::vector<uint8_t>& bytes) {
 void TcpConnection::SendRaw(std::vector<uint8_t>&& bytes) {
   monitor::Metrics::Instance().AddBytesOut(bytes.size());
   auto self = shared_from_this();
-  asio::post(socket_->GetExecutor(), [this, self, data = std::move(bytes)]() mutable {
+  asio::post(write_strand_, [this, self, data = std::move(bytes)]() mutable {
+    if (closed_.load(std::memory_order_acquire)) {
+      return;
+    }
     if (write_queue_.size() >= max_write_queue_size_) {
       SYSLOG_WARN("Write queue full (size={}), closing connection {}",
                   write_queue_.size(), connection_id_);
@@ -43,7 +48,7 @@ void TcpConnection::SendRaw(std::vector<uint8_t>&& bytes) {
       return;
     }
     write_queue_.push_back(std::move(data));
-    if (!writing_.exchange(true)) {
+    if (!writing_.exchange(true, std::memory_order_acq_rel)) {
       DoWrite();
     }
   });
@@ -51,10 +56,12 @@ void TcpConnection::SendRaw(std::vector<uint8_t>&& bytes) {
 
 void TcpConnection::Close() {
   auto self = shared_from_this();
-  asio::dispatch(socket_->GetExecutor(), [this, self]() {
+  asio::dispatch(write_strand_, [this, self]() {
     if (closed_.exchange(true, std::memory_order_acq_rel)) {
       return;
     }
+    write_queue_.clear();
+    writing_.store(false, std::memory_order_release);
     asio::error_code ec;
     socket_->shutdown(asio::socket_base::shutdown_both, ec);
     socket_->close(ec);
@@ -135,26 +142,33 @@ void TcpConnection::DoWrite() {
     return;
   }
   if (write_queue_.empty()) {
-    writing_.store(false);
+    writing_.store(false, std::memory_order_release);
     return;
   }
 
   auto self = shared_from_this();
-  socket_->async_write(asio::buffer(write_queue_.front()),
-                       [this, self](const asio::error_code& ec, std::size_t) {
-                         if (ec) {
-                           monitor::Metrics::Instance().IncrementError("write");
-                           Close();
-                           return;
-                         }
+  socket_->async_write(
+      asio::buffer(write_queue_.front()),
+      asio::bind_executor(write_strand_,
+                          [this, self](const asio::error_code& ec, std::size_t) {
+                            if (closed_.load(std::memory_order_acquire)) {
+                              writing_.store(false, std::memory_order_release);
+                              return;
+                            }
 
-                         write_queue_.pop_front();
-                         if (!write_queue_.empty()) {
-                           DoWrite();
-                         } else {
-                           writing_.store(false);
-                         }
-                       });
+                            if (ec) {
+                              monitor::Metrics::Instance().IncrementError("write");
+                              Close();
+                              return;
+                            }
+
+                            write_queue_.pop_front();
+                            if (!write_queue_.empty()) {
+                              DoWrite();
+                            } else {
+                              writing_.store(false, std::memory_order_release);
+                            }
+                          }));
 }
 
 }  // namespace mir2::network

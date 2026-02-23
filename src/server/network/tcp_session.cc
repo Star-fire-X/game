@@ -29,6 +29,7 @@ constexpr uint16_t kSequenceWindow = 256;
 TcpSession::TcpSession(std::shared_ptr<TcpConnection> connection)
     : connection_(std::move(connection)) {
   if (connection_) {
+    send_strand_.emplace(asio::make_strand(connection_->GetExecutor()));
     connection_id_ = connection_->GetConnectionId();
     remote_address_ = connection_->GetRemoteAddress();
     remote_port_ = connection_->GetRemotePort();
@@ -61,17 +62,28 @@ void TcpSession::Start() {
 }
 
 void TcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
-  if (!connection_) {
+  if (!connection_ || !send_strand_) {
     return;
   }
-  if (state_.load() != SessionState::kActive) {
+  if (state_.load(std::memory_order_acquire) != SessionState::kActive) {
     return;
   }
-  const uint16_t sequence = NextSendSequence();
-  std::vector<uint8_t> buffer =
-      PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
-  connection_->SendRaw(std::move(buffer));
-  monitor::Metrics::Instance().IncrementMessagesSent();
+
+  auto self = shared_from_this();
+  std::vector<uint8_t> payload_copy(payload);
+  asio::post(*send_strand_,
+             [this, self, msg_id, payload_copy = std::move(payload_copy)]() mutable {
+               if (!connection_ ||
+                   state_.load(std::memory_order_acquire) != SessionState::kActive) {
+                 return;
+               }
+
+               const uint16_t sequence = NextSendSequence();
+               std::vector<uint8_t> buffer = PacketCodec::EncodeV2(
+                   msg_id, payload_copy.data(), payload_copy.size(), sequence);
+               connection_->SendRaw(std::move(buffer));
+               monitor::Metrics::Instance().IncrementMessagesSent();
+             });
 }
 
 void TcpSession::Close() {

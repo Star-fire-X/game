@@ -18,6 +18,8 @@ constexpr int64_t kCleanupIntervalMs = 1000;
 constexpr int64_t kHandshakeTimeoutMs = 30000;
 constexpr size_t kHeaderSize = sizeof(uint32_t) + KcpSession::kTokenSize;
 constexpr size_t kInlineUdpSendCapacity = 2048;
+constexpr uint64_t kUdpSendWarnEveryN = 64;
+constexpr int64_t kUdpSendWarnIntervalMs = 1000;
 
 struct UdpSendBuffer {
   size_t size = 0;
@@ -196,6 +198,9 @@ void KcpServer::HandleReceive(const asio::error_code& ec, std::size_t bytes) {
   const uint32_t ip = remote_endpoint_.address().to_v4().to_uint();
   const int64_t now_ms = mir2::common::now_ms();
   if (!rate_limiter_.Allow(ip, now_ms)) {
+    SYSLOG_DEBUG("Dropping UDP packet due to rate limit (ip={}, port={})",
+                 remote_endpoint_.address().to_string(),
+                 remote_endpoint_.port());
     monitor::Metrics::Instance().IncrementError("udp_rate_limit");
     if (socket_.is_open()) {
       StartReceive();
@@ -218,6 +223,10 @@ void KcpServer::HandleReceive(const asio::error_code& ec, std::size_t bytes) {
   const size_t kcp_size = bytes - kHeaderSize;
 
   if (blacklist_.IsBlacklisted(conv, now_ms)) {
+    SYSLOG_DEBUG("Dropping KCP packet for blacklisted conv={} (ip={}, port={})",
+                 conv,
+                 remote_endpoint_.address().to_string(),
+                 remote_endpoint_.port());
     monitor::Metrics::Instance().IncrementError("kcp_blacklisted");
     if (socket_.is_open()) {
       StartReceive();
@@ -227,6 +236,10 @@ void KcpServer::HandleReceive(const asio::error_code& ec, std::size_t bytes) {
 
   auto session = GetSession(conv);
   if (!session) {
+    SYSLOG_DEBUG("Dropping KCP packet for unknown conv={} (ip={}, port={})",
+                 conv,
+                 remote_endpoint_.address().to_string(),
+                 remote_endpoint_.port());
     monitor::Metrics::Instance().IncrementError("kcp_unknown_conv");
     if (socket_.is_open()) {
       StartReceive();
@@ -235,6 +248,10 @@ void KcpServer::HandleReceive(const asio::error_code& ec, std::size_t bytes) {
   }
 
   if (!session->ValidateToken(token, KcpSession::kTokenSize)) {
+    SYSLOG_WARN("KCP token validation failed (conv={}, ip={}, port={})",
+                conv,
+                remote_endpoint_.address().to_string(),
+                remote_endpoint_.port());
     blacklist_.RecordFailure(conv, now_ms);
     monitor::Metrics::Instance().IncrementError("kcp_token_invalid");
     if (socket_.is_open()) {
@@ -312,6 +329,35 @@ void KcpServer::SendRaw(const asio::ip::udp::endpoint& endpoint,
   }
 
   monitor::Metrics::Instance().AddBytesOut(size);
+  auto on_send = [this, endpoint, size](const asio::error_code& ec, std::size_t /*bytes*/) {
+    if (!ec) {
+      return;
+    }
+
+    monitor::Metrics::Instance().IncrementError("udp_send");
+
+    const uint64_t error_count =
+        udp_send_error_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    const int64_t now_ms = mir2::common::now_ms();
+    bool should_log = (error_count % kUdpSendWarnEveryN) == 1;
+
+    int64_t last_warn_ms = last_udp_send_warn_ms_.load(std::memory_order_relaxed);
+    if (!should_log && now_ms - last_warn_ms >= kUdpSendWarnIntervalMs) {
+      should_log = last_udp_send_warn_ms_.compare_exchange_strong(
+          last_warn_ms, now_ms, std::memory_order_relaxed);
+    } else if (should_log) {
+      last_udp_send_warn_ms_.store(now_ms, std::memory_order_relaxed);
+    }
+
+    if (should_log) {
+      SYSLOG_WARN("UDP send failed (ec={}, endpoint={}:{}, size={}, error_count={})",
+                  ec.message(),
+                  endpoint.address().to_string(),
+                  endpoint.port(),
+                  size,
+                  error_count);
+    }
+  };
 
   auto buffer = std::make_shared<UdpSendBuffer>();
   buffer->size = size;
@@ -320,7 +366,9 @@ void KcpServer::SendRaw(const asio::ip::udp::endpoint& endpoint,
     socket_.async_send_to(
         asio::buffer(buffer->inline_data.data(), buffer->size),
         endpoint,
-        [buffer](const asio::error_code& /*ec*/, std::size_t /*bytes*/) {});
+        [buffer, on_send](const asio::error_code& ec, std::size_t bytes) {
+          on_send(ec, bytes);
+        });
     return;
   }
 
@@ -328,7 +376,9 @@ void KcpServer::SendRaw(const asio::ip::udp::endpoint& endpoint,
   socket_.async_send_to(
       asio::buffer(buffer->overflow_data),
       endpoint,
-      [buffer](const asio::error_code& /*ec*/, std::size_t /*bytes*/) {});
+      [buffer, on_send](const asio::error_code& ec, std::size_t bytes) {
+        on_send(ec, bytes);
+      });
 }
 
 }  // namespace mir2::network

@@ -1,5 +1,7 @@
 #include "network/conv_blacklist.h"
 
+#include <limits>
+
 namespace mir2::network {
 
 ConvBlacklist::ConvBlacklist() : config_({}) {}
@@ -25,7 +27,9 @@ void ConvBlacklist::RecordFailure(uint32_t conv, int64_t now_ms) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto& entry = failures_[conv];
-  entry.count = static_cast<uint8_t>(entry.count + 1);
+  if (entry.count < std::numeric_limits<uint8_t>::max()) {
+    ++entry.count;
+  }
   entry.last_fail_ms = now_ms;
 
   if (entry.count >= config_.max_failures) {

@@ -64,6 +64,7 @@ bool RocksDBCache::Initialize() {
         cf_descriptors.emplace_back(GetDataPersistentCFName(), cf_options);
         cf_descriptors.emplace_back(GetDataTtlCFName(), cf_options);
         cf_descriptors.emplace_back(GetOutboxCFName(), cf_options);
+        cf_descriptors.emplace_back(GetDeadLetterCFName(), cf_options);
         cf_descriptors.emplace_back(GetMetaCFName(), cf_options);
 
         std::vector<int32_t> ttls{
@@ -71,6 +72,7 @@ bool RocksDBCache::Initialize() {
             0,                    // cf_data_persistent
             config_.ttl_seconds,  // cf_data_ttl
             0,                    // cf_outbox
+            0,                    // cf_dead_letter
             0                     // cf_meta
         };
 
@@ -117,6 +119,14 @@ bool RocksDBCache::Initialize() {
         if (!LoadOutboxNextId()) {
             if (logger) {
                 logger->error("Failed to load outbox next id");
+            }
+            DestroyColumnFamilies();
+            db_.reset();
+            return false;
+        }
+        if (!LoadDeadLetterNextId()) {
+            if (logger) {
+                logger->error("Failed to load dead letter next id");
             }
             DestroyColumnFamilies();
             db_.reset();
@@ -182,10 +192,11 @@ bool RocksDBCache::AssignColumnFamilies(
     data_persistent_cf_ = cf_handles_[kDataPersistentCFIndex];
     data_ttl_cf_ = cf_handles_[kDataTtlCFIndex];
     outbox_cf_ = cf_handles_[kOutboxCFIndex];
+    dead_letter_cf_ = cf_handles_[kDeadLetterCFIndex];
     meta_cf_ = cf_handles_[kMetaCFIndex];
     return default_cf_ != nullptr && data_persistent_cf_ != nullptr &&
            data_ttl_cf_ != nullptr && outbox_cf_ != nullptr &&
-           meta_cf_ != nullptr;
+           dead_letter_cf_ != nullptr && meta_cf_ != nullptr;
 }
 
 void RocksDBCache::DestroyColumnFamilies() {
@@ -195,6 +206,7 @@ void RocksDBCache::DestroyColumnFamilies() {
         data_persistent_cf_ = nullptr;
         data_ttl_cf_ = nullptr;
         outbox_cf_ = nullptr;
+        dead_letter_cf_ = nullptr;
         meta_cf_ = nullptr;
         return;
     }
@@ -216,6 +228,7 @@ void RocksDBCache::DestroyColumnFamilies() {
     data_persistent_cf_ = nullptr;
     data_ttl_cf_ = nullptr;
     outbox_cf_ = nullptr;
+    dead_letter_cf_ = nullptr;
     meta_cf_ = nullptr;
 }
 
@@ -269,12 +282,63 @@ bool RocksDBCache::LoadOutboxNextId() {
     return true;
 }
 
+bool RocksDBCache::LoadDeadLetterNextId() {
+    if (!db_ || !dead_letter_cf_ || !meta_cf_) {
+        return false;
+    }
+
+    uint64_t loaded_next_id = 1;
+    std::string raw_next_id;
+    rocksdb::Status status = db_->Get(
+        rocksdb::ReadOptions(), meta_cf_, GetDeadLetterNextIdKey(),
+        &raw_next_id);
+    if (status.ok()) {
+        uint64_t parsed = 0;
+        if (!DecodeUint64FromSlice(rocksdb::Slice(raw_next_id), &parsed) ||
+            parsed == 0) {
+            return false;
+        }
+        loaded_next_id = parsed;
+    } else if (status.IsNotFound()) {
+        uint64_t max_seen_id = 0;
+        std::unique_ptr<rocksdb::Iterator> it(
+            db_->NewIterator(rocksdb::ReadOptions(), dead_letter_cf_));
+        for (it->SeekToFirst(); it->Valid(); it->Next()) {
+            uint64_t dead_letter_id = 0;
+            if (ParseDeadLetterStorageKey(it->key(), &dead_letter_id) &&
+                dead_letter_id > max_seen_id) {
+                max_seen_id = dead_letter_id;
+            }
+        }
+        loaded_next_id = max_seen_id + 1;
+        if (!PersistDeadLetterNextIdLocked(loaded_next_id)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(dead_letter_mutex_);
+    dead_letter_next_id_ = loaded_next_id;
+    return true;
+}
+
 bool RocksDBCache::PersistOutboxNextIdLocked(uint64_t next_id) {
     if (!db_ || !meta_cf_ || next_id == 0) {
         return false;
     }
     rocksdb::Status status = db_->Put(
         rocksdb::WriteOptions(), meta_cf_, GetOutboxNextIdKey(),
+        EncodeUint64ToString(next_id));
+    return status.ok();
+}
+
+bool RocksDBCache::PersistDeadLetterNextIdLocked(uint64_t next_id) {
+    if (!db_ || !meta_cf_ || next_id == 0) {
+        return false;
+    }
+    rocksdb::Status status = db_->Put(
+        rocksdb::WriteOptions(), meta_cf_, GetDeadLetterNextIdKey(),
         EncodeUint64ToString(next_id));
     return status.ok();
 }
@@ -396,6 +460,15 @@ std::string RocksDBCache::MakeOutboxStorageKey(uint64_t outbox_id) const {
     return std::string(buffer);
 }
 
+std::string RocksDBCache::MakeDeadLetterStorageKey(
+    uint64_t dead_letter_id) const {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%s%020llu",
+                  GetDeadLetterStoragePrefix().c_str(),
+                  static_cast<unsigned long long>(dead_letter_id));
+    return std::string(buffer);
+}
+
 bool RocksDBCache::ParseOutboxStorageKey(const rocksdb::Slice& storage_key,
                                          uint64_t* outbox_id) const {
     if (outbox_id == nullptr) {
@@ -412,6 +485,29 @@ bool RocksDBCache::ParseOutboxStorageKey(const rocksdb::Slice& storage_key,
                              storage_key.size() - prefix.size());
     try {
         *outbox_id = std::stoull(id_str);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool RocksDBCache::ParseDeadLetterStorageKey(
+    const rocksdb::Slice& storage_key,
+    uint64_t* dead_letter_id) const {
+    if (dead_letter_id == nullptr) {
+        return false;
+    }
+    const std::string prefix = GetDeadLetterStoragePrefix();
+    if (storage_key.size() <= prefix.size()) {
+        return false;
+    }
+    if (std::memcmp(storage_key.data(), prefix.data(), prefix.size()) != 0) {
+        return false;
+    }
+    const std::string id_str(storage_key.data() + prefix.size(),
+                             storage_key.size() - prefix.size());
+    try {
+        *dead_letter_id = std::stoull(id_str);
         return true;
     } catch (const std::exception&) {
         return false;
@@ -439,6 +535,56 @@ std::vector<uint8_t> RocksDBCache::SerializeOutboxValue(
     out.insert(out.end(),
                reinterpret_cast<const uint8_t*>(&payload_size),
                reinterpret_cast<const uint8_t*>(&payload_size) + sizeof(uint32_t));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+std::vector<uint8_t> RocksDBCache::SerializeDeadLetterValue(
+    const DeadLetterEntry& entry) const {
+    const auto payload = SerializeVersionedData(entry.data);
+    const uint32_t key_size = static_cast<uint32_t>(entry.key.size());
+    const uint32_t error_size =
+        static_cast<uint32_t>(entry.error_message.size());
+    const uint32_t payload_size = static_cast<uint32_t>(payload.size());
+    const size_t total_size =
+        sizeof(uint32_t) + key_size + sizeof(uint8_t) + sizeof(uint32_t) +
+        sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t) + error_size +
+        sizeof(uint32_t) + payload_size;
+
+    std::vector<uint8_t> out;
+    out.reserve(total_size);
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&key_size),
+               reinterpret_cast<const uint8_t*>(&key_size) +
+                   sizeof(uint32_t));
+    out.insert(out.end(), entry.key.begin(), entry.key.end());
+
+    const uint8_t priority_raw = static_cast<uint8_t>(entry.priority);
+    out.push_back(priority_raw);
+
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&entry.attempts),
+               reinterpret_cast<const uint8_t*>(&entry.attempts) +
+                   sizeof(uint32_t));
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&entry.durable_outbox_id),
+               reinterpret_cast<const uint8_t*>(&entry.durable_outbox_id) +
+                   sizeof(uint64_t));
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&entry.recorded_at_ms),
+               reinterpret_cast<const uint8_t*>(&entry.recorded_at_ms) +
+                   sizeof(uint64_t));
+
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&error_size),
+               reinterpret_cast<const uint8_t*>(&error_size) +
+                   sizeof(uint32_t));
+    out.insert(out.end(), entry.error_message.begin(), entry.error_message.end());
+
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&payload_size),
+               reinterpret_cast<const uint8_t*>(&payload_size) +
+                   sizeof(uint32_t));
     out.insert(out.end(), payload.begin(), payload.end());
     return out;
 }
@@ -473,6 +619,83 @@ bool RocksDBCache::DeserializeOutboxValue(const rocksdb::Slice& value,
         return false;
     }
     entry->priority = static_cast<Priority>(priority_raw);
+
+    if (static_cast<size_t>(end - cursor) < sizeof(uint32_t)) {
+        return false;
+    }
+    uint32_t payload_size = 0;
+    std::memcpy(&payload_size, cursor, sizeof(uint32_t));
+    cursor += sizeof(uint32_t);
+    if (payload_size != static_cast<uint32_t>(end - cursor)) {
+        return false;
+    }
+
+    VersionedData decoded;
+    if (!DeserializeVersionedData(
+            rocksdb::Slice(reinterpret_cast<const char*>(cursor), payload_size),
+            decoded)) {
+        return false;
+    }
+    entry->data = std::move(decoded);
+    return true;
+}
+
+bool RocksDBCache::DeserializeDeadLetterValue(const rocksdb::Slice& value,
+                                              DeadLetterEntry* entry) {
+    if (entry == nullptr) {
+        return false;
+    }
+    constexpr size_t kMinHeaderSize =
+        sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) +
+        sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t) +
+        sizeof(uint32_t);
+    if (value.size() < kMinHeaderSize) {
+        return false;
+    }
+
+    const uint8_t* cursor = reinterpret_cast<const uint8_t*>(value.data());
+    const uint8_t* end = cursor + value.size();
+
+    uint32_t key_size = 0;
+    std::memcpy(&key_size, cursor, sizeof(uint32_t));
+    cursor += sizeof(uint32_t);
+    if (key_size > static_cast<uint32_t>(end - cursor)) {
+        return false;
+    }
+    entry->key.assign(reinterpret_cast<const char*>(cursor), key_size);
+    cursor += key_size;
+
+    if (cursor >= end) {
+        return false;
+    }
+    const uint8_t priority_raw = *cursor++;
+    if (priority_raw > static_cast<uint8_t>(Priority::CRITICAL)) {
+        return false;
+    }
+    entry->priority = static_cast<Priority>(priority_raw);
+
+    if (static_cast<size_t>(end - cursor) <
+        sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint64_t)) {
+        return false;
+    }
+    std::memcpy(&entry->attempts, cursor, sizeof(uint32_t));
+    cursor += sizeof(uint32_t);
+    std::memcpy(&entry->durable_outbox_id, cursor, sizeof(uint64_t));
+    cursor += sizeof(uint64_t);
+    std::memcpy(&entry->recorded_at_ms, cursor, sizeof(uint64_t));
+    cursor += sizeof(uint64_t);
+
+    if (static_cast<size_t>(end - cursor) < sizeof(uint32_t)) {
+        return false;
+    }
+    uint32_t error_size = 0;
+    std::memcpy(&error_size, cursor, sizeof(uint32_t));
+    cursor += sizeof(uint32_t);
+    if (error_size > static_cast<uint32_t>(end - cursor)) {
+        return false;
+    }
+    entry->error_message.assign(reinterpret_cast<const char*>(cursor), error_size);
+    cursor += error_size;
 
     if (static_cast<size_t>(end - cursor) < sizeof(uint32_t)) {
         return false;
@@ -589,6 +812,111 @@ size_t RocksDBCache::OutboxDepth() const {
     size_t depth = 0;
     std::unique_ptr<rocksdb::Iterator> it(
         db_->NewIterator(rocksdb::ReadOptions(), outbox_cf_));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+        ++depth;
+    }
+    return depth;
+}
+
+bool RocksDBCache::AppendDeadLetter(const DeadLetterEntry& entry,
+                                    uint64_t* dead_letter_id) {
+    if (!db_ || !dead_letter_cf_ || !meta_cf_) {
+        return false;
+    }
+    if (entry.key.empty() ||
+        entry.key.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+        entry.error_message.size() >
+            static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        return false;
+    }
+    if (entry.recorded_at_ms == 0) {
+        return false;
+    }
+
+    const auto serialized = SerializeDeadLetterValue(entry);
+    std::lock_guard<std::mutex> lock(dead_letter_mutex_);
+    const uint64_t assigned_id = dead_letter_next_id_;
+    const uint64_t next_id = assigned_id + 1;
+
+    rocksdb::WriteBatch batch;
+    batch.Put(dead_letter_cf_, MakeDeadLetterStorageKey(assigned_id),
+              rocksdb::Slice(reinterpret_cast<const char*>(serialized.data()),
+                             serialized.size()));
+    batch.Put(meta_cf_, GetDeadLetterNextIdKey(), EncodeUint64ToString(next_id));
+
+    rocksdb::Status status = db_->Write(rocksdb::WriteOptions(), &batch);
+    if (!status.ok()) {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->warn("AppendDeadLetter failed for key {}: {}", entry.key,
+                         status.ToString());
+        }
+        return false;
+    }
+
+    dead_letter_next_id_ = next_id;
+    if (dead_letter_id != nullptr) {
+        *dead_letter_id = assigned_id;
+    }
+    return true;
+}
+
+bool RocksDBCache::AckDeadLetter(uint64_t dead_letter_id) {
+    if (!db_ || !dead_letter_cf_ || dead_letter_id == 0) {
+        return false;
+    }
+    rocksdb::Status status = db_->Delete(
+        rocksdb::WriteOptions(), dead_letter_cf_,
+        MakeDeadLetterStorageKey(dead_letter_id));
+    if (!status.ok()) {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->warn("AckDeadLetter failed id={}: {}", dead_letter_id,
+                         status.ToString());
+        }
+    }
+    return status.ok();
+}
+
+size_t RocksDBCache::ReplayDeadLetter(
+    size_t limit,
+    const std::function<bool(const DeadLetterEntry&)>& cb) {
+    if (!db_ || !dead_letter_cf_ || !cb) {
+        return 0;
+    }
+
+    size_t replayed = 0;
+    std::unique_ptr<rocksdb::Iterator> it(
+        db_->NewIterator(rocksdb::ReadOptions(), dead_letter_cf_));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+        if (limit > 0 && replayed >= limit) {
+            break;
+        }
+
+        DeadLetterEntry entry;
+        if (!ParseDeadLetterStorageKey(it->key(), &entry.dead_letter_id)) {
+            continue;
+        }
+        if (!DeserializeDeadLetterValue(it->value(), &entry)) {
+            continue;
+        }
+
+        ++replayed;
+        if (!cb(entry)) {
+            break;
+        }
+    }
+    return replayed;
+}
+
+size_t RocksDBCache::DeadLetterDepth() const {
+    if (!db_ || !dead_letter_cf_) {
+        return 0;
+    }
+
+    size_t depth = 0;
+    std::unique_ptr<rocksdb::Iterator> it(
+        db_->NewIterator(rocksdb::ReadOptions(), dead_letter_cf_));
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
         ++depth;
     }

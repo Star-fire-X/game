@@ -19,6 +19,7 @@ namespace {
 constexpr const char* kCfDataPersistent = "cf_data_persistent";
 constexpr const char* kCfDataTtl = "cf_data_ttl";
 constexpr const char* kCfOutbox = "cf_outbox";
+constexpr const char* kCfDeadLetter = "cf_dead_letter";
 constexpr const char* kCfMeta = "cf_meta";
 constexpr const char* kSchemaVersionKey = "__storage_schema_version__";
 
@@ -50,9 +51,10 @@ std::optional<std::string> ReadSchemaVersionMarker(const std::string& path) {
       {kCfDataPersistent, rocksdb::ColumnFamilyOptions{}},
       {kCfDataTtl, rocksdb::ColumnFamilyOptions{}},
       {kCfOutbox, rocksdb::ColumnFamilyOptions{}},
+      {kCfDeadLetter, rocksdb::ColumnFamilyOptions{}},
       {kCfMeta, rocksdb::ColumnFamilyOptions{}},
   };
-  std::vector<int32_t> ttls{3600, 0, 3600, 0, 0};
+  std::vector<int32_t> ttls{3600, 0, 3600, 0, 0, 0};
   std::vector<rocksdb::ColumnFamilyHandle*> handles;
   rocksdb::DBWithTTL* raw_db = nullptr;
   rocksdb::Status status = rocksdb::DBWithTTL::Open(
@@ -60,7 +62,7 @@ std::optional<std::string> ReadSchemaVersionMarker(const std::string& path) {
   if (!status.ok()) {
     return std::nullopt;
   }
-  if (handles.size() < 5) {
+  if (handles.size() < 6) {
     DestroyHandles(raw_db, handles);
     delete raw_db;
     return std::nullopt;
@@ -68,7 +70,7 @@ std::optional<std::string> ReadSchemaVersionMarker(const std::string& path) {
 
   std::unique_ptr<rocksdb::DBWithTTL> db(raw_db);
   std::string marker;
-  status = db->Get(rocksdb::ReadOptions(), handles[4], kSchemaVersionKey, &marker);
+  status = db->Get(rocksdb::ReadOptions(), handles[5], kSchemaVersionKey, &marker);
   DestroyHandles(db.get(), handles);
   if (!status.ok()) {
     return std::nullopt;
@@ -157,6 +159,7 @@ TEST_F(RocksDBCacheP1Test, InitializesRequiredColumnFamiliesAndSchemaMarker) {
   EXPECT_NE(std::find(names.begin(), names.end(), kCfDataPersistent), names.end());
   EXPECT_NE(std::find(names.begin(), names.end(), kCfDataTtl), names.end());
   EXPECT_NE(std::find(names.begin(), names.end(), kCfOutbox), names.end());
+  EXPECT_NE(std::find(names.begin(), names.end(), kCfDeadLetter), names.end());
   EXPECT_NE(std::find(names.begin(), names.end(), kCfMeta), names.end());
 
   auto marker = ReadSchemaVersionMarker(db_path_);
@@ -260,6 +263,44 @@ TEST_F(RocksDBCacheP1Test, ReplayOutboxHonorsLimit) {
   ASSERT_EQ(keys.size(), 2U);
   EXPECT_EQ(keys[0], "limit:0");
   EXPECT_EQ(keys[1], "limit:1");
+}
+
+TEST_F(RocksDBCacheP1Test, DeadLetterAppendReplayAckRoundTrip) {
+  RocksDBCache::DeadLetterEntry entry{
+      .dead_letter_id = 0,
+      .key = "dead:key:1",
+      .data = MakeVersionedData(77, 7),
+      .priority = Priority::HIGH,
+      .attempts = 3,
+      .durable_outbox_id = 15,
+      .recorded_at_ms = 123456,
+      .error_message = "forced failure"};
+
+  uint64_t dead_letter_id = 0;
+  ASSERT_TRUE(cache_->AppendDeadLetter(entry, &dead_letter_id));
+  ASSERT_GT(dead_letter_id, 0U);
+  EXPECT_EQ(cache_->DeadLetterDepth(), 1U);
+
+  std::vector<RocksDBCache::DeadLetterEntry> replayed;
+  const size_t replayed_count = cache_->ReplayDeadLetter(
+      100, [&replayed](const RocksDBCache::DeadLetterEntry& replay_entry) {
+        replayed.push_back(replay_entry);
+        return true;
+      });
+  ASSERT_EQ(replayed_count, 1U);
+  ASSERT_EQ(replayed.size(), 1U);
+  EXPECT_EQ(replayed[0].dead_letter_id, dead_letter_id);
+  EXPECT_EQ(replayed[0].key, "dead:key:1");
+  EXPECT_EQ(replayed[0].data.version, 77U);
+  EXPECT_EQ(replayed[0].priority, Priority::HIGH);
+  EXPECT_EQ(replayed[0].attempts, 3U);
+  EXPECT_EQ(replayed[0].durable_outbox_id, 15U);
+  EXPECT_EQ(replayed[0].recorded_at_ms, 123456U);
+  EXPECT_EQ(replayed[0].error_message, "forced failure");
+
+  ASSERT_TRUE(cache_->AckDeadLetter(dead_letter_id));
+  ASSERT_TRUE(cache_->AckDeadLetter(dead_letter_id));  // idempotent ack
+  EXPECT_EQ(cache_->DeadLetterDepth(), 0U);
 }
 
 TEST_F(RocksDBCacheP1Test, DataTierIsolationRoutesDataToExpectedColumnFamily) {

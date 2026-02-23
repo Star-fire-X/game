@@ -95,19 +95,43 @@ public:
 
     size_t OutboxDepth() const;
 
+    struct DeadLetterEntry {
+        uint64_t dead_letter_id = 0;
+        std::string key;
+        VersionedData data;
+        Priority priority = Priority::NORMAL;
+        uint32_t attempts = 0;
+        uint64_t durable_outbox_id = 0;
+        uint64_t recorded_at_ms = 0;
+        std::string error_message;
+    };
+
+    bool AppendDeadLetter(const DeadLetterEntry& entry,
+                          uint64_t* dead_letter_id = nullptr);
+
+    bool AckDeadLetter(uint64_t dead_letter_id);
+
+    size_t ReplayDeadLetter(size_t limit,
+                            const std::function<bool(const DeadLetterEntry&)>& cb);
+
+    size_t DeadLetterDepth() const;
+
 private:
     static constexpr size_t kDefaultCFIndex = 0;
     static constexpr size_t kDataPersistentCFIndex = 1;
     static constexpr size_t kDataTtlCFIndex = 2;
     static constexpr size_t kOutboxCFIndex = 3;
-    static constexpr size_t kMetaCFIndex = 4;
-    static constexpr size_t kColumnFamilyCount = 5;
+    static constexpr size_t kDeadLetterCFIndex = 4;
+    static constexpr size_t kMetaCFIndex = 5;
+    static constexpr size_t kColumnFamilyCount = 6;
 
     bool AssignColumnFamilies(std::vector<rocksdb::ColumnFamilyHandle*> handles);
     void DestroyColumnFamilies();
     bool WriteSchemaVersionMarker();
     bool LoadOutboxNextId();
+    bool LoadDeadLetterNextId();
     bool PersistOutboxNextIdLocked(uint64_t next_id);
+    bool PersistDeadLetterNextIdLocked(uint64_t next_id);
     rocksdb::ColumnFamilyHandle* ResolveDataColumnFamily(DataTier tier) const;
     rocksdb::ColumnFamilyHandle* ResolvePeerDataColumnFamily(DataTier tier) const;
     std::optional<VersionedData> GetFromColumnFamily(
@@ -133,6 +157,13 @@ private:
                                               Priority priority) const;
     bool DeserializeOutboxValue(const rocksdb::Slice& value,
                                 OutboxEntry* entry);
+    std::string MakeDeadLetterStorageKey(uint64_t dead_letter_id) const;
+    bool ParseDeadLetterStorageKey(const rocksdb::Slice& storage_key,
+                                   uint64_t* dead_letter_id) const;
+    std::vector<uint8_t> SerializeDeadLetterValue(
+        const DeadLetterEntry& entry) const;
+    bool DeserializeDeadLetterValue(const rocksdb::Slice& value,
+                                    DeadLetterEntry* entry);
     std::string EncodeUint64ToString(uint64_t value) const;
     bool DecodeUint64FromSlice(const rocksdb::Slice& value,
                                uint64_t* out) const;
@@ -155,14 +186,23 @@ private:
     static std::string GetOutboxCFName() {
         return "cf_outbox";
     }
+    static std::string GetDeadLetterCFName() {
+        return "cf_dead_letter";
+    }
     static std::string GetMetaCFName() {
         return "cf_meta";
     }
     static std::string GetOutboxNextIdKey() {
         return "__outbox_next_id__";
     }
+    static std::string GetDeadLetterNextIdKey() {
+        return "__dead_letter_next_id__";
+    }
     static std::string GetOutboxStoragePrefix() {
         return "outbox:";
+    }
+    static std::string GetDeadLetterStoragePrefix() {
+        return "dead_letter:";
     }
 
     Config config_;
@@ -173,9 +213,12 @@ private:
     rocksdb::ColumnFamilyHandle* data_persistent_cf_ = nullptr;
     rocksdb::ColumnFamilyHandle* data_ttl_cf_ = nullptr;
     rocksdb::ColumnFamilyHandle* outbox_cf_ = nullptr;
+    rocksdb::ColumnFamilyHandle* dead_letter_cf_ = nullptr;
     rocksdb::ColumnFamilyHandle* meta_cf_ = nullptr;
     mutable std::mutex outbox_mutex_;
     uint64_t outbox_next_id_ = 1;
+    mutable std::mutex dead_letter_mutex_;
+    uint64_t dead_letter_next_id_ = 1;
     std::atomic<uint64_t> max_version_{0};
     std::atomic<uint64_t> persisted_max_version_{0};
     mutable std::mutex max_version_persist_mutex_;

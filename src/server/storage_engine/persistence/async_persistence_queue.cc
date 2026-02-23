@@ -55,11 +55,15 @@ AsyncPersistenceQueue::AsyncPersistenceQueue(
     if (config_.enable_durable_outbox && durable_outbox_cache_ != nullptr) {
         durable_outbox_depth_cached_.store(
             durable_outbox_cache_->OutboxDepth(), std::memory_order_release);
+        dead_letter_depth_cached_.store(
+            durable_outbox_cache_->DeadLetterDepth(), std::memory_order_release);
     }
 
     const size_t replayed =
         ReplayDurableOutbox(config_.outbox_replay_limit);
+    const size_t restored_dead_letters = RestoreDurableDeadLetters();
     RefreshOutboxDepthMetric();
+    RefreshDeadLetterDepthMetric();
     RefreshQueueDepthMetrics();
 
     worker_threads_.emplace_back([this] { HighPriorityWorker(); });
@@ -71,10 +75,11 @@ AsyncPersistenceQueue::AsyncPersistenceQueue(
     auto logger = spdlog::get("mir2");
     if (logger) {
         logger->info(
-            "AsyncPersistenceQueue initialized with {} worker threads (durable_outbox={}, replayed={})",
+            "AsyncPersistenceQueue initialized with {} worker threads (durable_outbox={}, replayed_outbox={}, restored_dead_letters={})",
             config_.worker_threads,
             config_.enable_durable_outbox && durable_outbox_cache_ != nullptr,
-            replayed);
+            replayed,
+            restored_dead_letters);
     }
 }
 
@@ -115,6 +120,7 @@ bool AsyncPersistenceQueue::ApplyRuntimeConfig(const RuntimeConfig& config) {
         config_.enable_metrics = *config.enable_metrics;
     }
     RefreshOutboxDepthMetric();
+    RefreshDeadLetterDepthMetric();
     RefreshQueueDepthMetrics();
     return true;
 }
@@ -162,7 +168,7 @@ bool AsyncPersistenceQueue::Enqueue(const std::string& key,
         durable_outbox_depth_cached_.fetch_add(1, std::memory_order_acq_rel);
         RefreshOutboxDepthMetric();
 
-        PersistenceItem item(key, data, data.version, outbox_id);
+        PersistenceItem item(key, data, data.version, priority, outbox_id);
         if (!EnqueueItem(item, priority, true)) {
             const bool acked = durable_outbox_cache_->AckOutbox(outbox_id);
             if (!acked) {
@@ -183,7 +189,7 @@ bool AsyncPersistenceQueue::Enqueue(const std::string& key,
         return false;
     }
 
-    PersistenceItem item(key, data, data.version);
+    PersistenceItem item(key, data, data.version, priority);
     return EnqueueItem(item, priority, true);
 }
 
@@ -219,7 +225,7 @@ size_t AsyncPersistenceQueue::ReplayDurableOutbox(size_t limit) {
     const size_t scanned = durable_outbox_cache_->ReplayOutbox(
         limit, [this, &replayed](const l2::RocksDBCache::OutboxEntry& entry) {
             PersistenceItem item(entry.key, entry.data, entry.data.version,
-                                 entry.outbox_id);
+                                 entry.priority, entry.outbox_id);
             if (!EnqueueItem(item, entry.priority, false)) {
                 return false;
             }
@@ -237,6 +243,33 @@ size_t AsyncPersistenceQueue::ReplayDurableOutbox(size_t limit) {
             scanned, replayed);
     }
     return replayed;
+}
+
+size_t AsyncPersistenceQueue::RestoreDurableDeadLetters() {
+    const bool durable_enabled =
+        config_.enable_durable_outbox && durable_outbox_cache_ != nullptr;
+    if (!durable_enabled) {
+        return 0;
+    }
+
+    size_t restored = 0;
+    durable_outbox_cache_->ReplayDeadLetter(
+        0, [this, &restored](const l2::RocksDBCache::DeadLetterEntry& entry) {
+            DeadLetterEntry memory_entry{
+                .dead_letter_id = entry.dead_letter_id,
+                .key = entry.key,
+                .version = entry.data.version,
+                .error_message = entry.error_message,
+                .attempts = entry.attempts,
+                .priority = entry.priority,
+                .recorded_at_ms = entry.recorded_at_ms,
+                .durable_outbox_id = entry.durable_outbox_id,
+            };
+            PushDeadLetterToMemoryQueue(memory_entry, false);
+            ++restored;
+            return true;
+        });
+    return restored;
 }
 
 bool AsyncPersistenceQueue::AckDurableOutboxItem(uint64_t outbox_id) {
@@ -653,6 +686,16 @@ void AsyncPersistenceQueue::RefreshOutboxDepthMetric() {
             durable_outbox_depth_cached_.load(std::memory_order_acquire)));
 }
 
+void AsyncPersistenceQueue::RefreshDeadLetterDepthMetric() {
+    if (!enable_metrics_.load(std::memory_order_acquire)) {
+        return;
+    }
+    monitor::Metrics::Instance().SetGauge(
+        kDeadLetterDepthMetric,
+        static_cast<double>(
+            dead_letter_depth_cached_.load(std::memory_order_acquire)));
+}
+
 void AsyncPersistenceQueue::RefreshQueueDepthMetrics() {
     if (!enable_metrics_.load(std::memory_order_acquire)) {
         return;
@@ -668,37 +711,79 @@ void AsyncPersistenceQueue::RefreshQueueDepthMetrics() {
         static_cast<double>(normal_priority_queue_ ? normal_priority_queue_->Size() : 0));
 }
 
-void AsyncPersistenceQueue::RecordDeadLetter(const PersistenceItem& item,
-                                             uint32_t attempts,
-                                             const std::string& error_message) {
-    {
-        std::lock_guard<std::mutex> lock(dead_letter_mutex_);
-        if (config_.dead_letter_max_items > 0 &&
-            dead_letter_queue_.size() >= config_.dead_letter_max_items) {
-            dead_letter_queue_.pop_front();
+void AsyncPersistenceQueue::PushDeadLetterToMemoryQueue(
+    const DeadLetterEntry& entry,
+    bool count_drop_metric) {
+    std::lock_guard<std::mutex> lock(dead_letter_mutex_);
+    if (config_.dead_letter_max_items > 0 &&
+        dead_letter_queue_.size() >= config_.dead_letter_max_items) {
+        dead_letter_queue_.pop_front();
+        if (count_drop_metric) {
             stats_.dead_letter_dropped.fetch_add(1, std::memory_order_relaxed);
             IncrementMetricCounter(kDeadLetterDroppedMetric);
         }
+    }
+    dead_letter_queue_.push_back(entry);
+}
 
-        dead_letter_queue_.push_back(DeadLetterEntry{
+void AsyncPersistenceQueue::RecordDeadLetter(const PersistenceItem& item,
+                                             uint32_t attempts,
+                                             const std::string& error_message) {
+    const bool durable_enabled =
+        config_.enable_durable_outbox && durable_outbox_cache_ != nullptr;
+    const uint64_t recorded_at_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    DeadLetterEntry memory_entry{
+        .dead_letter_id = 0,
+        .key = item.key,
+        .version = item.version,
+        .error_message = error_message,
+        .attempts = attempts,
+        .priority = item.priority,
+        .recorded_at_ms = recorded_at_ms,
+        .durable_outbox_id = item.durable_outbox_id,
+    };
+
+    bool durable_persisted = false;
+    if (durable_enabled) {
+        l2::RocksDBCache::DeadLetterEntry durable_entry{
+            .dead_letter_id = 0,
             .key = item.key,
-            .version = item.version,
-            .error_message = error_message,
+            .data = item.data,
+            .priority = item.priority,
             .attempts = attempts,
             .durable_outbox_id = item.durable_outbox_id,
-        });
+            .recorded_at_ms = recorded_at_ms,
+            .error_message = error_message,
+        };
+        uint64_t dead_letter_id = 0;
+        if (durable_outbox_cache_->AppendDeadLetter(durable_entry, &dead_letter_id)) {
+            memory_entry.dead_letter_id = dead_letter_id;
+            durable_persisted = true;
+            dead_letter_depth_cached_.fetch_add(1, std::memory_order_acq_rel);
+        } else {
+            auto logger = spdlog::get("mir2");
+            if (logger) {
+                logger->warn(
+                    "RecordDeadLetter: failed to persist dead letter key={} outbox_id={}",
+                    item.key, item.durable_outbox_id);
+            }
+        }
+    }
+    PushDeadLetterToMemoryQueue(memory_entry, true);
+
+    if (!durable_enabled || !durable_persisted) {
+        std::lock_guard<std::mutex> lock(dead_letter_mutex_);
         dead_letter_depth_cached_.store(dead_letter_queue_.size(),
                                         std::memory_order_release);
     }
 
     stats_.dead_letter_enqueued.fetch_add(1, std::memory_order_relaxed);
     IncrementMetricCounter(kDeadLetterEnqueuedMetric);
-    if (enable_metrics_.load(std::memory_order_acquire)) {
-        monitor::Metrics::Instance().SetGauge(
-            kDeadLetterDepthMetric,
-            static_cast<double>(
-                dead_letter_depth_cached_.load(std::memory_order_acquire)));
-    }
+    RefreshDeadLetterDepthMetric();
 }
 
 void AsyncPersistenceQueue::IncrementMetricCounter(const std::string& name,

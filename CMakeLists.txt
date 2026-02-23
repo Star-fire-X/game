@@ -580,7 +580,7 @@ if(BUILD_CLIENT)
     list(APPEND INSTALL_TARGETS legend2_client)
 endif()
 if(BUILD_SERVER)
-    list(APPEND INSTALL_TARGETS mir2_gateway mir2_logic)
+    list(APPEND INSTALL_TARGETS mir2_gateway mir2_logic mir2_dead_letter_replay)
 endif()
 
 install(TARGETS ${INSTALL_TARGETS}

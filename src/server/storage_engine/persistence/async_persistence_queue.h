@@ -90,10 +90,13 @@ public:
     int64_t PendingCount() const;
 
     struct DeadLetterEntry {
+        uint64_t dead_letter_id = 0;
         std::string key;
         uint64_t version = 0;
         std::string error_message;
         uint32_t attempts = 0;
+        Priority priority = Priority::NORMAL;
+        uint64_t recorded_at_ms = 0;
         uint64_t durable_outbox_id = 0;
     };
 
@@ -104,14 +107,17 @@ private:
         std::string key;
         VersionedData data;
         uint64_t version;
+        Priority priority = Priority::NORMAL;
         uint64_t durable_outbox_id = 0;
 
         PersistenceItem() = default;
         PersistenceItem(std::string k, VersionedData d, uint64_t v,
+                        Priority p = Priority::NORMAL,
                         uint64_t outbox_id = 0)
             : key(std::move(k)),
               data(std::move(d)),
               version(v),
+              priority(p),
               durable_outbox_id(outbox_id) {}
     };
 
@@ -130,9 +136,13 @@ private:
     bool EnqueueItem(const PersistenceItem& item, Priority priority,
                      bool count_as_enqueued);
     size_t ReplayDurableOutbox(size_t limit);
+    size_t RestoreDurableDeadLetters();
     bool CanAppendOutbox() const;
     void RefreshOutboxDepthMetric();
+    void RefreshDeadLetterDepthMetric();
     void RefreshQueueDepthMetrics();
+    void PushDeadLetterToMemoryQueue(const DeadLetterEntry& entry,
+                                     bool count_drop_metric);
     void RecordDeadLetter(const PersistenceItem& item,
                           uint32_t attempts,
                           const std::string& error_message);

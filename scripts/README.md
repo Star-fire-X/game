@@ -2,6 +2,28 @@
 
 这个目录包含项目中使用的各种脚本工具。
 
+## replay_dead_letters.sh
+
+重放 Storage Engine RocksDB 死信数据到 outbox 的脚本包装器（依赖 `mir2_dead_letter_replay`）。
+
+### 快速示例
+
+```bash
+# 干跑：按前缀 + 时间窗筛选
+./scripts/replay_dead_letters.sh -- \
+  --db-path ./data/rocksdb \
+  --prefix char: \
+  --start-ms 1700000000000 \
+  --end-ms 1700100000000 \
+  --dry-run \
+  --verbose
+
+# 实际重放（成功后默认确认删除 dead-letter）
+./scripts/replay_dead_letters.sh -- \
+  --db-path ./data/rocksdb \
+  --prefix char:
+```
+
 ## wait-for-it.sh
 
 等待 TCP 主机:端口变为可用的脚本，主要用于 Docker 容器启动时等待依赖服务就绪。

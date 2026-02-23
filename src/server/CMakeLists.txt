@@ -295,6 +295,9 @@ target_link_libraries(mir2_server_lib PUBLIC mir2_storage_engine)
 add_executable(mir2_logic apps/logic_main.cc)
 target_link_libraries(mir2_logic PRIVATE mir2_server_lib)
 
+add_executable(mir2_dead_letter_replay apps/dead_letter_replay_main.cc)
+target_link_libraries(mir2_dead_letter_replay PRIVATE mir2_storage_engine)
+
 if(WIN32)
     target_link_libraries(mir2_server_lib PUBLIC ws2_32 wsock32)
 endif()

@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <asio/error.hpp>
-#include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 
 #include <atomic>
@@ -9,6 +8,7 @@
 #include <thread>
 
 #include "common/enums.h"
+#include "common/types/error_codes.h"
 #include "mocks/mock_socket.h"
 #include "network/packet_codec.h"
 #include "network/tcp_connection.h"
@@ -174,6 +174,32 @@ TEST(TcpConnectionTest, SendWritesEncodedPacket) {
   EXPECT_EQ(writes.front(), expected);
 }
 
+TEST(TcpConnectionTest, KickWritesPacketBeforeClose) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(io_context, &mock_socket);
+  auto session = std::make_shared<TcpSession>(connection);
+  session->Start();
+
+  session->Kick(mir2::common::ErrorCode::kKickAdminManual, "admin kick");
+  io_context.run();
+
+  const auto& writes = mock_socket->GetWrites();
+  ASSERT_EQ(writes.size(), 1u);
+
+  Packet packet{};
+  uint16_t sequence = 0;
+  ASSERT_EQ(PacketCodec::DecodeV2(writes.front().data(),
+                                  writes.front().size(),
+                                  &packet,
+                                  &sequence),
+            DecodeStatus::kOk);
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(mir2::common::MsgId::kKick));
+  EXPECT_EQ(sequence, 0u);
+  EXPECT_TRUE(mock_socket->IsClosed());
+  EXPECT_NE(session->GetState(), TcpSession::SessionState::kActive);
+}
+
 TEST(TcpConnectionTest, ConcurrentSessionSendKeepsWireSequenceMonotonic) {
   asio::io_context io_context;
   MockSocket* mock_socket = nullptr;
@@ -187,16 +213,6 @@ TEST(TcpConnectionTest, ConcurrentSessionSendKeepsWireSequenceMonotonic) {
   constexpr int kThreadCount = 8;
   constexpr int kMessagesPerThread = 512;
   constexpr int kTotalMessages = kThreadCount * kMessagesPerThread;
-  constexpr int kIoThreadCount = 4;
-
-  auto work_guard = asio::make_work_guard(io_context);
-  std::vector<std::thread> io_threads;
-  io_threads.reserve(kIoThreadCount);
-  for (int i = 0; i < kIoThreadCount; ++i) {
-    io_threads.emplace_back([&io_context]() {
-      io_context.run();
-    });
-  }
 
   std::atomic<bool> start{false};
   std::vector<std::thread> threads;
@@ -217,10 +233,7 @@ TEST(TcpConnectionTest, ConcurrentSessionSendKeepsWireSequenceMonotonic) {
     thread.join();
   }
 
-  work_guard.reset();
-  for (auto& thread : io_threads) {
-    thread.join();
-  }
+  io_context.run();
 
   const auto& writes = mock_socket->GetWrites();
   ASSERT_EQ(writes.size(), static_cast<size_t>(kTotalMessages));

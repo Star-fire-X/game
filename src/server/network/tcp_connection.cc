@@ -4,6 +4,8 @@
 #include <asio/dispatch.hpp>
 #include <asio/post.hpp>
 
+#include <iterator>
+
 #include "log/logger.h"
 #include "monitor/metrics.h"
 
@@ -60,8 +62,16 @@ void TcpConnection::Close() {
     if (closed_.exchange(true, std::memory_order_acq_rel)) {
       return;
     }
-    write_queue_.clear();
-    writing_.store(false, std::memory_order_release);
+    const bool write_in_flight = writing_.load(std::memory_order_acquire);
+    if (write_in_flight) {
+      // Keep the in-flight front buffer alive until its completion callback runs.
+      if (write_queue_.size() > 1) {
+        write_queue_.erase(std::next(write_queue_.begin()), write_queue_.end());
+      }
+    } else {
+      write_queue_.clear();
+      writing_.store(false, std::memory_order_release);
+    }
     asio::error_code ec;
     socket_->shutdown(asio::socket_base::shutdown_both, ec);
     socket_->close(ec);
@@ -152,12 +162,19 @@ void TcpConnection::DoWrite() {
       asio::bind_executor(write_strand_,
                           [this, self](const asio::error_code& ec, std::size_t) {
                             if (closed_.load(std::memory_order_acquire)) {
+                              if (!write_queue_.empty()) {
+                                write_queue_.pop_front();
+                              }
                               writing_.store(false, std::memory_order_release);
                               return;
                             }
 
                             if (ec) {
                               monitor::Metrics::Instance().IncrementError("write");
+                              if (!write_queue_.empty()) {
+                                write_queue_.pop_front();
+                              }
+                              writing_.store(false, std::memory_order_release);
                               Close();
                               return;
                             }

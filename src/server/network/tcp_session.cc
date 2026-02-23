@@ -69,21 +69,7 @@ void TcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
     return;
   }
 
-  auto self = shared_from_this();
-  std::vector<uint8_t> payload_copy(payload);
-  asio::post(*send_strand_,
-             [this, self, msg_id, payload_copy = std::move(payload_copy)]() mutable {
-               if (!connection_ ||
-                   state_.load(std::memory_order_acquire) != SessionState::kActive) {
-                 return;
-               }
-
-               const uint16_t sequence = NextSendSequence();
-               std::vector<uint8_t> buffer = PacketCodec::EncodeV2(
-                   msg_id, payload_copy.data(), payload_copy.size(), sequence);
-               connection_->SendRaw(std::move(buffer));
-               monitor::Metrics::Instance().IncrementMessagesSent();
-             });
+  PostSend(msg_id, std::vector<uint8_t>(payload), false);
 }
 
 void TcpSession::Close() {
@@ -133,8 +119,43 @@ void TcpSession::Kick(mir2::common::ErrorCode reason, const std::string& text) {
 
   const uint8_t* data = builder.GetBufferPointer();
   std::vector<uint8_t> payload(data, data + builder.GetSize());
-  Send(static_cast<uint16_t>(mir2::common::MsgId::kKick), payload);
-  Close();
+  PostSend(static_cast<uint16_t>(mir2::common::MsgId::kKick),
+           std::move(payload),
+           true);
+}
+
+void TcpSession::PostSend(uint16_t msg_id,
+                          std::vector<uint8_t> payload,
+                          bool close_after_send) {
+  if (!connection_ || !send_strand_) {
+    if (close_after_send) {
+      Close();
+    }
+    return;
+  }
+
+  auto self = shared_from_this();
+  asio::post(*send_strand_,
+             [this,
+              self,
+              msg_id,
+              payload = std::move(payload),
+              close_after_send]() mutable {
+               if (!connection_ ||
+                   state_.load(std::memory_order_acquire) == SessionState::kClosed) {
+                 return;
+               }
+
+               const uint16_t sequence = NextSendSequence();
+               std::vector<uint8_t> buffer =
+                   PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
+               connection_->SendRaw(std::move(buffer));
+               monitor::Metrics::Instance().IncrementMessagesSent();
+
+               if (close_after_send) {
+                 Close();
+               }
+             });
 }
 
 void TcpSession::MarkHeartbeat() {

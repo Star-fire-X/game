@@ -119,6 +119,7 @@ class TcpSession : public ITcpSession,
   void HandleBytes(const uint8_t* data, size_t size);
 
  private:
+  void PostSend(uint16_t msg_id, std::vector<uint8_t> payload, bool close_after_send);
   bool CheckRateLimit(size_t payload_size);
   size_t BufferedBytes() const;
   void ConsumeBytes(size_t bytes);

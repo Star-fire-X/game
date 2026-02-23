@@ -22,6 +22,12 @@
 #include "client/handlers/system_handler.h"
 #include "client/handlers/item_handler.h"
 #include "client/handlers/chat_handler.h"
+#include "client/handlers/guild_handler.h"
+#include "client/handlers/mail_handler.h"
+#include "client/handlers/trade_handler.h"
+#include "client/handlers/party_handler.h"
+#include "client/handlers/ranking_handler.h"
+#include "client/handlers/achievement_handler.h"
 #include "client/ui/hud/hud_container.h"
 #include "client/ui/inventory/inventory_panel.h"
 #include "client/ui/equipment/equipment_panel.h"
@@ -285,6 +291,7 @@ bool GameClient::initialize(const ClientConfig& config) {
     ui_renderer_ = std::make_unique<UIRenderer>(*sdl_renderer);                            // UI渲染
     ui_renderer_->set_ui_scale(config_.ui_scale);
     actor_renderer_ = std::make_unique<ActorRenderer>(*sdl_renderer, *resource_manager_, texture_cache);  // 角色渲染
+    ground_item_renderer_ = std::make_unique<GroundItemRenderer>(*sdl_renderer, *resource_manager_, texture_cache);  // 地面物品渲染
     std::cout << "  Rendering subsystems created" << std::endl;
     
     // 创建并初始化音频管理
@@ -350,10 +357,7 @@ bool GameClient::initialize(const ClientConfig& config) {
     equipment_panel_->set_visible(false);
     equipment_panel_->on_unequip = [this](uint8_t slot) {
         if (!is_connected() || !network_manager_) return;
-        flatbuffers::FlatBufferBuilder builder;
-        auto req = mir2::proto::CreateUnequipReq(builder, static_cast<uint16_t>(slot));
-        builder.Finish(req);
-        network_manager_->send_message(mir2::common::MsgId::kUnequipReq, build_payload(builder));
+        handlers::ItemHandler::SendUnequipRequest(*network_manager_, static_cast<uint16_t>(slot));
     };
     gameplay_screen->add_child(std::shared_ptr<ui::equipment::EquipmentPanel>(equipment_panel_.get(), [](ui::equipment::EquipmentPanel*){}));
 
@@ -388,6 +392,9 @@ bool GameClient::initialize(const ClientConfig& config) {
     // 创建网络管理器并设置消息处理
     if (!network_manager_) {
         network_manager_ = std::make_unique<mir2::client::NetworkManager>();
+    }
+    if (auto* manager = dynamic_cast<mir2::client::NetworkManager*>(network_manager_.get())) {
+        manager->set_use_v2_protocol(config_.use_v2_protocol);
     }
     setup_network_handlers();
     std::cout << "  Network manager created" << std::endl;
@@ -457,6 +464,11 @@ bool GameClient::initialize(const ClientConfig& config) {
         return screen_to_world(screen_x, screen_y);
     };
     input_callbacks.interact_with_npc = [this](uint64_t npc_id) { InteractWithNpc(npc_id); };
+    input_callbacks.interact_with_ground_item = [this](uint64_t item_entity_id) {
+        if (network_manager_ && network_manager_->is_connected()) {
+            mir2::game::handlers::ItemHandler::SendPickupRequest(*network_manager_, item_entity_id);
+        }
+    };
     input_callbacks.is_connected = [this]() { return is_connected(); };
     input_callbacks.send_move_request = [this](const Position& target) { send_move_request(target); };
     input_callbacks.find_actor = [this](int32_t actor_id) { return find_actor(actor_id); };
@@ -585,6 +597,9 @@ void GameClient::shutdown() {
     skill_handler_.reset();
     item_handler_.reset();
     chat_handler_.reset();
+    guild_handler_.reset();
+    trade_handler_.reset();
+    party_handler_.reset();
 
     minimap_widget_.reset();
     chat_panel_.reset();
@@ -883,6 +898,9 @@ void GameClient::setup_network_handlers() {
     character_callbacks.on_enter_game_success = [this](const CharacterData& data) {
         player_ = std::make_unique<ClientCharacter>(data);
         camera_.center_on(player_->get_position());
+        if (hud_container_) {
+            hud_container_->clear_buffs();
+        }
 
         awaiting_enter_game_ = false;
         enter_game();
@@ -900,6 +918,69 @@ void GameClient::setup_network_handlers() {
     character_handler_ = std::make_unique<handlers::CharacterHandler>(std::move(character_callbacks));
 
     handlers::MovementHandler::Callbacks movement_callbacks;
+    auto apply_world_relocation =
+        [this](uint32_t map_id, int x, int y, bool clear_scene_entities) {
+            if (!player_) {
+                return;
+            }
+
+            player_->set_map_id(map_id);
+            player_->set_position(x, y);
+            player_actor_.data.map_x = static_cast<uint16_t>(x);
+            player_actor_.data.map_y = static_cast<uint16_t>(y);
+            last_player_pos_ = {x, y};
+            player_interpolator_.set_immediate(Position{x, y});
+
+            if (clear_scene_entities) {
+                entity_manager_.clear();
+                monster_manager_.clear();
+                scene_actors_.clear();
+                focused_actor_ = nullptr;
+            }
+
+            Entity self_entity;
+            self_entity.id = player_->get_id();
+            self_entity.type = EntityType::Player;
+            self_entity.position = {x, y};
+            self_entity.direction = player_actor_.data.direction;
+            self_entity.stats.hp = player_->get_data().stats.hp;
+            self_entity.stats.max_hp = player_->get_data().stats.max_hp;
+            self_entity.stats.mp = player_->get_data().stats.mp;
+            self_entity.stats.max_mp = player_->get_data().stats.max_mp;
+            self_entity.stats.level = static_cast<uint16_t>(player_->get_data().stats.level);
+            if (!entity_manager_.add_entity(self_entity)) {
+                entity_manager_.update_entity(self_entity);
+            }
+
+            if (map_system_) {
+                const bool map_loaded =
+                    map_system_->is_map_loaded() &&
+                    map_system_->get_current_map_id() == map_id;
+                if (clear_scene_entities || !map_loaded) {
+                    if (map_system_->load_map(map_id)) {
+                        std::cout << "Loaded map " << map_id << std::endl;
+                        if (map_renderer_) {
+                            map_renderer_->set_map(map_system_->get_map_data());
+                        }
+                        if (minimap_widget_) {
+                            const auto* map_data = map_system_->get_map_data();
+                            if (map_data) {
+                                minimap_widget_->set_map_size(
+                                    static_cast<float>(map_data->width),
+                                    static_cast<float>(map_data->height));
+                            }
+                        }
+                    } else {
+                        std::cerr << "Failed to load map " << map_id << std::endl;
+                    }
+                }
+            }
+
+            camera_.center_on({x, y});
+            if (movement_controller_) {
+                movement_controller_->on_move_response({x, y});
+            }
+        };
     movement_callbacks.on_move_response = [this](int x, int y) {
         if (!player_) {
             return;
@@ -949,6 +1030,8 @@ void GameClient::setup_network_handlers() {
         entity.type = to_local_entity_type(event.entity_type);
         entity.position = {event.x, event.y};
         entity.direction = event.direction;
+        entity.template_id = event.template_id;
+        entity.name = event.name;
         if (!entity_manager_.add_entity(entity)) {
             entity_manager_.update_entity(entity);
         }
@@ -1022,6 +1105,156 @@ void GameClient::setup_network_handlers() {
     movement_callbacks.on_monster_death = [this](uint64_t id, uint64_t killer_id) {
         monster_manager_.handle_death(id, killer_id);
     };
+    movement_callbacks.on_change_map = [apply_world_relocation](uint32_t map_id, int x, int y) {
+        apply_world_relocation(map_id, x, y, /*clear_scene_entities=*/true);
+    };
+    movement_callbacks.on_teleport = [apply_world_relocation](uint32_t map_id, int x, int y) {
+        apply_world_relocation(map_id, x, y, /*clear_scene_entities=*/false);
+    };
+    movement_callbacks.on_respawn = [this](const events::RespawnEvent& event) {
+        const Position pos{event.x, event.y};
+        if (player_ && player_->get_id() == static_cast<uint32_t>(event.entity_id)) {
+            auto& stats = player_->get_data_mut().stats;
+            stats.hp = event.hp;
+            stats.mp = event.mp;
+            player_->set_position(pos);
+            player_interpolator_.set_immediate(pos);
+            player_actor_.data.map_x = static_cast<uint16_t>(event.x);
+            player_actor_.data.map_y = static_cast<uint16_t>(event.y);
+
+            if (!entity_manager_.update_entity_position(player_->get_id(),
+                                                        pos,
+                                                        player_actor_.data.direction)) {
+                Entity self_entity;
+                self_entity.id = player_->get_id();
+                self_entity.type = EntityType::Player;
+                self_entity.position = pos;
+                self_entity.direction = player_actor_.data.direction;
+                self_entity.stats.hp = stats.hp;
+                self_entity.stats.max_hp = stats.max_hp;
+                self_entity.stats.mp = stats.mp;
+                self_entity.stats.max_mp = stats.max_mp;
+                self_entity.stats.level = static_cast<uint16_t>(stats.level);
+                entity_manager_.add_entity(self_entity);
+            }
+            entity_manager_.update_entity_stats(player_->get_id(),
+                                                stats.hp,
+                                                stats.max_hp,
+                                                stats.mp,
+                                                stats.max_mp,
+                                                static_cast<uint16_t>(stats.level));
+            camera_.center_on(pos);
+            if (movement_controller_) {
+                movement_controller_->on_move_response(pos);
+            }
+            return;
+        }
+
+        Entity entity;
+        entity.id = event.entity_id;
+        entity.type = to_local_entity_type(event.entity_type);
+        entity.position = pos;
+        if (!entity_manager_.add_entity(entity)) {
+            entity_manager_.update_entity(entity);
+        }
+        if (Entity* existing = entity_manager_.get_entity(event.entity_id)) {
+            const int max_hp = std::max(existing->stats.max_hp, event.hp);
+            const int max_mp = std::max(existing->stats.max_mp, event.mp);
+            entity_manager_.update_entity_stats(event.entity_id,
+                                                event.hp,
+                                                max_hp,
+                                                event.mp,
+                                                max_mp,
+                                                existing->stats.level);
+        }
+        Actor* actor = find_actor(static_cast<int32_t>(event.entity_id));
+        if (actor) {
+            actor->data.map_x = static_cast<uint16_t>(event.x);
+            actor->data.map_y = static_cast<uint16_t>(event.y);
+        }
+    };
+    movement_callbacks.on_state_sync = [this, apply_world_relocation](
+                                           const events::StateSyncEvent& sync) {
+        if (!player_) {
+            return;
+        }
+
+        auto& stats = player_->get_data_mut().stats;
+        stats.hp = sync.hp;
+        stats.max_hp = sync.max_hp;
+        stats.mp = sync.mp;
+        stats.max_mp = sync.max_mp;
+        stats.level = sync.level;
+        apply_world_relocation(sync.map_id, sync.x, sync.y, /*clear_scene_entities=*/true);
+        entity_manager_.update_entity_stats(player_->get_id(),
+                                            sync.hp,
+                                            sync.max_hp,
+                                            sync.mp,
+                                            sync.max_mp,
+                                            sync.level);
+
+        for (const auto& snapshot : sync.entities) {
+            if (player_->get_id() == static_cast<uint32_t>(snapshot.entity_id)) {
+                continue;
+            }
+
+            Entity entity;
+            entity.id = snapshot.entity_id;
+            entity.type = to_local_entity_type(snapshot.entity_type);
+            entity.position = {snapshot.x, snapshot.y};
+            entity.direction = snapshot.direction;
+            entity.stats.hp = snapshot.hp;
+            entity.stats.max_hp = snapshot.max_hp;
+            entity.stats.mp = snapshot.mp;
+            entity.stats.max_mp = snapshot.max_mp;
+            if (!entity_manager_.add_entity(entity)) {
+                entity_manager_.update_entity(entity);
+            }
+
+            if (entity.type == EntityType::Monster) {
+                if (!monster_manager_.update_position(entity.id,
+                                                      entity.position,
+                                                      entity.direction)) {
+                    monster::ClientMonster monster;
+                    monster.id = entity.id;
+                    monster.template_id = 0;
+                    monster.position = entity.position;
+                    monster.direction = entity.direction;
+                    monster.hp = snapshot.hp;
+                    monster.max_hp = std::max(snapshot.max_hp, snapshot.hp);
+                    monster.max_hp = std::max(monster.max_hp, 1);
+                    monster.level = 1;
+                    const auto render_info =
+                        monster::MonsterTemplateMapper::instance().get_render_info(0);
+                    monster.render_config.race = render_info.race;
+                    monster.render_config.appearance = render_info.appearance;
+                    monster_manager_.add_monster(monster);
+                } else {
+                    monster_manager_.update_stats(entity.id,
+                                                  snapshot.hp,
+                                                  std::max(snapshot.max_hp, snapshot.hp),
+                                                  1);
+                }
+                continue;
+            }
+
+            Actor* actor = add_scene_actor(static_cast<int32_t>(snapshot.entity_id));
+            if (!actor) {
+                continue;
+            }
+            actor->data.map_x = static_cast<uint16_t>(snapshot.x);
+            actor->data.map_y = static_cast<uint16_t>(snapshot.y);
+            actor->data.direction = snapshot.direction;
+            actor->data.race =
+                (snapshot.entity_type == mir2::proto::EntityType::NPC) ? ActorRace::NPC
+                                                                        : ActorRace::HUMAN;
+            actor->data.job = 0;
+            if (actor_renderer_) {
+                actor_renderer_->load_actor_surfaces(*actor);
+                actor_renderer_->set_action(*actor, ActorAction::STAND);
+            }
+        }
+    };
     movement_handler_ = std::make_unique<handlers::MovementHandler>(std::move(movement_callbacks));
     movement_handler_->BindHandlers(*network_manager_);
 
@@ -1059,6 +1292,32 @@ void GameClient::setup_network_handlers() {
         if (audio_manager_ && !sound_id.empty()) {
             audio_manager_->play_sound(sound_id);
         }
+    };
+    effect_callbacks.on_buff_add = [this](uint64_t entity_id,
+                                          mir2::proto::EntityType entity_type,
+                                          uint32_t buff_id,
+                                          uint32_t,
+                                          uint16_t stack_count) {
+        if (!player_ || !hud_container_) {
+            return;
+        }
+        if (entity_type != mir2::proto::EntityType::PLAYER ||
+            entity_id != static_cast<uint64_t>(player_->get_id())) {
+            return;
+        }
+        hud_container_->apply_buff(buff_id, stack_count);
+    };
+    effect_callbacks.on_buff_remove = [this](uint64_t entity_id,
+                                             mir2::proto::EntityType entity_type,
+                                             uint32_t buff_id) {
+        if (!player_ || !hud_container_) {
+            return;
+        }
+        if (entity_type != mir2::proto::EntityType::PLAYER ||
+            entity_id != static_cast<uint64_t>(player_->get_id())) {
+            return;
+        }
+        hud_container_->remove_buff(buff_id);
     };
     effect_callbacks.on_parse_error = [](const std::string& error) {
         std::cerr << "Effect handler parse error: " << error << std::endl;
@@ -1188,6 +1447,333 @@ void GameClient::setup_network_handlers() {
     chat_handler_ = std::make_shared<handlers::ChatHandler>(std::move(chat_callbacks));
     chat_handler_->BindHandlers(*network_manager_);
 
+    // Guild handler
+    handlers::GuildHandler::Callbacks guild_callbacks;
+    guild_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    guild_callbacks.on_create_response =
+        [](bool success, mir2::proto::ErrorCode code, uint64_t guild_id) {
+            if (!success) {
+                std::cerr << "Guild create failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Guild created, guild_id=" << guild_id << std::endl;
+        };
+    guild_callbacks.on_join_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Guild join failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    guild_callbacks.on_leave_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Guild leave failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    guild_callbacks.on_kick_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Guild kick failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    guild_callbacks.on_declare_war_response =
+        [](bool success, mir2::proto::ErrorCode code) {
+            if (!success) {
+                std::cerr << "Guild declare war failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+            }
+        };
+    guild_callbacks.on_cancel_war_response =
+        [](bool success, mir2::proto::ErrorCode code) {
+            if (!success) {
+                std::cerr << "Guild cancel war failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+            }
+        };
+    guild_callbacks.on_make_ally_response =
+        [](bool success, mir2::proto::ErrorCode code) {
+            if (!success) {
+                std::cerr << "Guild make ally failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+            }
+        };
+    guild_callbacks.on_break_ally_response =
+        [](bool success, mir2::proto::ErrorCode code) {
+            if (!success) {
+                std::cerr << "Guild break ally failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+            }
+        };
+    guild_callbacks.on_update_notice_response =
+        [](bool success, mir2::proto::ErrorCode code) {
+            if (!success) {
+                std::cerr << "Guild update notice failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+            }
+        };
+    guild_callbacks.on_update_rank_response =
+        [](bool success, mir2::proto::ErrorCode code) {
+            if (!success) {
+                std::cerr << "Guild update rank failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+            }
+        };
+    guild_callbacks.on_guild_info_sync = [this](const handlers::GuildInfoSyncData& sync) {
+        current_guild_id_ = sync.has_guild ? sync.guild_id : 0;
+        if (!sync.has_guild) {
+            std::cout << "Guild info cleared" << std::endl;
+            return;
+        }
+        std::cout << "Guild sync: id=" << sync.guild_id
+                  << " members=" << sync.member_count << std::endl;
+    };
+    guild_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Guild handler parse error: " << error << std::endl;
+    };
+    guild_handler_ = std::make_shared<handlers::GuildHandler>(std::move(guild_callbacks));
+    guild_handler_->BindHandlers(*network_manager_);
+
+    // Trade handler
+    handlers::TradeHandler::Callbacks trade_callbacks;
+    trade_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    trade_callbacks.on_trade_response =
+        [this](bool success, mir2::proto::ErrorCode code, uint64_t trade_id) {
+            if (!success) {
+                current_trade_id_ = 0;
+                std::cerr << "Trade request failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            current_trade_id_ = trade_id;
+            std::cout << "Trade opened, trade_id=" << trade_id << std::endl;
+        };
+    trade_callbacks.on_add_item_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Trade add-item failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    trade_callbacks.on_set_gold_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Trade set-gold failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    trade_callbacks.on_confirm_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Trade confirm failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    trade_callbacks.on_cancel_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Trade cancel failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    trade_callbacks.on_trade_update =
+        [this](const handlers::TradeUpdateData& update) {
+            current_trade_id_ = update.trade_id;
+            std::cout << "Trade update: id=" << update.trade_id
+                      << " left_items=" << update.left_items.size()
+                      << " right_items=" << update.right_items.size()
+                      << std::endl;
+        };
+    trade_callbacks.on_trade_complete =
+        [this](uint64_t trade_id, bool success, mir2::proto::ErrorCode code) {
+            if (current_trade_id_ == trade_id) {
+                current_trade_id_ = 0;
+            }
+            if (!success) {
+                std::cout << "Trade closed, trade_id=" << trade_id
+                          << " code=" << static_cast<uint16_t>(code) << std::endl;
+                return;
+            }
+            std::cout << "Trade complete, trade_id=" << trade_id << std::endl;
+        };
+    trade_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Trade handler parse error: " << error << std::endl;
+    };
+    trade_handler_ = std::make_shared<handlers::TradeHandler>(std::move(trade_callbacks));
+    trade_handler_->BindHandlers(*network_manager_);
+
+    // Party handler
+    handlers::PartyHandler::Callbacks party_callbacks;
+    party_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    party_callbacks.on_invite_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Party invite failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    party_callbacks.on_join_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Party join failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    party_callbacks.on_leave_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Party leave failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    party_callbacks.on_kick_response = [](bool success, mir2::proto::ErrorCode code) {
+        if (!success) {
+            std::cerr << "Party kick failed: " << static_cast<uint16_t>(code)
+                      << std::endl;
+        }
+    };
+    party_callbacks.on_party_update = [this](const handlers::PartyUpdateData& update) {
+        current_party_id_ = update.party_id;
+        current_party_member_count_ = static_cast<uint32_t>(update.members.size());
+        std::cout << "Party update: id=" << update.party_id
+                  << " members=" << update.members.size() << std::endl;
+    };
+    party_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Party handler parse error: " << error << std::endl;
+    };
+    party_handler_ = std::make_shared<handlers::PartyHandler>(std::move(party_callbacks));
+    party_handler_->BindHandlers(*network_manager_);
+
+    // Mail handler
+    handlers::MailHandler::Callbacks mail_callbacks;
+    mail_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    mail_callbacks.on_send_response =
+        [](bool success, mir2::proto::ErrorCode code, uint64_t mail_id) {
+            if (!success) {
+                std::cerr << "Mail send failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Mail sent, mail_id=" << mail_id << std::endl;
+        };
+    mail_callbacks.on_list_response =
+        [this](bool success, mir2::proto::ErrorCode code,
+               const std::vector<handlers::MailSummaryData>& mails) {
+            if (!success) {
+                std::cerr << "Mail list failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            unread_mail_count_ = 0;
+            for (const auto& mail : mails) {
+                if (!mail.is_read) {
+                    ++unread_mail_count_;
+                }
+            }
+            std::cout << "Mail list updated, total=" << mails.size()
+                      << " unread=" << unread_mail_count_ << std::endl;
+        };
+    mail_callbacks.on_read_response =
+        [](bool success, mir2::proto::ErrorCode code, const handlers::MailDetailData& mail) {
+            if (!success) {
+                std::cerr << "Mail read failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Mail read, mail_id=" << mail.mail_id << std::endl;
+        };
+    mail_callbacks.on_delete_response =
+        [](bool success, mir2::proto::ErrorCode code, uint64_t mail_id) {
+            if (!success) {
+                std::cerr << "Mail delete failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Mail deleted, mail_id=" << mail_id << std::endl;
+        };
+    mail_callbacks.on_claim_response =
+        [](bool success, mir2::proto::ErrorCode code, uint64_t mail_id) {
+            if (!success) {
+                std::cerr << "Mail claim failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Mail claimed, mail_id=" << mail_id << std::endl;
+        };
+    mail_callbacks.on_mail_notify =
+        [this](const handlers::MailSummaryData& mail, uint32_t unread_count) {
+            unread_mail_count_ = unread_count;
+            std::cout << "New mail notify: mail_id=" << mail.mail_id
+                      << " unread=" << unread_mail_count_ << std::endl;
+        };
+    mail_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Mail handler parse error: " << error << std::endl;
+    };
+    mail_handler_ = std::make_shared<handlers::MailHandler>(std::move(mail_callbacks));
+    mail_handler_->BindHandlers(*network_manager_);
+
+    // Ranking handler
+    handlers::RankingHandler::Callbacks ranking_callbacks;
+    ranking_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    ranking_callbacks.on_ranking_response =
+        [](bool success, mir2::proto::ErrorCode code,
+           const handlers::RankingResponseData& response) {
+            if (!success) {
+                std::cerr << "Ranking request failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Ranking update: type=" << static_cast<int>(response.ranking_type)
+                      << " total=" << response.total_count << std::endl;
+        };
+    ranking_callbacks.on_my_rank_response =
+        [](bool success, mir2::proto::ErrorCode code, const handlers::MyRankData& my_rank) {
+            if (!success) {
+                std::cerr << "Ranking my-rank failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "My rank: type=" << static_cast<int>(my_rank.ranking_type)
+                      << " rank=" << my_rank.rank
+                      << " value=" << my_rank.value << std::endl;
+        };
+    ranking_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Ranking handler parse error: " << error << std::endl;
+    };
+    ranking_handler_ =
+        std::make_shared<handlers::RankingHandler>(std::move(ranking_callbacks));
+    ranking_handler_->BindHandlers(*network_manager_);
+
+    // Achievement handler
+    handlers::AchievementHandler::Callbacks achievement_callbacks;
+    achievement_callbacks.owner = std::weak_ptr<void>(handler_callbacks_owner_);
+    achievement_callbacks.on_list_response =
+        [](bool success, mir2::proto::ErrorCode code,
+           const std::vector<handlers::AchievementProgressData>& achievements) {
+            if (!success) {
+                std::cerr << "Achievement list failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Achievement list update: count=" << achievements.size()
+                      << std::endl;
+        };
+    achievement_callbacks.on_claim_response =
+        [](bool success, mir2::proto::ErrorCode code, uint32_t achievement_id,
+           uint32_t reward_gold) {
+            if (!success) {
+                std::cerr << "Achievement claim failed: " << static_cast<uint16_t>(code)
+                          << std::endl;
+                return;
+            }
+            std::cout << "Achievement claimed: id=" << achievement_id
+                      << " reward_gold=" << reward_gold << std::endl;
+        };
+    achievement_callbacks.on_update = [](const handlers::AchievementProgressData& achievement) {
+        std::cout << "Achievement update: id=" << achievement.achievement_id
+                  << " progress=" << achievement.progress
+                  << "/" << achievement.target << std::endl;
+    };
+    achievement_callbacks.on_parse_error = [](const std::string& error) {
+        std::cerr << "Achievement handler parse error: " << error << std::endl;
+    };
+    achievement_handler_ =
+        std::make_shared<handlers::AchievementHandler>(std::move(achievement_callbacks));
+    achievement_handler_->BindHandlers(*network_manager_);
+
     handlers::HandlerRegistry::RegisterHandlers(*network_manager_);
 
     network_manager_->set_default_handler([this](const NetworkPacket& packet) {
@@ -1203,6 +1789,9 @@ void GameClient::setup_network_handlers() {
     // 断开连接回调
     network_manager_->set_on_disconnect([this]() {
         std::cout << "Disconnected from server" << std::endl;
+        if (hud_container_) {
+            hud_container_->clear_buffs();
+        }
         // 如果在游戏中断开，切换到断开状态
         if (state_ == GameState::PLAYING) {
             set_state(GameState::DISCONNECTED);
@@ -1856,20 +2445,26 @@ void GameClient::go_to_character_create() {
  */
 void GameClient::enter_game() {
     entity_manager_.clear();
+    if (hud_container_) {
+        hud_container_->clear_buffs();
+    }
 
     // 设置 ActorRenderer 数据路径并加载档案
     if (actor_renderer_) {
         // 查找 Data 目录
         std::vector<std::string> data_paths = {"Data/", "../Data/", "../../Data/", "./Data/"};
+        std::string found_data_path;
         for (const auto& path : data_paths) {
             std::ifstream test(path + "Hum.wil");
             if (test.good()) {
+                found_data_path = path;
                 actor_renderer_->set_data_path(path);
                 break;
             }
             // 尝试小写
             std::ifstream test2(path + "hum.wil");
             if (test2.good()) {
+                found_data_path = path;
                 actor_renderer_->set_data_path(path);
                 break;
             }
@@ -1877,9 +2472,15 @@ void GameClient::enter_game() {
         // 加载角色相关档案
         actor_renderer_->load_archives();
 
+        // 加载地面物品档案
+        if (ground_item_renderer_) {
+            ground_item_renderer_->set_data_path(found_data_path);
+            ground_item_renderer_->load_archives();
+        }
+
         // 初始化玩家角色渲染数据
         if (player_) {
-            player_actor_.data.id = 1;  // 玩家ID
+            player_actor_.data.id = static_cast<int32_t>(player_->get_id());
             player_actor_.data.map_x = static_cast<uint16_t>(player_->get_position().x);
             player_actor_.data.map_y = static_cast<uint16_t>(player_->get_position().y);
             player_actor_.data.race = ActorRace::HUMAN;
@@ -1912,10 +2513,15 @@ void GameClient::enter_game() {
         }
     }
 
-    // 加载默认地图（地图ID 0 = "0.map"）
+    uint32_t map_id = 0;
+    if (player_) {
+        map_id = player_->get_map_id();
+    }
+
+    // 加载当前地图
     if (map_system_) {
-        if (map_system_->load_map(0)) {
-            std::cout << "Loaded map 0" << std::endl;
+        if (map_system_->load_map(map_id)) {
+            std::cout << "Loaded map " << map_id << std::endl;
 
             // 将地图数据设置给渲染器
             if (map_renderer_) {
@@ -1932,7 +2538,7 @@ void GameClient::enter_game() {
                 }
             }
         } else {
-            std::cerr << "Failed to load map 0" << std::endl;
+            std::cerr << "Failed to load map " << map_id << std::endl;
         }
     }
 
@@ -2146,9 +2752,7 @@ void GameClient::update_playing(float delta_time) {
 
     // Update minimap player position
     if (minimap_widget_ && player_) {
-        minimap_widget_->set_player_position(
-            static_cast<float>(player_->get_position().x),
-            static_cast<float>(player_->get_position().y));
+        minimap_widget_->set_player_position(player_->get_position());
     }
 
     if (ui_manager_) {
@@ -2217,6 +2821,21 @@ void GameClient::render_playing() {
     // 渲染地图
     if (map_renderer_) {
         map_renderer_->render(camera_);
+    }
+
+    // 渲染地面物品（在地图之上、角色之下）
+    if (ground_item_renderer_) {
+        constexpr int kItemViewPadding = 2;
+        auto visible_entities = entity_manager_.get_entities_in_view(camera_, kItemViewPadding);
+        std::vector<Entity*> ground_items;
+        for (auto* entity : visible_entities) {
+            if (entity && entity->type == EntityType::GroundItem) {
+                ground_items.push_back(entity);
+            }
+        }
+        if (!ground_items.empty()) {
+            ground_item_renderer_->draw_ground_items(ground_items, camera_);
+        }
     }
 
     // 使用 ActorRenderer 渲染所有角色（按Z-order排序）

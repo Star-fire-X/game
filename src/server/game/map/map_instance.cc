@@ -46,6 +46,7 @@ MapInstance::MapInstance(int32_t map_id, int32_t map_width, int32_t map_height,
   });
 
   area_event_processor_.SetAOIManager(aoi_manager_.get());
+  area_event_processor_.SetDeferredDispatch(true);
   std::atomic_store_explicit(
       &attributes_snapshot_,
       std::shared_ptr<const MapAttributes>(
@@ -253,9 +254,17 @@ void MapInstance::AddContinuousAreaEffect(const ContinuousAreaEffect& effect) {
   area_event_processor_.AddContinuousEffect(effect);
 }
 
-void MapInstance::UpdateAreaEvents(float delta_time, entt::registry& registry) {
+void MapInstance::RemoveContinuousAreaEffect(uint32_t effect_id) {
   std::unique_lock<std::shared_mutex> lock(mutex_);
-  area_event_processor_.Update(delta_time, registry);
+  area_event_processor_.RemoveContinuousEffect(effect_id);
+}
+
+void MapInstance::UpdateAreaEvents(float delta_time, entt::registry& registry) {
+  {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    area_event_processor_.Update(delta_time, registry);
+  }
+  area_event_processor_.FlushPendingEvents();
 }
 
 bool MapInstance::AddEntity(entt::entity entity, int32_t x, int32_t y) {
@@ -281,13 +290,16 @@ bool MapInstance::AddEntity(entt::entity entity, int32_t x, int32_t y) {
   // AOI 回调可能重入 MapInstance，避免在持有 mutex_ 时调用。
   aoi_manager_->Enter(EntityToId(entity), x, y);
 
-  std::unique_lock<std::shared_mutex> lock(mutex_);
-  if (entities_.find(entity) == entities_.end()) {
-    lock.unlock();
-    aoi_manager_->Leave(EntityToId(entity));
-    return false;
+  {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (entities_.find(entity) == entities_.end()) {
+      lock.unlock();
+      aoi_manager_->Leave(EntityToId(entity));
+      return false;
+    }
+    area_event_processor_.CheckPlayerEnterExit(entity, -1, -1, x, y);
   }
-  area_event_processor_.CheckPlayerEnterExit(entity, -1, -1, x, y);
+  area_event_processor_.FlushPendingEvents();
 
   return true;
 }
@@ -315,8 +327,11 @@ bool MapInstance::RemoveEntity(entt::entity entity) {
   // AOI 回调可能重入 MapInstance，避免在持有 mutex_ 时调用。
   aoi_manager_->Leave(EntityToId(entity));
 
-  std::unique_lock<std::shared_mutex> lock(mutex_);
-  area_event_processor_.CheckPlayerEnterExit(entity, old_x, old_y, -1, -1);
+  {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    area_event_processor_.CheckPlayerEnterExit(entity, old_x, old_y, -1, -1);
+  }
+  area_event_processor_.FlushPendingEvents();
 
   return true;
 }
@@ -346,11 +361,14 @@ bool MapInstance::UpdateEntityPosition(entt::entity entity, int32_t new_x,
   // AOI 回调可能重入 MapInstance，避免在持有 mutex_ 时调用。
   aoi_manager_->Move(EntityToId(entity), new_x, new_y);
 
-  std::unique_lock<std::shared_mutex> lock(mutex_);
-  if (entities_.find(entity) == entities_.end()) {
-    return false;
+  {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (entities_.find(entity) == entities_.end()) {
+      return false;
+    }
+    area_event_processor_.CheckPlayerEnterExit(entity, old_x, old_y, new_x, new_y);
   }
-  area_event_processor_.CheckPlayerEnterExit(entity, old_x, old_y, new_x, new_y);
+  area_event_processor_.FlushPendingEvents();
 
   return true;
 }

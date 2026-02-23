@@ -138,6 +138,7 @@ TEST_F(MonsterAISystemTest, AggroComponentGetTarget) {
     aggro.AddHatred(e2, 200);
     
     EXPECT_EQ(aggro.GetTargetByHatred(), e2);
+    EXPECT_EQ(aggro.cached_top_hatred_, 300);
 }
 
 TEST_F(MonsterAISystemTest, AggroComponentDecayHatred) {
@@ -155,6 +156,7 @@ TEST_F(MonsterAISystemTest, AggroComponentDecayHatred) {
     EXPECT_EQ(it->second, 10);
     EXPECT_EQ(aggro.hate_list.count(e2), 0u);
     EXPECT_EQ(aggro.cached_top_target_, e1);
+    EXPECT_EQ(aggro.cached_top_hatred_, 10);
 }
 
 TEST_F(MonsterAISystemTest, AggroComponentClearsAfterTimeout) {
@@ -172,6 +174,7 @@ TEST_F(MonsterAISystemTest, AggroComponentClearsAfterTimeout) {
     aggro.DecayHatred(0.6f);
     EXPECT_TRUE(aggro.hate_list.empty());
     EXPECT_EQ(aggro.cached_top_target_, static_cast<entt::entity>(entt::null));
+    EXPECT_EQ(aggro.cached_top_hatred_, 0);
 }
 
 TEST_F(MonsterAISystemTest, AggroComponentClear) {
@@ -185,6 +188,7 @@ TEST_F(MonsterAISystemTest, AggroComponentClear) {
 
     EXPECT_TRUE(aggro.hate_list.empty());
     EXPECT_EQ(aggro.cached_top_target_, static_cast<entt::entity>(entt::null));
+    EXPECT_EQ(aggro.cached_top_hatred_, 0);
 }
 
 TEST_F(MonsterAISystemTest, AggroComponentCachedTarget) {
@@ -196,12 +200,14 @@ TEST_F(MonsterAISystemTest, AggroComponentCachedTarget) {
     aggro.AddHatred(e2, 20);
 
     EXPECT_EQ(aggro.cached_top_target_, e2);
+    EXPECT_EQ(aggro.cached_top_hatred_, 30);
     EXPECT_EQ(aggro.GetTargetByHatred(), e2);
 
     aggro.hate_list.erase(e2);
 
     EXPECT_EQ(aggro.GetTargetByHatred(), e1);
     EXPECT_EQ(aggro.cached_top_target_, e1);
+    EXPECT_EQ(aggro.cached_top_hatred_, 15);
 }
 
 TEST_F(MonsterAISystemTest, AIStateTransition_IdleToChase) {

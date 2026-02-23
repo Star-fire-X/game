@@ -26,10 +26,17 @@ server:
   coroutine_hung_threshold_ms: 5000
   coroutine_hung_scan_interval_ms: 500
   coroutine_dump_max_entries: 64
+  session_cleanup_on_gateway_disconnect: true
+  reconcile_cleanup_enabled: true
+  zombie_detection:
+    enabled: true
+    scan_interval_ms: 5000
+    idle_timeout_ms: 120000
   legacy_fallback_enabled: true
   legacy_fallback_allow_auth_whitelist: true
   legacy_fallback_allow_critical_msgs: true
   legacy_fallback_allow_normal_msgs: false
+  chat_batch_send_enabled: true
   movement_speed_violation_severity: 10
   movement_teleport_violation_severity: 5
 
@@ -53,3 +60,32 @@ services:
     port: 8002
     transport: "auto"  # auto|tcp|uds
     uds_path: "/tmp/mir2_logic.sock"
+
+storage_engine:
+  l1_max_entries: 10000
+  l1_ttl_seconds: 300
+  l2_max_size_mb: 512
+  l2_path: "/var/lib/mir2/cache"
+  l2_ttl_seconds: 604800
+  auto_sync_interval_ms: 5000
+  batch_size: 100
+  sync_timeout_ms: 30000
+  queue_capacity: 10000
+  queue_worker_threads: 2
+  queue_retry_count: 3
+  queue_retry_delay_ms: 100
+  dead_letter_max_items: 10000
+  enable_strict_write_guarantee: true
+  critical_data_no_ttl: true
+  critical_key_prefixes: ["char:", "account:username:"]
+  enable_outbox: true
+  outbox_replay_limit: 0
+  outbox_max_items: 200000
+  circuit_breaker_threshold: 5
+  circuit_breaker_timeout_ms: 60000
+  enable_metrics: true
+  enable_audit_log: true
+  audit_log_max_entries: 5000
+  enable_access_control: false
+  require_auth_for_reads: false
+  access_control_token: ""

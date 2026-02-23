@@ -28,6 +28,7 @@
 #include "core/timer.h"
 #include "scene/scene_manager.h"
 #include "render/actor_renderer.h"
+#include "render/ground_item_renderer.h"
 #include "common/types.h"
 #include "common/character_data.h"
 #include "client/network/i_network_manager.h"
@@ -61,6 +62,12 @@ class NpcHandler;
 class SkillHandler;
 class ItemHandler;
 class ChatHandler;
+class GuildHandler;
+class TradeHandler;
+class PartyHandler;
+class MailHandler;
+class RankingHandler;
+class AchievementHandler;
 } // namespace mir2::game::handlers
 
 namespace mir2::client {
@@ -121,6 +128,7 @@ using mir2::render::IRenderer;
 using mir2::render::Camera;
 using mir2::render::Texture;
 using mir2::render::ActorRenderer;
+using mir2::render::GroundItemRenderer;
 using mir2::render::Actor;
 using mir2::render::EffectPlayer;
 using mir2::ui::UIRenderer;
@@ -208,6 +216,7 @@ struct ClientConfig {
     std::string server_host = "127.0.0.1";      // 服务器地址
     uint16_t server_port = constants::DEFAULT_SERVER_PORT;  // 服务器端口
     bool auto_connect = false;                  // 是否自动连接
+    bool use_v2_protocol = true;                // 是否使用V2协议发送
     
     // 图形设置
     int target_fps = constants::TARGET_FPS;     // 目标FPS
@@ -366,6 +375,12 @@ private:
     std::shared_ptr<handlers::SkillHandler> skill_handler_;
     std::shared_ptr<handlers::ItemHandler> item_handler_;
     std::shared_ptr<handlers::ChatHandler> chat_handler_;
+    std::shared_ptr<handlers::GuildHandler> guild_handler_;
+    std::shared_ptr<handlers::TradeHandler> trade_handler_;
+    std::shared_ptr<handlers::PartyHandler> party_handler_;
+    std::shared_ptr<handlers::MailHandler> mail_handler_;
+    std::shared_ptr<handlers::RankingHandler> ranking_handler_;
+    std::shared_ptr<handlers::AchievementHandler> achievement_handler_;
     
     // Rendering subsystems
     std::unique_ptr<MapRenderer> map_renderer_;
@@ -374,6 +389,7 @@ private:
     std::unique_ptr<AudioManager> audio_manager_;
     std::unique_ptr<LoginScreen> login_screen_;
     std::unique_ptr<ActorRenderer> actor_renderer_;  // 角色渲染
+    std::unique_ptr<GroundItemRenderer> ground_item_renderer_;  // 地面物品渲染
     LoginFlowManager login_flow_;
     std::unique_ptr<UIManager> ui_manager_;
     std::unique_ptr<NpcDialogUI> npc_dialog_ui_;
@@ -432,6 +448,11 @@ private:
     std::string session_token_;
     uint64_t last_created_player_id_ = 0;
     bool awaiting_enter_game_ = false;
+    uint64_t current_guild_id_ = 0;
+    uint64_t current_party_id_ = 0;
+    uint64_t current_trade_id_ = 0;
+    uint32_t current_party_member_count_ = 0;
+    uint32_t unread_mail_count_ = 0;
 
     // Character selection
     std::vector<CharacterData> character_list_;

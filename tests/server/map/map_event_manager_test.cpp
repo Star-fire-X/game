@@ -7,6 +7,11 @@
 
 #include <entt/entt.hpp>
 
+#include "ecs/components/character_components.h"
+#include "ecs/event_bus.h"
+#include "ecs/events/area_events.h"
+#include "game/map/map_instance.h"
+
 #define private public
 #include "game/map/map_event_manager.h"
 #undef private
@@ -15,6 +20,7 @@ namespace {
 
 using mir2::game::map::AreaEffectType;
 using mir2::game::map::MapEventManager;
+using mir2::game::map::MapInstance;
 
 }  // namespace
 
@@ -115,4 +121,34 @@ TEST(MapEventManagerTest, CleanupRemovesOldClosedEvents) {
   manager.Update(2.0f, registry, nullptr);
   manager.CleanupClosedEvents();
   EXPECT_TRUE(manager.closed_list_.empty());
+}
+
+TEST(MapEventManagerTest, RemoveEventAlsoRemovesRegisteredContinuousEffect) {
+  entt::registry registry;
+  auto entity = registry.create();
+  auto& state =
+      registry.emplace<mir2::ecs::CharacterStateComponent>(entity);
+  state.position.x = 10;
+  state.position.y = 20;
+
+  mir2::ecs::EventBus event_bus(registry);
+  int fire_ticks = 0;
+  event_bus.Subscribe<mir2::ecs::events::FireBurnTickEvent>(
+      [&](const mir2::ecs::events::FireBurnTickEvent&) {
+        ++fire_ticks;
+      });
+
+  MapInstance map(1, 100, 100);
+  map.SetEventBus(&event_bus);
+  ASSERT_TRUE(map.AddEntity(entity, 10, 20));
+
+  MapEventManager manager;
+  const uint32_t fire_id = manager.AddFireEvent(10, 20, 5.0f, 6);
+
+  manager.Update(1.0f, registry, &map);
+  EXPECT_EQ(fire_ticks, 1);
+
+  manager.RemoveEvent(fire_id, &map);
+  manager.Update(1.0f, registry, &map);
+  EXPECT_EQ(fire_ticks, 1);
 }

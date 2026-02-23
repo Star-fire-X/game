@@ -87,6 +87,13 @@ void ItemHandler::BindHandlers(mir2::client::INetworkManager& manager) {
                                      self->HandleUnequipResponse(packet);
                                  }
                              });
+
+    manager.register_handler(mir2::common::MsgId::kPickupItemRsp,
+                             [weak_self](const NetworkPacket& packet) {
+                                 if (auto self = weak_self.lock()) {
+                                     self->HandlePickupItemResponse(packet);
+                                 }
+                             });
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +317,84 @@ void ItemHandler::HandleUnequipResponse(const NetworkPacket& packet) {
                                        rsp->slot(),
                                        rsp->item_id());
     }
+}
+
+// ---------------------------------------------------------------------------
+// HandlePickupItemResponse  (MsgId::kPickupItemRsp = 4031)
+// ---------------------------------------------------------------------------
+
+void ItemHandler::HandlePickupItemResponse(const NetworkPacket& packet) {
+    std::shared_ptr<void> owner_guard;
+    if (!TryLockCallbackOwner(callbacks_, &owner_guard)) {
+        return;
+    }
+
+    if (packet.payload.empty()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Empty pickup-item response payload");
+        }
+        return;
+    }
+
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::PickupItemRsp>(nullptr)) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Pickup-item response verification failed");
+        }
+        return;
+    }
+
+    const auto* rsp =
+        flatbuffers::GetRoot<mir2::proto::PickupItemRsp>(packet.payload.data());
+    if (!rsp) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Pickup-item response parse failed");
+        }
+        return;
+    }
+
+    if (callbacks_.on_pickup_item_response) {
+        callbacks_.on_pickup_item_response(rsp->code(), rsp->item_id());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SendPickupRequest  (MsgId::kPickupItemReq = 4030)
+// ---------------------------------------------------------------------------
+
+void ItemHandler::SendPickupRequest(mir2::client::INetworkManager& manager,
+                                    uint64_t item_entity_id) {
+    flatbuffers::FlatBufferBuilder builder(64);
+    const auto req = mir2::proto::CreatePickupItemReq(
+        builder, static_cast<uint32_t>(item_entity_id));
+    builder.Finish(req);
+
+    const uint8_t* data = builder.GetBufferPointer();
+    std::vector<uint8_t> payload(data, data + builder.GetSize());
+    manager.send_message(mir2::common::MsgId::kPickupItemReq, payload);
+}
+
+void ItemHandler::SendEquipRequest(mir2::client::INetworkManager& manager,
+                                   uint16_t inventory_slot,
+                                   uint32_t item_id) {
+    flatbuffers::FlatBufferBuilder builder(64);
+    const auto req = mir2::proto::CreateEquipReq(builder, inventory_slot, item_id);
+    builder.Finish(req);
+
+    const uint8_t* data = builder.GetBufferPointer();
+    std::vector<uint8_t> payload(data, data + builder.GetSize());
+    manager.send_message(mir2::common::MsgId::kEquipReq, payload);
+}
+
+void ItemHandler::SendUnequipRequest(mir2::client::INetworkManager& manager,
+                                     uint16_t equip_slot) {
+    flatbuffers::FlatBufferBuilder builder(64);
+    const auto req = mir2::proto::CreateUnequipReq(builder, equip_slot);
+    builder.Finish(req);
+
+    const uint8_t* data = builder.GetBufferPointer();
+    std::vector<uint8_t> payload(data, data + builder.GetSize());
+    manager.send_message(mir2::common::MsgId::kUnequipReq, payload);
 }
 
 } // namespace mir2::game::handlers

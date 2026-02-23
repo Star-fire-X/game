@@ -20,6 +20,12 @@ set(SCHEMA_FILES
     ${SCHEMA_DIR}/combat.fbs
     ${SCHEMA_DIR}/item.fbs
     ${SCHEMA_DIR}/guild.fbs
+    ${SCHEMA_DIR}/party.fbs
+    ${SCHEMA_DIR}/trade.fbs
+    ${SCHEMA_DIR}/ranking.fbs
+    ${SCHEMA_DIR}/mail.fbs
+    ${SCHEMA_DIR}/achievement.fbs
+    ${SCHEMA_DIR}/auction.fbs
     ${SCHEMA_DIR}/chat.fbs
     ${SCHEMA_DIR}/system.fbs
 )
@@ -32,6 +38,12 @@ set(GENERATED_SCHEMA_HEADERS
     ${GENERATED_SCHEMA_DIR}/combat_generated.h
     ${GENERATED_SCHEMA_DIR}/item_generated.h
     ${GENERATED_SCHEMA_DIR}/guild_generated.h
+    ${GENERATED_SCHEMA_DIR}/party_generated.h
+    ${GENERATED_SCHEMA_DIR}/trade_generated.h
+    ${GENERATED_SCHEMA_DIR}/ranking_generated.h
+    ${GENERATED_SCHEMA_DIR}/mail_generated.h
+    ${GENERATED_SCHEMA_DIR}/achievement_generated.h
+    ${GENERATED_SCHEMA_DIR}/auction_generated.h
     ${GENERATED_SCHEMA_DIR}/chat_generated.h
     ${GENERATED_SCHEMA_DIR}/system_generated.h
 )
@@ -69,6 +81,8 @@ add_executable(legend2_client
     render/effect_player.cc
     render/actor_renderer.cc
     render/actor_renderer.h
+    render/ground_item_renderer.cc
+    render/ground_item_renderer.h
 
     # Audio module
     audio/audio_engine.cc
@@ -190,6 +204,20 @@ add_executable(legend2_client
     handlers/item_handler.h
     handlers/chat_handler.cpp
     handlers/chat_handler.h
+    handlers/guild_handler.cpp
+    handlers/guild_handler.h
+    handlers/trade_handler.cpp
+    handlers/trade_handler.h
+    handlers/party_handler.cpp
+    handlers/party_handler.h
+    handlers/mail_handler.cpp
+    handlers/mail_handler.h
+    handlers/ranking_handler.cpp
+    handlers/ranking_handler.h
+    handlers/achievement_handler.cpp
+    handlers/achievement_handler.h
+    handlers/auction_handler.cpp
+    handlers/auction_handler.h
 
     # Network module
     network/message_dispatcher.cpp

@@ -64,7 +64,7 @@ TEST(CharacterHandlerTest, RoleListParsesCharacters) {
 
     ASSERT_EQ(captured_characters.size(), 2u);
     EXPECT_EQ(captured_characters[0].id, 10u);
-    EXPECT_EQ(captured_characters[0].account_id, "123");
+    EXPECT_EQ(captured_characters[0].account_id, 123u);
     EXPECT_EQ(captured_characters[0].name, "Hero");
     EXPECT_EQ(captured_characters[0].char_class, CharacterClass::WARRIOR);
     EXPECT_EQ(captured_characters[0].gender, Gender::MALE);
@@ -75,7 +75,7 @@ TEST(CharacterHandlerTest, RoleListParsesCharacters) {
     EXPECT_EQ(captured_characters[0].position.y, 200);
 
     EXPECT_EQ(captured_characters[1].id, 20u);
-    EXPECT_EQ(captured_characters[1].account_id, "123");
+    EXPECT_EQ(captured_characters[1].account_id, 123u);
     EXPECT_EQ(captured_characters[1].name, "Mage");
     EXPECT_EQ(captured_characters[1].char_class, CharacterClass::MAGE);
     EXPECT_EQ(captured_characters[1].gender, Gender::FEMALE);
@@ -235,7 +235,7 @@ TEST(CharacterHandlerTest, EnterGameSuccessBuildsCharacterData) {
 
     EXPECT_EQ(success_calls, 1);
     EXPECT_EQ(captured_data.id, 42u);
-    EXPECT_EQ(captured_data.account_id, "99");
+    EXPECT_EQ(captured_data.account_id, 99u);
     EXPECT_EQ(captured_data.name, "PlayerOne");
     EXPECT_EQ(captured_data.char_class, CharacterClass::TAOIST);
     EXPECT_EQ(captured_data.gender, Gender::FEMALE);

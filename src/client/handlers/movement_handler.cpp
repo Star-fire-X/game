@@ -75,6 +75,22 @@ void MovementHandler::BindHandlers(mir2::client::INetworkManager& manager) {
                              [this](const NetworkPacket& packet) {
                                  HandleMonsterDeath(packet);
                              });
+    manager.register_handler(mir2::common::MsgId::kChangeMap,
+                             [this](const NetworkPacket& packet) {
+                                 HandleChangeMap(packet);
+                             });
+    manager.register_handler(mir2::common::MsgId::kTeleport,
+                             [this](const NetworkPacket& packet) {
+                                 HandleTeleport(packet);
+                             });
+    manager.register_handler(mir2::common::MsgId::kRespawn,
+                             [this](const NetworkPacket& packet) {
+                                 HandleRespawn(packet);
+                             });
+    manager.register_handler(mir2::common::MsgId::kStateSync,
+                             [this](const NetworkPacket& packet) {
+                                 HandleStateSync(packet);
+                             });
 }
 
 void MovementHandler::HandleMoveResponse(const NetworkPacket& packet) {
@@ -190,6 +206,8 @@ void MovementHandler::HandleEntitySpawn(const NetworkPacket& packet) {
             .x = enter->x(),
             .y = enter->y(),
             .direction = enter->direction(),
+            .template_id = enter->template_id(),
+            .name = enter->name() ? enter->name()->str() : std::string{},
         };
         callbacks_.on_entity_enter(event);
     }
@@ -329,6 +347,182 @@ void MovementHandler::HandleMonsterDeath(const NetworkPacket& packet) {
 
     if (callbacks_.on_monster_death) {
         callbacks_.on_monster_death(death->entity_id(), death->killer_id());
+    }
+}
+
+void MovementHandler::HandleChangeMap(const NetworkPacket& packet) {
+    if (packet.payload.empty()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Empty change-map payload");
+        }
+        return;
+    }
+
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::ChangeMap>(nullptr)) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Invalid change-map payload");
+        }
+        return;
+    }
+
+    const auto* change_map =
+        flatbuffers::GetRoot<mir2::proto::ChangeMap>(packet.payload.data());
+    if (!change_map) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Change-map parse failed");
+        }
+        return;
+    }
+
+    if (!ValidatePositionIfPresent(*change_map, callbacks_)) {
+        return;
+    }
+
+    if (callbacks_.on_change_map) {
+        callbacks_.on_change_map(change_map->map_id(), change_map->x(), change_map->y());
+    }
+}
+
+void MovementHandler::HandleTeleport(const NetworkPacket& packet) {
+    if (packet.payload.empty()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Empty teleport payload");
+        }
+        return;
+    }
+
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::Teleport>(nullptr)) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Invalid teleport payload");
+        }
+        return;
+    }
+
+    const auto* teleport =
+        flatbuffers::GetRoot<mir2::proto::Teleport>(packet.payload.data());
+    if (!teleport) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Teleport parse failed");
+        }
+        return;
+    }
+
+    if (!ValidatePositionIfPresent(*teleport, callbacks_)) {
+        return;
+    }
+
+    if (callbacks_.on_teleport) {
+        callbacks_.on_teleport(teleport->map_id(), teleport->x(), teleport->y());
+    }
+}
+
+void MovementHandler::HandleRespawn(const NetworkPacket& packet) {
+    if (packet.payload.empty()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Empty respawn payload");
+        }
+        return;
+    }
+
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::Respawn>(nullptr)) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Invalid respawn payload");
+        }
+        return;
+    }
+
+    const auto* respawn = flatbuffers::GetRoot<mir2::proto::Respawn>(packet.payload.data());
+    if (!respawn) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Respawn parse failed");
+        }
+        return;
+    }
+
+    if (!ValidatePositionIfPresent(*respawn, callbacks_)) {
+        return;
+    }
+
+    if (callbacks_.on_respawn) {
+        callbacks_.on_respawn(events::RespawnEvent{
+            .entity_id = respawn->entity_id(),
+            .entity_type = respawn->entity_type(),
+            .x = respawn->x(),
+            .y = respawn->y(),
+            .hp = respawn->hp(),
+            .mp = respawn->mp(),
+        });
+    }
+}
+
+void MovementHandler::HandleStateSync(const NetworkPacket& packet) {
+    if (packet.payload.empty()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Empty state-sync payload");
+        }
+        return;
+    }
+
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::StateSync>(nullptr)) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Invalid state-sync payload");
+        }
+        return;
+    }
+
+    const auto* sync = flatbuffers::GetRoot<mir2::proto::StateSync>(packet.payload.data());
+    if (!sync || !sync->player()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("State-sync parse failed");
+        }
+        return;
+    }
+
+    const auto* player = sync->player();
+    if (!ValidatePositionIfPresent(*player, callbacks_)) {
+        return;
+    }
+
+    events::StateSyncEvent event{};
+    event.player_id = player->id();
+    event.map_id = player->map_id();
+    event.x = player->x();
+    event.y = player->y();
+    event.hp = player->hp();
+    event.max_hp = player->max_hp();
+    event.mp = player->mp();
+    event.max_mp = player->max_mp();
+    event.level = player->level();
+
+    if (const auto* entities = sync->entities()) {
+        event.entities.reserve(entities->size());
+        for (const auto* snapshot : *entities) {
+            if (!snapshot) {
+                continue;
+            }
+            if (!ValidatePositionIfPresent(*snapshot, callbacks_)) {
+                return;
+            }
+            event.entities.push_back(events::StateSyncEntitySnapshot{
+                .entity_id = snapshot->entity_id(),
+                .entity_type = snapshot->entity_type(),
+                .x = snapshot->x(),
+                .y = snapshot->y(),
+                .direction = snapshot->direction(),
+                .hp = snapshot->hp(),
+                .max_hp = snapshot->max_hp(),
+                .mp = snapshot->mp(),
+                .max_mp = snapshot->max_mp(),
+            });
+        }
+    }
+
+    if (callbacks_.on_state_sync) {
+        callbacks_.on_state_sync(event);
     }
 }
 

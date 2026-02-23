@@ -8,6 +8,7 @@
 #include "common/character_data.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/equipment_component.h"
+#include "ecs/components/inventory_snapshot_component.h"
 #include "ecs/components/item_component.h"
 #include "ecs/components/skill_component.h"
 #include "ecs/systems/character_utils.h"
@@ -30,7 +31,7 @@ namespace {
 CharacterData BuildFullCharacterData() {
     CharacterData data;
     data.id = 12345;
-    data.account_id = "account_001";
+    data.account_id = 100001;
     data.name = "TestWarrior";
     data.char_class = CharacterClass::WARRIOR;
     data.gender = Gender::MALE;
@@ -61,7 +62,7 @@ entt::entity CreateEntityWithComponents(entt::registry& registry) {
 
     auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
     identity.id = 1001;
-    identity.account_id = "acc";
+    identity.account_id = 6001;
     identity.name = "Hero";
     identity.char_class = CharacterClass::MAGE;
     identity.gender = Gender::FEMALE;
@@ -124,7 +125,7 @@ entt::entity CreateEntityWithComponents(entt::registry& registry) {
     skill_owner.owner = entity;
     skill_owner.slot_index = -1;
 
-    registry.emplace<mir2::ecs::DirtyComponent>(entity, false, false, false, false);
+    registry.emplace<mir2::ecs::DirtyComponent>(entity);
 
     return entity;
 }
@@ -179,21 +180,22 @@ TEST(CharacterCodecTest, LoadCharacterEntity_AllComponents) {
     EXPECT_FALSE(dirty.identity_dirty);
     EXPECT_FALSE(dirty.attributes_dirty);
     EXPECT_FALSE(dirty.state_dirty);
-    EXPECT_FALSE(dirty.inventory_dirty);
+    EXPECT_FALSE(dirty.items_dirty);
+    EXPECT_FALSE(dirty.equipment_dirty);
+    EXPECT_FALSE(dirty.skills_dirty);
 }
 
 TEST(CharacterCodecTest, LoadCharacterEntity_ParsesNumericAccountId) {
     entt::registry registry;
     CharacterData data;
     data.id = 77;
-    data.account_id = "123456";
+    data.account_id = 123456;
     data.name = "NumericAccount";
 
     entt::entity entity = LoadCharacterEntity(registry, data);
     const auto& identity =
         registry.get<mir2::ecs::CharacterIdentityComponent>(entity);
-    EXPECT_EQ(identity.account_id, "123456");
-    EXPECT_EQ(identity.account_id_value, 123456u);
+    EXPECT_EQ(identity.account_id, 123456u);
     EXPECT_EQ(identity.ResolveAccountIdValue(), 123456u);
 }
 
@@ -231,7 +233,9 @@ TEST(CharacterCodecTest, LoadCharacterEntity_DirtyFlagsInitialized) {
     EXPECT_FALSE(dirty.identity_dirty);
     EXPECT_FALSE(dirty.attributes_dirty);
     EXPECT_FALSE(dirty.state_dirty);
-    EXPECT_FALSE(dirty.inventory_dirty);
+    EXPECT_FALSE(dirty.items_dirty);
+    EXPECT_FALSE(dirty.equipment_dirty);
+    EXPECT_FALSE(dirty.skills_dirty);
 }
 
 TEST(CharacterCodecTest, SaveCharacterData_AllComponents) {
@@ -241,7 +245,7 @@ TEST(CharacterCodecTest, SaveCharacterData_AllComponents) {
     CharacterData data = SaveCharacterData(registry, entity);
 
     EXPECT_EQ(data.id, 1001u);
-    EXPECT_EQ(data.account_id, "acc");
+    EXPECT_EQ(data.account_id, 6001u);
     EXPECT_EQ(data.name, "Hero");
     EXPECT_EQ(data.char_class, CharacterClass::MAGE);
     EXPECT_EQ(data.gender, Gender::FEMALE);
@@ -291,13 +295,12 @@ TEST(CharacterCodecTest, SaveCharacterData_FallsBackToNumericAccountId) {
     identity.id = 9001;
     identity.name = "NumericOnly";
     identity.SetAccountIdValue(778899);
-    identity.account_id.clear();
 
     CharacterData data = SaveCharacterData(registry, entity);
-    EXPECT_EQ(data.account_id, "778899");
+    EXPECT_EQ(data.account_id, 778899u);
 }
 
-TEST(CharacterCodecTest, SaveCharacterData_KeepsAccountIdEmptyWhenInvalid) {
+TEST(CharacterCodecTest, SaveCharacterData_KeepsAccountIdZeroWhenInvalid) {
     entt::registry registry;
     const entt::entity entity = registry.create();
     auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
@@ -305,7 +308,7 @@ TEST(CharacterCodecTest, SaveCharacterData_KeepsAccountIdEmptyWhenInvalid) {
     identity.name = "NoAccount";
 
     CharacterData data = SaveCharacterData(registry, entity);
-    EXPECT_TRUE(data.account_id.empty());
+    EXPECT_EQ(data.account_id, 0u);
 }
 
 TEST(CharacterCodecTest, SaveCharacterData_MissingComponents) {
@@ -432,8 +435,9 @@ TEST(CharacterCodecTest, LevelUpSystemIntegration_SingleLevel) {
     entt::registry registry;
     entt::entity entity = registry.create();
 
-    registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity, uint32_t{1}, "acc", "Test", CharacterClass::WARRIOR,
-                                                           Gender::MALE);
+    registry.emplace<mir2::ecs::CharacterIdentityComponent>(
+        entity, uint32_t{1}, uint64_t{1001}, "Test", CharacterClass::WARRIOR,
+        Gender::MALE);
     auto& attributes = registry.emplace<mir2::ecs::CharacterAttributesComponent>(entity);
     attributes.level = 1;
     attributes.experience = 0;
@@ -442,11 +446,9 @@ TEST(CharacterCodecTest, LevelUpSystemIntegration_SingleLevel) {
     attributes.mp = 50;
     attributes.max_mp = 50;
 
-    registry.emplace<mir2::ecs::DirtyComponent>(entity, false, false, false, false);
+    registry.emplace<mir2::ecs::DirtyComponent>(entity);
 
     const int64_t exp_needed = mir2::ecs::GrowthFormulas::GetExpForLevel(1);
-    const int old_max_hp = attributes.max_hp;
-
     bool leveled_up = mir2::ecs::LevelUpSystem::GainExperience(registry, entity, exp_needed);
 
     EXPECT_TRUE(leveled_up);
@@ -464,8 +466,9 @@ TEST(CharacterCodecTest, LevelUpSystemIntegration_MultiLevel) {
     entt::registry registry;
     entt::entity entity = registry.create();
 
-    registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity, uint32_t{1}, "acc", "Test",
-                                                           CharacterClass::TAOIST, Gender::FEMALE);
+    registry.emplace<mir2::ecs::CharacterIdentityComponent>(
+        entity, uint32_t{1}, uint64_t{1002}, "Test", CharacterClass::TAOIST,
+        Gender::FEMALE);
     auto& attributes = registry.emplace<mir2::ecs::CharacterAttributesComponent>(entity);
     attributes.level = 1;
     attributes.experience = 0;
@@ -474,7 +477,7 @@ TEST(CharacterCodecTest, LevelUpSystemIntegration_MultiLevel) {
     attributes.mp = 80;
     attributes.max_mp = 80;
 
-    registry.emplace<mir2::ecs::DirtyComponent>(entity, false, false, false, false);
+    registry.emplace<mir2::ecs::DirtyComponent>(entity);
 
     // 使用新经验表计算升5级所需总经验
     int64_t total_exp_needed = 0;
@@ -496,13 +499,14 @@ TEST(CharacterCodecTest, GainExperience_NegativeValue) {
     entt::registry registry;
     entt::entity entity = registry.create();
 
-    registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity, uint32_t{1}, "acc", "Test",
-                                                           CharacterClass::WARRIOR, Gender::MALE);
+    registry.emplace<mir2::ecs::CharacterIdentityComponent>(
+        entity, uint32_t{1}, uint64_t{1003}, "Test", CharacterClass::WARRIOR,
+        Gender::MALE);
     auto& attributes = registry.emplace<mir2::ecs::CharacterAttributesComponent>(entity);
     attributes.level = 2;
     attributes.experience = 100;
 
-    registry.emplace<mir2::ecs::DirtyComponent>(entity, false, false, false, false);
+    registry.emplace<mir2::ecs::DirtyComponent>(entity);
 
     bool leveled_up = mir2::ecs::LevelUpSystem::GainExperience(registry, entity, -5);
 

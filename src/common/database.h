@@ -104,7 +104,7 @@ public:
     virtual DbResult<CharacterData> load_character_by_name(const std::string& name) = 0;
     
     /// 加载账号下的所有角色
-    virtual DbResult<std::vector<CharacterData>> load_characters_by_account(const std::string& account_id) = 0;
+    virtual DbResult<std::vector<CharacterData>> load_characters_by_account(uint64_t account_id) = 0;
     
     /// 根据ID删除角色
     virtual DbResult<void> delete_character(uint32_t character_id) = 0;
@@ -197,7 +197,7 @@ public:
     DbResult<void> save_character(const CharacterData& data) override;
     DbResult<CharacterData> load_character(uint32_t character_id) override;
     DbResult<CharacterData> load_character_by_name(const std::string& name) override;
-    DbResult<std::vector<CharacterData>> load_characters_by_account(const std::string& account_id) override;
+    DbResult<std::vector<CharacterData>> load_characters_by_account(uint64_t account_id) override;
     DbResult<void> delete_character(uint32_t character_id) override;
     DbResult<bool> character_name_exists(const std::string& name) override;
     DbResult<uint32_t> get_next_character_id() override;

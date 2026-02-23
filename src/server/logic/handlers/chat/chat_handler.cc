@@ -1,8 +1,12 @@
 #include "logic/handlers/chat/chat_handler.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <exception>
+#include <chrono>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -17,12 +21,19 @@
 #include "logic/handlers/handler_error_utils.h"
 #include "logic/response_sender.h"
 #include "logic/services/player_presence_service.h"
+#include "monitor/metrics.h"
 
 namespace mir2::logic {
 
 namespace {
 
 constexpr size_t kMaxChatLength = 256;
+constexpr const char* kMetricChatDispatchBatchTotal = "logic.chat.dispatch.batch_total";
+constexpr const char* kMetricChatDispatchRecipientTotal = "logic.chat.dispatch.recipient_total";
+constexpr const char* kMetricChatDispatchFailedTotal = "logic.chat.dispatch.failed_total";
+constexpr const char* kMetricChatDispatchDroppedTotal = "logic.chat.dispatch.dropped_total";
+constexpr const char* kMetricChatDispatchLargestBatch = "logic.chat.dispatch.largest_batch";
+constexpr const char* kMetricChatDispatchLatencyMs = "logic.chat.dispatch.loop_latency_ms";
 
 /// Extract character ID from HandlerContext.
 /// Returns nullopt if context is invalid or entity has no identity component.
@@ -87,15 +98,26 @@ std::vector<uint8_t> BuildChatRsp(mir2::common::ErrorCode code) {
   return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
+uint64_t HashPayload(const std::vector<uint8_t>& payload) {
+  uint64_t hash = 1469598103934665603ull;
+  for (const uint8_t byte : payload) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
 }  // namespace
 
 ChatHandler::ChatHandler(ResponseSender& response_sender,
                          PlayerPresenceService& player_presence_service,
                          mir2::game::map::AOIManager& aoi_mgr,
-                         entt::registry& ecs_registry)
+                         entt::registry& ecs_registry,
+                         bool batch_send_enabled)
     : response_sender_(response_sender),
       aoi_mgr_(aoi_mgr),
       ecs_registry_(ecs_registry),
+      batch_send_enabled_(batch_send_enabled),
       chat_service_(std::make_unique<mir2::game::chat::ChatService>(
           player_presence_service, ecs_registry_)) {}
 
@@ -104,86 +126,141 @@ ChatHandler::~ChatHandler() = default;
 Task<void> ChatHandler::HandleMessage(HandlerContext ctx,
                                       const uint8_t* payload,
                                       size_t payload_size) {
-  if (!payload || payload_size == 0) {
-    SYSLOG_WARN("ChatHandler ignored empty payload (client_id={})", ctx.client_id);
-    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+  bool send_invalid_action = false;
+  try {
+    if (!payload || payload_size == 0) {
+      SYSLOG_WARN("ChatHandler ignored empty payload (client_id={})", ctx.client_id);
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+      co_return;
+    }
+
+    flatbuffers::Verifier verifier(payload, payload_size);
+    if (!verifier.VerifyBuffer<mir2::proto::ChatReq>(nullptr)) {
+      SYSLOG_WARN("ChatHandler payload verify failed (client_id={})", ctx.client_id);
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+      co_return;
+    }
+
+    const auto* req = flatbuffers::GetRoot<mir2::proto::ChatReq>(payload);
+    if (!req || !req->content()) {
+      SYSLOG_WARN("ChatHandler payload missing content (client_id={})", ctx.client_id);
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+      co_return;
+    }
+
+    const std::string content = req->content()->str();
+    if (content.empty()) {
+      SYSLOG_WARN("ChatHandler empty content (client_id={})", ctx.client_id);
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+      co_return;
+    }
+
+    if (content.size() > kMaxChatLength) {
+      SYSLOG_WARN("ChatHandler content too long (client_id={}, len={})",
+                  ctx.client_id, content.size());
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+      co_return;
+    }
+
+    // HandleHot will check for '@' commands internally
+    co_await HandleHot(std::move(ctx), req->channel(), req->target_id(), content);
     co_return;
+  } catch (const std::exception& ex) {
+    SYSLOG_ERROR("ChatHandler HandleMessage exception client_id={} error={}",
+                 ctx.client_id, ex.what());
+    send_invalid_action = true;
+  } catch (...) {
+    SYSLOG_ERROR("ChatHandler HandleMessage exception client_id={} error=unknown",
+                 ctx.client_id);
+    send_invalid_action = true;
   }
 
-  flatbuffers::Verifier verifier(payload, payload_size);
-  if (!verifier.VerifyBuffer<mir2::proto::ChatReq>(nullptr)) {
-    SYSLOG_WARN("ChatHandler payload verify failed (client_id={})", ctx.client_id);
-    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
-    co_return;
+  if (send_invalid_action) {
+    try {
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    } catch (const std::exception& send_ex) {
+      SYSLOG_ERROR("ChatHandler HandleMessage fallback send failed client_id={} error={}",
+                   ctx.client_id, send_ex.what());
+    } catch (...) {
+      SYSLOG_ERROR("ChatHandler HandleMessage fallback send failed client_id={} error=unknown",
+                   ctx.client_id);
+    }
   }
-
-  const auto* req = flatbuffers::GetRoot<mir2::proto::ChatReq>(payload);
-  if (!req || !req->content()) {
-    SYSLOG_WARN("ChatHandler payload missing content (client_id={})", ctx.client_id);
-    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
-    co_return;
-  }
-
-  const std::string content = req->content()->str();
-  if (content.empty()) {
-    SYSLOG_WARN("ChatHandler empty content (client_id={})", ctx.client_id);
-    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
-    co_return;
-  }
-
-  if (content.size() > kMaxChatLength) {
-    SYSLOG_WARN("ChatHandler content too long (client_id={}, len={})",
-                ctx.client_id, content.size());
-    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
-    co_return;
-  }
-
-  // HandleHot will check for '@' commands internally
-  co_await HandleHot(std::move(ctx), req->channel(), req->target_id(), content);
+  co_return;
 }
 
 Task<void> ChatHandler::HandleHot(HandlerContext ctx,
                                   mir2::proto::ChatChannel channel,
                                   uint64_t target_id,
                                   std::string content) {
-  if (content.empty()) {
-    SYSLOG_WARN("ChatHandler empty content (client_id={})", ctx.client_id);
-    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+  bool send_invalid_action = false;
+  try {
+    if (content.empty()) {
+      SYSLOG_WARN("ChatHandler empty content (client_id={})", ctx.client_id);
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+      co_return;
+    }
+
+    if (content.size() > kMaxChatLength) {
+      SYSLOG_WARN("ChatHandler content too long (client_id={}, len={})",
+                  ctx.client_id, content.size());
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+      co_return;
+    }
+
+    if (content.size() > 1 && content[0] == '@') {
+      co_await HandleChatCommand(std::move(ctx), content);
+      co_return;
+    }
+
+    switch (channel) {
+      case mir2::proto::ChatChannel::WORLD:
+        co_await HandleWorldChat(std::move(ctx), content);
+        break;
+      case mir2::proto::ChatChannel::PRIVATE:
+        co_await HandlePrivateChat(std::move(ctx), target_id, content);
+        break;
+      case mir2::proto::ChatChannel::TEAM:
+        co_await HandleTeamChat(std::move(ctx), content);
+        break;
+      case mir2::proto::ChatChannel::AREA:
+        co_await HandleAreaChat(std::move(ctx), content);
+        break;
+      case mir2::proto::ChatChannel::GUILD:
+        co_await HandleGuildChat(std::move(ctx), content);
+        break;
+      default:
+        co_await HandleWorldChat(std::move(ctx), content);
+        break;
+    }
     co_return;
+  } catch (const std::exception& ex) {
+    SYSLOG_ERROR("ChatHandler HandleHot exception client_id={} channel={} target_id={} error={}",
+                 ctx.client_id,
+                 static_cast<int>(channel),
+                 target_id,
+                 ex.what());
+    send_invalid_action = true;
+  } catch (...) {
+    SYSLOG_ERROR("ChatHandler HandleHot exception client_id={} channel={} target_id={} error=unknown",
+                 ctx.client_id,
+                 static_cast<int>(channel),
+                 target_id);
+    send_invalid_action = true;
   }
 
-  if (content.size() > kMaxChatLength) {
-    SYSLOG_WARN("ChatHandler content too long (client_id={}, len={})",
-                ctx.client_id, content.size());
-    co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
-    co_return;
+  if (send_invalid_action) {
+    try {
+      co_await SendChatResponse(ctx, mir2::common::ErrorCode::kInvalidAction);
+    } catch (const std::exception& send_ex) {
+      SYSLOG_ERROR("ChatHandler HandleHot fallback send failed client_id={} error={}",
+                   ctx.client_id, send_ex.what());
+    } catch (...) {
+      SYSLOG_ERROR("ChatHandler HandleHot fallback send failed client_id={} error=unknown",
+                   ctx.client_id);
+    }
   }
-
-  if (content.size() > 1 && content[0] == '@') {
-    co_await HandleChatCommand(std::move(ctx), content);
-    co_return;
-  }
-
-  switch (channel) {
-    case mir2::proto::ChatChannel::WORLD:
-      co_await HandleWorldChat(std::move(ctx), content);
-      break;
-    case mir2::proto::ChatChannel::PRIVATE:
-      co_await HandlePrivateChat(std::move(ctx), target_id, content);
-      break;
-    case mir2::proto::ChatChannel::TEAM:
-      co_await HandleTeamChat(std::move(ctx), content);
-      break;
-    case mir2::proto::ChatChannel::AREA:
-      co_await HandleAreaChat(std::move(ctx), content);
-      break;
-    case mir2::proto::ChatChannel::GUILD:
-      co_await HandleGuildChat(std::move(ctx), content);
-      break;
-    default:
-      co_await HandleWorldChat(std::move(ctx), content);
-      break;
-  }
+  co_return;
 }
 
 Task<void> ChatHandler::HandleWorldChat(HandlerContext ctx, const std::string& content) {
@@ -387,8 +464,128 @@ Task<void> ChatHandler::SendChatResponse(HandlerContext ctx, mir2::common::Error
 Task<void> ChatHandler::SendChatDispatches(
     uint16_t msg_id,
     const mir2::game::chat::ChatDispatchList& dispatches) {
-  for (const auto& dispatch : dispatches) {
-    co_await response_sender_.SendAsync(dispatch.first, msg_id, dispatch.second);
+  const auto started_at = std::chrono::steady_clock::now();
+
+  size_t batch_total = 0;
+  size_t recipient_total = 0;
+  size_t largest_batch = 0;
+  size_t failed = 0;
+  size_t dropped = 0;
+
+  if (!batch_send_enabled_) {
+    for (const auto& dispatch : dispatches) {
+      const uint64_t client_id = dispatch.first;
+      const auto& payload = dispatch.second;
+      if (client_id == 0 || payload.empty()) {
+        ++dropped;
+        continue;
+      }
+
+      ++recipient_total;
+      try {
+        co_await response_sender_.SendAsync(client_id, msg_id, payload);
+      } catch (...) {
+        ++failed;
+      }
+    }
+    batch_total = recipient_total;
+    if (recipient_total > 0) {
+      largest_batch = 1;
+    }
+  } else {
+    struct DispatchBatch {
+      std::vector<uint8_t> payload;
+      std::vector<uint64_t> client_ids;
+    };
+
+    std::vector<DispatchBatch> batches;
+    batches.reserve(dispatches.size());
+    std::unordered_map<uint64_t, std::vector<size_t>> hash_to_batch_indices;
+    hash_to_batch_indices.reserve(dispatches.size());
+
+    for (const auto& dispatch : dispatches) {
+      const uint64_t client_id = dispatch.first;
+      const auto& payload = dispatch.second;
+
+      if (client_id == 0 || payload.empty()) {
+        ++dropped;
+        continue;
+      }
+
+      const uint64_t payload_hash = HashPayload(payload);
+      bool grouped = false;
+
+      const auto hash_it = hash_to_batch_indices.find(payload_hash);
+      if (hash_it != hash_to_batch_indices.end()) {
+        for (const size_t batch_index : hash_it->second) {
+          if (batches[batch_index].payload == payload) {
+            batches[batch_index].client_ids.push_back(client_id);
+            grouped = true;
+            break;
+          }
+        }
+      }
+
+      if (!grouped) {
+        DispatchBatch batch;
+        batch.payload = payload;
+        batch.client_ids.push_back(client_id);
+        const size_t batch_index = batches.size();
+        batches.push_back(std::move(batch));
+        hash_to_batch_indices[payload_hash].push_back(batch_index);
+      }
+    }
+
+    for (const auto& batch : batches) {
+      if (batch.client_ids.empty()) {
+        continue;
+      }
+      ++batch_total;
+      recipient_total += batch.client_ids.size();
+      largest_batch = std::max(largest_batch, batch.client_ids.size());
+
+      const SendManyResult result =
+          co_await response_sender_.SendMany(batch.client_ids, msg_id, batch.payload);
+      failed += result.failed;
+      dropped += result.dropped;
+    }
+  }
+
+  if (batch_total > 0) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricChatDispatchBatchTotal,
+                                                  static_cast<uint64_t>(batch_total));
+  }
+  if (recipient_total > 0) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricChatDispatchRecipientTotal,
+                                                  static_cast<uint64_t>(recipient_total));
+  }
+  if (failed > 0) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricChatDispatchFailedTotal,
+                                                  static_cast<uint64_t>(failed));
+  }
+  if (dropped > 0) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricChatDispatchDroppedTotal,
+                                                  static_cast<uint64_t>(dropped));
+  }
+  if (largest_batch > 0) {
+    monitor::Metrics::Instance().SetGauge(kMetricChatDispatchLargestBatch,
+                                          static_cast<double>(largest_batch));
+  }
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - started_at);
+  monitor::Metrics::Instance().SetGauge(
+      kMetricChatDispatchLatencyMs, static_cast<double>(elapsed.count()) / 1000.0);
+
+  if (failed > 0 || dropped > 0) {
+    SYSLOG_WARN(
+        "ChatHandler dispatch summary msg_id={} batches={} recipients={} failed={} dropped={} latency_us={}",
+        msg_id,
+        batch_total,
+        recipient_total,
+        failed,
+        dropped,
+        elapsed.count());
   }
 }
 

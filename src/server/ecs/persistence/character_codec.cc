@@ -20,7 +20,7 @@ entt::entity CreateCharacterEntity(entt::registry& registry,
 
     auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
     identity.id = id;
-    identity.SetAccountIdString(request.account_id);
+    identity.SetAccountIdValue(request.account_id);
     identity.name = request.name;
     identity.char_class = request.char_class;
     identity.gender = request.gender;
@@ -66,7 +66,7 @@ entt::entity LoadCharacterEntity(entt::registry& registry,
 
     auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
     identity.id = data.id;
-    identity.SetAccountIdString(data.account_id);
+    identity.SetAccountIdValue(data.account_id);
     identity.name = data.name;
     identity.char_class = data.char_class;
     identity.gender = data.gender;
@@ -94,13 +94,13 @@ entt::entity LoadCharacterEntity(entt::registry& registry,
     state.is_online = false;
     registry.emplace<mir2::ecs::ChatPreferenceComponent>(entity);
 
-    mir2::ecs::inventory::LoadInventoryFromJson(registry,
-                                                entity,
-                                                data.inventory_json,
-                                                data.equipment_json,
-                                                data.skills_json);
+    mir2::ecs::inventory::compat::LoadInventoryFromJson(registry,
+                                                        entity,
+                                                        data.inventory_json,
+                                                        data.equipment_json,
+                                                        data.skills_json);
 
-    registry.emplace<mir2::ecs::DirtyComponent>(entity, false, false, false, false);
+    registry.emplace<mir2::ecs::DirtyComponent>(entity);
 
     return entity;
 }
@@ -110,16 +110,7 @@ mir2::common::CharacterData SaveCharacterData(entt::registry& registry, entt::en
 
     if (const auto* identity = registry.try_get<mir2::ecs::CharacterIdentityComponent>(entity)) {
         data.id = identity->id;
-        if (!identity->account_id.empty()) {
-            data.account_id = identity->account_id;
-        } else {
-            const mir2::ecs::AccountId resolved_account_id =
-                identity->ResolveAccountIdValue();
-            data.account_id =
-                resolved_account_id == mir2::ecs::kInvalidAccountId
-                    ? std::string()
-                    : mir2::ecs::AccountIdToString(resolved_account_id);
-        }
+        data.account_id = identity->ResolveAccountIdValue();
         data.name = identity->name;
         data.char_class = identity->char_class;
         data.gender = identity->gender;
@@ -148,7 +139,7 @@ mir2::common::CharacterData SaveCharacterData(entt::registry& registry, entt::en
     }
 
     auto [inventory_json, equipment_json, skills_json] =
-        mir2::ecs::inventory::SaveInventoryToJson(registry, entity);
+        mir2::ecs::inventory::compat::SaveInventoryToJson(registry, entity);
     data.inventory_json = std::move(inventory_json);
     data.equipment_json = std::move(equipment_json);
     data.skills_json = std::move(skills_json);

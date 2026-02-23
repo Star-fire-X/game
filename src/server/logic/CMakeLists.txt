@@ -9,8 +9,10 @@ if(TARGET mir2_server_lib)
         thread_affinity.cc
         services/client_registry.cc
         services/merchant_service.cc
+        services/ranking_service.cc
         services/ecs_combat_service.cc
         services/ecs_inventory_service.cc
+        services/world_sync_broadcast_service.cc
         services/storage_login_service.cc
         services/player_presence_service.cc
         services/session_role_store.cc

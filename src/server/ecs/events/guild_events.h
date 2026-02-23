@@ -6,10 +6,11 @@
 #ifndef MIR2_ECS_EVENTS_GUILD_EVENTS_H_
 #define MIR2_ECS_EVENTS_GUILD_EVENTS_H_
 
-#include <cstdint>
 #include <string>
 
 #include <entt/entt.hpp>
+
+#include "ecs/id_types.h"
 
 namespace mir2::ecs::events {
 
@@ -17,7 +18,7 @@ namespace mir2::ecs::events {
  * @brief Guild created event.
  */
 struct GuildCreatedEvent {
-  uint32_t guild_id;
+  GuildId guild_id = kInvalidGuildId;
   entt::entity leader;
   std::string guild_name;
 };
@@ -26,7 +27,7 @@ struct GuildCreatedEvent {
  * @brief Guild member joined event.
  */
 struct GuildMemberJoinedEvent {
-  uint32_t guild_id;
+  GuildId guild_id = kInvalidGuildId;
   entt::entity member;
   std::string member_name;
 };
@@ -35,7 +36,7 @@ struct GuildMemberJoinedEvent {
  * @brief Guild member left event.
  */
 struct GuildMemberLeftEvent {
-  uint32_t guild_id;
+  GuildId guild_id = kInvalidGuildId;
   entt::entity member;
   std::string member_name;
   bool is_kicked;
@@ -45,8 +46,8 @@ struct GuildMemberLeftEvent {
  * @brief Guild war declared event.
  */
 struct GuildWarDeclaredEvent {
-  uint32_t attacker_guild_id;
-  uint32_t target_guild_id;
+  GuildId attacker_guild_id = kInvalidGuildId;
+  GuildId target_guild_id = kInvalidGuildId;
   uint64_t duration_ms;
 };
 
@@ -54,8 +55,8 @@ struct GuildWarDeclaredEvent {
  * @brief Guild war ended event.
  */
 struct GuildWarEndedEvent {
-  uint32_t guild1_id;
-  uint32_t guild2_id;
+  GuildId guild1_id = kInvalidGuildId;
+  GuildId guild2_id = kInvalidGuildId;
   bool is_timeout;
 };
 
@@ -63,16 +64,16 @@ struct GuildWarEndedEvent {
  * @brief Guild alliance formed event.
  */
 struct GuildAllianceFormedEvent {
-  uint32_t guild1_id;
-  uint32_t guild2_id;
+  GuildId guild1_id = kInvalidGuildId;
+  GuildId guild2_id = kInvalidGuildId;
 };
 
 /**
  * @brief Guild alliance broken event.
  */
 struct GuildAllianceBrokenEvent {
-  uint32_t guild1_id;
-  uint32_t guild2_id;
+  GuildId guild1_id = kInvalidGuildId;
+  GuildId guild2_id = kInvalidGuildId;
 };
 
 }  // namespace mir2::ecs::events

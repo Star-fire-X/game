@@ -12,7 +12,10 @@
 #include "ui/ui_renderer.h"
 #include "common/types.h"
 
+#include <cstdint>
+#include <cstddef>
 #include <string>
+#include <unordered_map>
 
 namespace mir2::ui::hud {
 
@@ -36,6 +39,15 @@ public:
     /// @param gold  Current gold amount
     void set_player_info(const std::string& name, int level, int gold);
 
+    /// Add/update an active buff stack for the player.
+    void apply_buff(uint32_t buff_id, uint16_t stack_count);
+
+    /// Remove an active buff from the player.
+    void remove_buff(uint32_t buff_id);
+
+    /// Clear all active buffs.
+    void clear_buffs();
+
     /// Get the currently displayed player name.
     const std::string& get_name() const { return name_; }
 
@@ -45,6 +57,12 @@ public:
     /// Get the currently displayed gold amount.
     int get_gold() const { return gold_; }
 
+    /// Get active buff count shown in HUD.
+    size_t get_active_buff_count() const { return active_buffs_.size(); }
+
+    /// Get stack count for a buff id; returns 0 when absent.
+    uint16_t get_buff_stack(uint32_t buff_id) const;
+
     // UIWidget interface
     void render(UIRenderer& renderer) override;
 
@@ -52,6 +70,7 @@ private:
     std::string name_;
     int level_ = 1;
     int gold_ = 0;
+    std::unordered_map<uint32_t, uint16_t> active_buffs_;
 
     // Visual constants
     static constexpr int PADDING = 8;

@@ -302,6 +302,34 @@ TEST_F(PlayerInfoPanelTest, SetBounds_StoresCorrectly) {
     EXPECT_EQ(bounds.height, 72);
 }
 
+TEST_F(PlayerInfoPanelTest, ApplyBuff_AddsAndUpdatesStacks) {
+    panel_.apply_buff(3001, 1);
+    EXPECT_EQ(panel_.get_active_buff_count(), 1u);
+    EXPECT_EQ(panel_.get_buff_stack(3001), 1u);
+
+    panel_.apply_buff(3001, 3);
+    EXPECT_EQ(panel_.get_active_buff_count(), 1u);
+    EXPECT_EQ(panel_.get_buff_stack(3001), 3u);
+
+    panel_.apply_buff(3002, 2);
+    EXPECT_EQ(panel_.get_active_buff_count(), 2u);
+    EXPECT_EQ(panel_.get_buff_stack(3002), 2u);
+}
+
+TEST_F(PlayerInfoPanelTest, RemoveAndClearBuffs_WorkAsExpected) {
+    panel_.apply_buff(4001, 1);
+    panel_.apply_buff(4002, 1);
+    EXPECT_EQ(panel_.get_active_buff_count(), 2u);
+
+    panel_.remove_buff(4001);
+    EXPECT_EQ(panel_.get_active_buff_count(), 1u);
+    EXPECT_EQ(panel_.get_buff_stack(4001), 0u);
+
+    panel_.clear_buffs();
+    EXPECT_EQ(panel_.get_active_buff_count(), 0u);
+    EXPECT_EQ(panel_.get_buff_stack(4002), 0u);
+}
+
 // =============================================================================
 // HudContainer Tests
 // =============================================================================
@@ -556,6 +584,21 @@ TEST_F(HudContainerTest, UpdateFromStats_SetsPlayerInfo) {
     EXPECT_EQ(hud_.get_player_info()->get_name(), "Champion");
     EXPECT_EQ(hud_.get_player_info()->get_level(), 25);
     EXPECT_EQ(hud_.get_player_info()->get_gold(), 50000);
+}
+
+TEST_F(HudContainerTest, BuffOperationsForwardToPlayerInfoPanel) {
+    hud_.apply_buff(9001, 2);
+    EXPECT_EQ(hud_.get_player_info()->get_active_buff_count(), 1u);
+    EXPECT_EQ(hud_.get_player_info()->get_buff_stack(9001), 2u);
+
+    hud_.remove_buff(9001);
+    EXPECT_EQ(hud_.get_player_info()->get_active_buff_count(), 0u);
+
+    hud_.apply_buff(9002, 1);
+    hud_.apply_buff(9003, 1);
+    EXPECT_EQ(hud_.get_player_info()->get_active_buff_count(), 2u);
+    hud_.clear_buffs();
+    EXPECT_EQ(hud_.get_player_info()->get_active_buff_count(), 0u);
 }
 
 TEST_F(HudContainerTest, UpdateFromStats_HpRatioIsCorrect) {

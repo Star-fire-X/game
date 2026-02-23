@@ -67,13 +67,9 @@ void TcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
   if (state_.load() != SessionState::kActive) {
     return;
   }
-  std::vector<uint8_t> buffer;
-  if (protocol_version_ == ProtocolVersion::kV2) {
-    const uint16_t sequence = NextSendSequence();
-    buffer = PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
-  } else {
-    buffer = PacketCodec::Encode(msg_id, payload.data(), payload.size());
-  }
+  const uint16_t sequence = NextSendSequence();
+  std::vector<uint8_t> buffer =
+      PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
   connection_->SendRaw(std::move(buffer));
   monitor::Metrics::Instance().IncrementMessagesSent();
 }
@@ -303,43 +299,12 @@ void TcpSession::HandleBytes(const uint8_t* data, size_t size) {
     }
 
     if (protocol_version_ == ProtocolVersion::kV1) {
-      const size_t header_size = PacketHeader::kSize;
-      if (buffered < header_size) {
-        return;
-      }
-
-      PacketHeader header{};
-      if (!PacketHeader::FromBytes(frame, header_size, &header)) {
-        monitor::Metrics::Instance().IncrementError("decode_header_v1");
-        Close();
-        return;
-      }
-
-      if (header.payload_size > mir2::common::kMaxPayloadSize) {
-        monitor::Metrics::Instance().IncrementError("decode_body_v1");
-        Close();
-        return;
-      }
-
-      const size_t packet_size = header_size + header.payload_size;
-      if (buffered < packet_size) {
-        return;
-      }
-
-      const auto status = PacketCodec::Decode(frame, packet_size, &decode_packet_);
-      if (status != DecodeStatus::kOk) {
-        monitor::Metrics::Instance().IncrementError("decode_body_v1");
-        Close();
-        return;
-      }
-
-      HandlePacket(connection_id_, decode_packet_);
-      if (state_.load() != SessionState::kActive) {
-        return;
-      }
-
-      ConsumeBytes(packet_size);
-      continue;
+      SYSLOG_WARN("Rejecting V1 packet: protocol sunset (session_id={}, {}:{})",
+                  GetSessionId(),
+                  remote_address_,
+                  remote_port_);
+      Close();
+      return;
     }
 
     const size_t header_size = PacketHeaderV2::kSize;

@@ -4,7 +4,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <vector>
 
 #include <entt/entt.hpp>
 
@@ -41,7 +40,7 @@ class GuildSystemTest : public ::testing::Test {
     auto entity = registry_->create();
     auto& identity = registry_->emplace<CharacterIdentityComponent>(entity);
     identity.id = next_id_++;
-    identity.account_id = "acc" + std::to_string(identity.id);
+    identity.account_id = static_cast<AccountId>(100000 + identity.id);
     identity.name = name;
 
     auto& attributes = registry_->emplace<CharacterAttributesComponent>(entity);
@@ -49,15 +48,15 @@ class GuildSystemTest : public ::testing::Test {
     return entity;
   }
 
-  uint32_t CreateGuildWithLeader(entt::entity leader, const std::string& name) {
+  GuildId CreateGuildWithLeader(entt::entity leader, const std::string& name) {
     const int result = guild_system_->CreateGuild(*registry_, leader, name);
     EXPECT_EQ(result, 0);
 
     auto* member = registry_->try_get<GuildMemberComponent>(leader);
-    return member ? member->guild_id : 0u;
+    return member ? member->guild_id : kInvalidGuildId;
   }
 
-  GuildComponent* GetGuild(uint32_t guild_id) {
+  GuildComponent* GetGuild(GuildId guild_id) {
     return guild_mgr_->GetGuild(guild_id, *registry_);
   }
 
@@ -65,7 +64,7 @@ class GuildSystemTest : public ::testing::Test {
   std::unique_ptr<EventBus> event_bus_;
   std::unique_ptr<GuildSystem> guild_system_;
   mir2::game::guild::GuildManager* guild_mgr_ = nullptr;
-  uint32_t next_id_ = 1;
+  CharacterId next_id_ = 1;
 };
 
 TEST_F(GuildSystemTest, CreateGuild_Success) {
@@ -258,16 +257,21 @@ TEST_F(GuildSystemTest, UpdateRankStructure_Success) {
   ASSERT_TRUE(guild_system_->JoinGuild(*registry_, officer, guild_id));
   ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member, guild_id));
 
+  const auto leader_id = registry_->get<CharacterIdentityComponent>(leader).id;
+  const auto officer_id =
+      registry_->get<CharacterIdentityComponent>(officer).id;
+  const auto member_id = registry_->get<CharacterIdentityComponent>(member).id;
+
   std::vector<GuildRank> new_ranks = {
       GuildRank{.rank = GUILD_RANK_LEADER,
                 .rank_name = "Master",
-                .member_names = {"Leader"}},
+                .member_ids = {leader_id}},
       GuildRank{.rank = GUILD_RANK_VICE_LEADER,
                 .rank_name = "Officer",
-                .member_names = {"Officer"}},
+                .member_ids = {officer_id}},
       GuildRank{.rank = GUILD_RANK_MEMBER,
                 .rank_name = "Member",
-                .member_names = {"Member"}}};
+                .member_ids = {member_id}}};
 
   const int result =
       guild_system_->UpdateRankStructure(*registry_, leader, new_ranks);
@@ -336,9 +340,6 @@ TEST_F(GuildSystemTest, UpdateRankStructure_UsesStableMemberIds) {
   EXPECT_THAT(guild->ranks[0].member_ids, testing::ElementsAre(leader_id));
   EXPECT_THAT(guild->ranks[1].member_ids, testing::ElementsAre(officer_id));
   EXPECT_THAT(guild->ranks[2].member_ids, testing::ElementsAre(member_id));
-  EXPECT_THAT(guild->ranks[0].member_names, testing::ElementsAre("Leader"));
-  EXPECT_THAT(guild->ranks[1].member_names, testing::ElementsAre("Officer"));
-  EXPECT_THAT(guild->ranks[2].member_names, testing::ElementsAre("Member"));
 
   auto* leader_comp = registry_->try_get<GuildMemberComponent>(leader);
   auto* officer_comp = registry_->try_get<GuildMemberComponent>(officer);
@@ -405,13 +406,18 @@ TEST_F(GuildSystemTest, UpdateRankStructure_NotLeader) {
   ASSERT_NE(guild_id, 0u);
   ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member, guild_id));
 
+  const auto leader_id =
+      registry_->get<CharacterIdentityComponent>(leader).id;
+  const auto member_id =
+      registry_->get<CharacterIdentityComponent>(member).id;
+
   std::vector<GuildRank> new_ranks = {
       GuildRank{.rank = GUILD_RANK_LEADER,
                 .rank_name = "Leader",
-                .member_names = {"Leader"}},
+                .member_ids = {leader_id}},
       GuildRank{.rank = GUILD_RANK_MEMBER,
                 .rank_name = "Member",
-                .member_names = {"Member"}}};
+                .member_ids = {member_id}}};
 
   const int result =
       guild_system_->UpdateRankStructure(*registry_, member, new_ranks);
@@ -433,21 +439,28 @@ TEST_F(GuildSystemTest, SetMemberRank_Success) {
   ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member1, guild_id));
   ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member2, guild_id));
 
+  const auto leader_id =
+      registry_->get<CharacterIdentityComponent>(leader).id;
+  const auto member1_id =
+      registry_->get<CharacterIdentityComponent>(member1).id;
+  const auto member2_id =
+      registry_->get<CharacterIdentityComponent>(member2).id;
+
   std::vector<GuildRank> new_ranks = {
       GuildRank{.rank = GUILD_RANK_LEADER,
                 .rank_name = "Master",
-                .member_names = {"Leader"}},
+                .member_ids = {leader_id}},
       GuildRank{.rank = GUILD_RANK_VICE_LEADER,
                 .rank_name = "Officer",
-                .member_names = {"Member2"}},
+                .member_ids = {member2_id}},
       GuildRank{.rank = GUILD_RANK_MEMBER,
                 .rank_name = "Member",
-                .member_names = {"Member1"}}};
+                .member_ids = {member1_id}}};
 
   ASSERT_EQ(
       guild_system_->UpdateRankStructure(*registry_, leader, new_ranks), 0);
 
-  EXPECT_TRUE(guild_system_->SetMemberRank(*registry_, leader, "Member1",
+  EXPECT_TRUE(guild_system_->SetMemberRank(*registry_, leader, member1_id,
                                            GUILD_RANK_VICE_LEADER));
 
   auto* member_comp = registry_->try_get<GuildMemberComponent>(member1);
@@ -468,10 +481,10 @@ TEST_F(GuildSystemTest, SetMemberRank_Success) {
   }
   ASSERT_NE(vice_rank, nullptr);
   ASSERT_NE(member_rank, nullptr);
-  EXPECT_THAT(vice_rank->member_names, testing::Contains("Member1"));
-  EXPECT_THAT(vice_rank->member_names, testing::Contains("Member2"));
-  EXPECT_THAT(member_rank->member_names,
-              testing::Not(testing::Contains("Member1")));
+  EXPECT_THAT(vice_rank->member_ids, testing::Contains(member1_id));
+  EXPECT_THAT(vice_rank->member_ids, testing::Contains(member2_id));
+  EXPECT_THAT(member_rank->member_ids,
+              testing::Not(testing::Contains(member1_id)));
 }
 
 TEST_F(GuildSystemTest, DeclareWar_Success) {
@@ -782,7 +795,7 @@ TEST_F(GuildSystemTest, StartTeamFight_Success) {
   ASSERT_NE(guild, nullptr);
   guild->in_team_fight = false;
   guild->match_point = 7;
-  guild->fight_members.push_back(leader);
+  EXPECT_TRUE(guild->AddFightMember(leader));
 
   EXPECT_TRUE(guild_system_->StartTeamFight(*registry_, leader));
   EXPECT_TRUE(guild->in_team_fight);
@@ -805,6 +818,24 @@ TEST_F(GuildSystemTest, JoinTeamFight_Success) {
   ASSERT_NE(guild, nullptr);
   ASSERT_EQ(guild->fight_members.size(), 1u);
   EXPECT_EQ(guild->fight_members.front(), member);
+}
+
+TEST_F(GuildSystemTest, JoinTeamFight_DuplicateJoinIgnored) {
+  const int initial_gold = static_cast<int>(GUILD_CREATE_FEE) + 500;
+  auto leader = CreatePlayer("Leader", initial_gold);
+  auto member = CreatePlayer("Member", 0);
+  const uint32_t guild_id = CreateGuildWithLeader(leader, "TeamFightNoDup");
+  ASSERT_NE(guild_id, 0u);
+  ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member, guild_id));
+
+  ASSERT_TRUE(guild_system_->StartTeamFight(*registry_, leader));
+  EXPECT_TRUE(guild_system_->JoinTeamFight(*registry_, member));
+  EXPECT_TRUE(guild_system_->JoinTeamFight(*registry_, member));
+
+  auto* guild = GetGuild(guild_id);
+  ASSERT_NE(guild, nullptr);
+  EXPECT_EQ(guild->fight_members.size(), 1u);
+  EXPECT_TRUE(guild->IsFightMember(member));
 }
 
 TEST_F(GuildSystemTest, RecordTeamFightKill_Success) {

@@ -31,7 +31,8 @@ class ChatServiceTest : public ::testing::Test {
 // 测试组队聊天 - 无队伍返回 false
 TEST_F(ChatServiceTest, TeamChatFailsWithoutParty) {
   auto player = registry_->create();
-  registry_->emplace<ecs::CharacterIdentityComponent>(player, 1001u, "acc1", "TestPlayer");
+  registry_->emplace<ecs::CharacterIdentityComponent>(
+      player, 1001u, uint64_t{5001}, "TestPlayer");
 
   // 没有 PartyMemberComponent，应该无法发送组队聊天
   auto* member = registry_->try_get<ecs::PartyMemberComponent>(player);
@@ -49,13 +50,15 @@ TEST_F(ChatServiceTest, TeamChatWithParty) {
   auto player1 = registry_->create();
   auto player2 = registry_->create();
 
-  registry_->emplace<ecs::CharacterIdentityComponent>(player1, 1001u, "acc1", "Player1");
-  registry_->emplace<ecs::CharacterIdentityComponent>(player2, 1002u, "acc2", "Player2");
+  registry_->emplace<ecs::CharacterIdentityComponent>(
+      player1, 1001u, uint64_t{5001}, "Player1");
+  registry_->emplace<ecs::CharacterIdentityComponent>(
+      player2, 1002u, uint64_t{5002}, "Player2");
   registry_->emplace<ecs::PartyMemberComponent>(player1, 100u);
   registry_->emplace<ecs::PartyMemberComponent>(player2, 100u);
 
-  party.members.push_back(player1);
-  party.members.push_back(player2);
+  EXPECT_TRUE(party.AddMember(player1));
+  EXPECT_TRUE(party.AddMember(player2));
   party.leader = player1;
 
   // 验证队伍设置
@@ -67,7 +70,8 @@ TEST_F(ChatServiceTest, TeamChatWithParty) {
 // 测试行会聊天 - 无行会返回 false
 TEST_F(ChatServiceTest, GuildChatFailsWithoutGuild) {
   auto player = registry_->create();
-  registry_->emplace<ecs::CharacterIdentityComponent>(player, 1001u, "acc1", "TestPlayer");
+  registry_->emplace<ecs::CharacterIdentityComponent>(
+      player, 1001u, uint64_t{5001}, "TestPlayer");
 
   auto* member = registry_->try_get<ecs::GuildMemberComponent>(player);
   EXPECT_EQ(member, nullptr);
@@ -85,13 +89,15 @@ TEST_F(ChatServiceTest, GuildChatWithGuild) {
   auto player1 = registry_->create();
   auto player2 = registry_->create();
 
-  registry_->emplace<ecs::CharacterIdentityComponent>(player1, 2001u, "acc1", "GuildMember1");
-  registry_->emplace<ecs::CharacterIdentityComponent>(player2, 2002u, "acc2", "GuildMember2");
+  registry_->emplace<ecs::CharacterIdentityComponent>(
+      player1, 2001u, uint64_t{6001}, "GuildMember1");
+  registry_->emplace<ecs::CharacterIdentityComponent>(
+      player2, 2002u, uint64_t{6002}, "GuildMember2");
   registry_->emplace<ecs::GuildMemberComponent>(player1, 200u, 0);  // 会长
   registry_->emplace<ecs::GuildMemberComponent>(player2, 200u, 2);  // 成员
 
-  guild.members.push_back(player1);
-  guild.members.push_back(player2);
+  EXPECT_TRUE(guild.AddMember(player1));
+  EXPECT_TRUE(guild.AddMember(player2));
   guild.leader = player1;
 
   EXPECT_EQ(guild.members.size(), 2);

@@ -59,7 +59,8 @@ class TradeSystem : public System {
     // 确认交易
     static bool ConfirmTrade(entt::registry& registry,
                              entt::entity trader,
-                             EventBus* event_bus = nullptr);
+                             EventBus* event_bus = nullptr,
+                             bool auto_execute = true);
 
     // 执行交易（双方确认后）
     static bool ExecuteTrade(entt::registry& registry,

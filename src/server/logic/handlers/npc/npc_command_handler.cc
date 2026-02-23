@@ -1,5 +1,6 @@
 #include "logic/handlers/npc/npc_command_handler.h"
 
+#include <exception>
 #include <limits>
 #include <string>
 #include <utility>
@@ -161,219 +162,296 @@ Task<void> NpcCommandHandler::HandleMessage(HandlerContext ctx,
                                             uint16_t msg_id,
                                             const uint8_t* payload,
                                             size_t payload_size) {
-  switch (msg_id) {
-    case static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractReq):
-      co_await HandleNpcInteract(std::move(ctx), payload, payload_size);
-      break;
-    case static_cast<uint16_t>(mir2::common::MsgId::kNpcMenuSelect):
-      co_await HandleNpcMenuSelect(std::move(ctx), payload, payload_size);
-      break;
-    default:
-      SYSLOG_WARN("NpcCommandHandler unknown msg_id={} (client_id={})",
-                  msg_id, ctx.client_id);
-      break;
+  bool send_fallback = false;
+  try {
+    switch (msg_id) {
+      case static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractReq):
+        co_await HandleNpcInteract(ctx, payload, payload_size);
+        break;
+      case static_cast<uint16_t>(mir2::common::MsgId::kNpcMenuSelect):
+        co_await HandleNpcMenuSelect(ctx, payload, payload_size);
+        break;
+      default:
+        SYSLOG_WARN("NpcCommandHandler unknown msg_id={} (client_id={})",
+                    msg_id, ctx.client_id);
+        break;
+    }
+    co_return;
+  } catch (const std::exception& ex) {
+    SYSLOG_ERROR("NpcCommandHandler exception client_id={} msg_id={} error={}",
+                 ctx.client_id, msg_id, ex.what());
+    send_fallback = true;
+  } catch (...) {
+    SYSLOG_ERROR("NpcCommandHandler exception client_id={} msg_id={} error=unknown",
+                 ctx.client_id, msg_id);
+    send_fallback = true;
   }
+
+  if (send_fallback) {
+    try {
+      co_await SendNpcInteractResponse(ctx, 0, 1, "", 0);
+    } catch (const std::exception& send_ex) {
+      SYSLOG_ERROR("NpcCommandHandler fallback send failed client_id={} msg_id={} error={}",
+                   ctx.client_id, msg_id, send_ex.what());
+    } catch (...) {
+      SYSLOG_ERROR("NpcCommandHandler fallback send failed client_id={} msg_id={} error=unknown",
+                   ctx.client_id, msg_id);
+    }
+  }
+  co_return;
 }
 
 Task<void> NpcCommandHandler::HandleNpcInteract(HandlerContext ctx,
                                                 const uint8_t* payload,
                                                 size_t payload_size) {
-  nlohmann::json j;
-  if (!ParseJsonObject(payload, payload_size, &j)) {
-    SYSLOG_WARN("NpcCommandHandler interact parse failed (client_id={})", ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
-  uint32_t version = 0;
-  if (!ReadUInt32(j, "version", &version) ||
-      version != mir2::common::kNpcCodecVersion) {
-    SYSLOG_WARN("NpcCommandHandler interact invalid version (client_id={})",
-                ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
   uint64_t npc_id = 0;
-  uint64_t player_id = 0;
-  if (!ReadUInt64(j, "npc_id", &npc_id) ||
-      !ReadUInt64(j, "player_id", &player_id) ||
-      npc_id == 0 || player_id == 0) {
-    SYSLOG_WARN("NpcCommandHandler interact missing ids (client_id={})", ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+  bool send_failure_rsp = false;
+  try {
+    nlohmann::json j;
+    if (!ParseJsonObject(payload, payload_size, &j)) {
+      SYSLOG_WARN("NpcCommandHandler interact parse failed (client_id={})", ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    uint32_t version = 0;
+    if (!ReadUInt32(j, "version", &version) ||
+        version != mir2::common::kNpcCodecVersion) {
+      SYSLOG_WARN("NpcCommandHandler interact invalid version (client_id={})",
+                  ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    uint64_t player_id = 0;
+    if (!ReadUInt64(j, "npc_id", &npc_id) ||
+        !ReadUInt64(j, "player_id", &player_id) ||
+        npc_id == 0 || player_id == 0) {
+      SYSLOG_WARN("NpcCommandHandler interact missing ids (client_id={})", ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    PlayerContext player_ctx;
+    if (!TryResolvePlayerContext(ctx, registry_, &player_ctx)) {
+      SYSLOG_WARN("NpcCommandHandler interact missing player context (client_id={})",
+                  ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    if (player_id != player_ctx.player_id) {
+      SYSLOG_WARN("NpcCommandHandler interact player mismatch (client_id={}, claimed={}, actual={})",
+                  ctx.client_id,
+                  player_id,
+                  player_ctx.player_id);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    auto npc_data_opt = game::npc::NpcManager::Instance().GetNpcData(npc_id);
+    if (!npc_data_opt) {
+      SYSLOG_WARN("NpcCommandHandler interact npc missing (client_id={}, npc_id={})",
+                  ctx.client_id, npc_id);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    const auto& npc_data = *npc_data_opt;
+    if (!npc_data.enabled) {
+      SYSLOG_WARN("NpcCommandHandler interact npc disabled (client_id={}, npc_id={})",
+                  ctx.client_id,
+                  npc_id);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    if (!ValidateNpcReachability(player_ctx, npc_data)) {
+      SYSLOG_WARN(
+          "NpcCommandHandler interact out-of-range or map mismatch (client_id={}, player_id={}, "
+          "player_map={}, player_pos=({}, {}), npc_id={}, npc_map={}, npc_pos=({}, {}))",
+          ctx.client_id,
+          player_ctx.player_id,
+          player_ctx.map_id,
+          player_ctx.position.x,
+          player_ctx.position.y,
+          npc_id,
+          npc_data.map_id,
+          npc_data.x,
+          npc_data.y);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    auto rsp = BuildNpcInteractRsp(npc_id, 0, npc_data.name,
+                                   static_cast<uint8_t>(npc_data.type));
     co_await response_sender_.SendAsync(
         ctx.client_id,
         static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
         std::move(rsp));
+
+    SYSLOG_DEBUG("NpcCommandHandler interact client_id={} npc_id={}",
+                 ctx.client_id, npc_id);
     co_return;
+  } catch (const std::exception& ex) {
+    SYSLOG_ERROR("NpcCommandHandler interact exception client_id={} npc_id={} error={}",
+                 ctx.client_id, npc_id, ex.what());
+    send_failure_rsp = true;
+  } catch (...) {
+    SYSLOG_ERROR("NpcCommandHandler interact exception client_id={} npc_id={} error=unknown",
+                 ctx.client_id, npc_id);
+    send_failure_rsp = true;
   }
 
-  PlayerContext player_ctx;
-  if (!TryResolvePlayerContext(ctx, registry_, &player_ctx)) {
-    SYSLOG_WARN("NpcCommandHandler interact missing player context (client_id={})",
-                ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
+  if (send_failure_rsp) {
+    try {
+      co_await SendNpcInteractResponse(ctx, npc_id, 1, "", 0);
+    } catch (const std::exception& send_ex) {
+      SYSLOG_ERROR("NpcCommandHandler interact fallback send failed client_id={} npc_id={} error={}",
+                   ctx.client_id, npc_id, send_ex.what());
+    } catch (...) {
+      SYSLOG_ERROR(
+          "NpcCommandHandler interact fallback send failed client_id={} npc_id={} error=unknown",
+          ctx.client_id, npc_id);
+    }
   }
-
-  if (player_id != player_ctx.player_id) {
-    SYSLOG_WARN("NpcCommandHandler interact player mismatch (client_id={}, claimed={}, actual={})",
-                ctx.client_id,
-                player_id,
-                player_ctx.player_id);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
-  auto npc_data_opt = game::npc::NpcManager::Instance().GetNpcData(npc_id);
-  if (!npc_data_opt) {
-    SYSLOG_WARN("NpcCommandHandler interact npc missing (client_id={}, npc_id={})",
-                ctx.client_id, npc_id);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
-  const auto& npc_data = *npc_data_opt;
-  if (!npc_data.enabled) {
-    SYSLOG_WARN("NpcCommandHandler interact npc disabled (client_id={}, npc_id={})",
-                ctx.client_id,
-                npc_id);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
-  if (!ValidateNpcReachability(player_ctx, npc_data)) {
-    SYSLOG_WARN(
-        "NpcCommandHandler interact out-of-range or map mismatch (client_id={}, player_id={}, "
-        "player_map={}, player_pos=({}, {}), npc_id={}, npc_map={}, npc_pos=({}, {}))",
-        ctx.client_id,
-        player_ctx.player_id,
-        player_ctx.map_id,
-        player_ctx.position.x,
-        player_ctx.position.y,
-        npc_id,
-        npc_data.map_id,
-        npc_data.x,
-        npc_data.y);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
-  auto rsp = BuildNpcInteractRsp(npc_id, 0, npc_data.name,
-                                 static_cast<uint8_t>(npc_data.type));
-  co_await response_sender_.SendAsync(
-      ctx.client_id,
-      static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-      std::move(rsp));
-
-  SYSLOG_DEBUG("NpcCommandHandler interact client_id={} npc_id={}",
-               ctx.client_id, npc_id);
+  co_return;
 }
 
 Task<void> NpcCommandHandler::HandleNpcMenuSelect(HandlerContext ctx,
                                                   const uint8_t* payload,
                                                   size_t payload_size) {
-  nlohmann::json j;
-  if (!ParseJsonObject(payload, payload_size, &j)) {
-    SYSLOG_WARN("NpcCommandHandler menu select parse failed (client_id={})", ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
-  uint32_t version = 0;
-  if (!ReadUInt32(j, "version", &version) ||
-      version != mir2::common::kNpcCodecVersion) {
-    SYSLOG_WARN("NpcCommandHandler menu select invalid version (client_id={})",
-                ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
   uint64_t npc_id = 0;
-  uint8_t option_index = 0;
-  if (!ReadUInt64(j, "npc_id", &npc_id) ||
-      !ReadUInt8(j, "option_index", &option_index) ||
-      npc_id == 0) {
-    SYSLOG_WARN("NpcCommandHandler menu select invalid payload (client_id={})",
-                ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
+  bool send_failure_rsp = false;
+  try {
+    nlohmann::json j;
+    if (!ParseJsonObject(payload, payload_size, &j)) {
+      SYSLOG_WARN("NpcCommandHandler menu select parse failed (client_id={})", ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    uint32_t version = 0;
+    if (!ReadUInt32(j, "version", &version) ||
+        version != mir2::common::kNpcCodecVersion) {
+      SYSLOG_WARN("NpcCommandHandler menu select invalid version (client_id={})",
+                  ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(0, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    uint8_t option_index = 0;
+    if (!ReadUInt64(j, "npc_id", &npc_id) ||
+        !ReadUInt8(j, "option_index", &option_index) ||
+        npc_id == 0) {
+      SYSLOG_WARN("NpcCommandHandler menu select invalid payload (client_id={})",
+                  ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    PlayerContext player_ctx;
+    if (!TryResolvePlayerContext(ctx, registry_, &player_ctx)) {
+      SYSLOG_WARN("NpcCommandHandler menu select missing player context (client_id={})",
+                  ctx.client_id);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    const auto npc_data_opt = game::npc::NpcManager::Instance().GetNpcData(npc_id);
+    if (!npc_data_opt || !npc_data_opt->enabled ||
+        !ValidateNpcReachability(player_ctx, *npc_data_opt)) {
+      SYSLOG_WARN(
+          "NpcCommandHandler menu select rejected (client_id={}, player_id={}, npc_id={}, "
+          "player_map={}, player_pos=({}, {}))",
+          ctx.client_id,
+          player_ctx.player_id,
+          npc_id,
+          player_ctx.map_id,
+          player_ctx.position.x,
+          player_ctx.position.y);
+      auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
+      co_await response_sender_.SendAsync(
+          ctx.client_id,
+          static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
+          std::move(rsp));
+      co_return;
+    }
+
+    SYSLOG_DEBUG("NpcCommandHandler menu select client_id={} npc_id={} option={}",
+                 ctx.client_id, npc_id, static_cast<int>(option_index));
     co_return;
+  } catch (const std::exception& ex) {
+    SYSLOG_ERROR("NpcCommandHandler menu select exception client_id={} npc_id={} error={}",
+                 ctx.client_id, npc_id, ex.what());
+    send_failure_rsp = true;
+  } catch (...) {
+    SYSLOG_ERROR("NpcCommandHandler menu select exception client_id={} npc_id={} error=unknown",
+                 ctx.client_id, npc_id);
+    send_failure_rsp = true;
   }
 
-  PlayerContext player_ctx;
-  if (!TryResolvePlayerContext(ctx, registry_, &player_ctx)) {
-    SYSLOG_WARN("NpcCommandHandler menu select missing player context (client_id={})",
-                ctx.client_id);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
+  if (send_failure_rsp) {
+    try {
+      co_await SendNpcInteractResponse(ctx, npc_id, 1, "", 0);
+    } catch (const std::exception& send_ex) {
+      SYSLOG_ERROR(
+          "NpcCommandHandler menu select fallback send failed client_id={} npc_id={} error={}",
+          ctx.client_id, npc_id, send_ex.what());
+    } catch (...) {
+      SYSLOG_ERROR(
+          "NpcCommandHandler menu select fallback send failed client_id={} npc_id={} error=unknown",
+          ctx.client_id, npc_id);
+    }
   }
-
-  const auto npc_data_opt = game::npc::NpcManager::Instance().GetNpcData(npc_id);
-  if (!npc_data_opt || !npc_data_opt->enabled ||
-      !ValidateNpcReachability(player_ctx, *npc_data_opt)) {
-    SYSLOG_WARN(
-        "NpcCommandHandler menu select rejected (client_id={}, player_id={}, npc_id={}, "
-        "player_map={}, player_pos=({}, {}))",
-        ctx.client_id,
-        player_ctx.player_id,
-        npc_id,
-        player_ctx.map_id,
-        player_ctx.position.x,
-        player_ctx.position.y);
-    auto rsp = BuildNpcInteractRsp(npc_id, 1, "", 0);
-    co_await response_sender_.SendAsync(
-        ctx.client_id,
-        static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
-        std::move(rsp));
-    co_return;
-  }
-
-  SYSLOG_DEBUG("NpcCommandHandler menu select client_id={} npc_id={} option={}",
-               ctx.client_id, npc_id, static_cast<int>(option_index));
   co_return;
 }
 

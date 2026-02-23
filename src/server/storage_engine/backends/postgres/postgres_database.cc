@@ -275,7 +275,7 @@ mir2::common::DbResult<mir2::common::CharacterData> PostgresDatabase::load_chara
 }
 
 mir2::common::DbResult<std::vector<mir2::common::CharacterData>> PostgresDatabase::load_characters_by_account(
-    const std::string& account_id) {
+    uint64_t account_id) {
     static_cast<void>(account_id);
     return mir2::common::DbResult<std::vector<mir2::common::CharacterData>>::error(
         mir2::common::ErrorCode::NOT_IMPLEMENTED, "PostgreSQL load_characters_by_account not yet implemented");

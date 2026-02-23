@@ -15,6 +15,8 @@
 
 namespace mir2::ecs::inventory {
 
+namespace compat {
+
 /// JSON → 实体化运行时组件 + 快照同步
 void LoadInventoryFromJson(entt::registry& registry,
                            entt::entity character,
@@ -28,6 +30,8 @@ SaveInventoryToJson(entt::registry& registry, entt::entity character);
 
 /// 批量迁移所有角色
 void MigrateAllCharacters(entt::registry& registry);
+
+}  // namespace compat
 
 }  // namespace mir2::ecs::inventory
 

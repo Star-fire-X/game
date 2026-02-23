@@ -87,7 +87,7 @@ Task<PrewarmResult> PrewarmManager::Prewarm(const std::vector<PrewarmEntry>& ent
     std::atomic<uint32_t> failed{0};
     std::vector<Task<void>> batch_tasks;
     batch_tasks.reserve(count);
-    std::vector<std::pair<uint64_t, uint32_t>> batch_entries;
+    std::vector<std::pair<uint64_t, ecs::CharacterId>> batch_entries;
     batch_entries.reserve(count);
 
     for (size_t i = 0; i < count; ++i) {
@@ -123,7 +123,7 @@ Task<PrewarmResult> PrewarmManager::Prewarm(const std::vector<PrewarmEntry>& ent
           }
 
           uint64_t client_id = 0;
-          uint32_t player_id = 0;
+          ecs::CharacterId player_id = ecs::kInvalidCharacterId;
           if (task_index < batch_entries.size()) {
             client_id = batch_entries[task_index].first;
             player_id = batch_entries[task_index].second;

@@ -42,6 +42,32 @@ void PlayerInfoPanel::set_player_info(const std::string& name, int level, int go
     gold_ = gold;
 }
 
+void PlayerInfoPanel::apply_buff(uint32_t buff_id, uint16_t stack_count) {
+    if (buff_id == 0) {
+        return;
+    }
+    active_buffs_[buff_id] = stack_count == 0 ? 1 : stack_count;
+}
+
+void PlayerInfoPanel::remove_buff(uint32_t buff_id) {
+    if (buff_id == 0) {
+        return;
+    }
+    active_buffs_.erase(buff_id);
+}
+
+void PlayerInfoPanel::clear_buffs() {
+    active_buffs_.clear();
+}
+
+uint16_t PlayerInfoPanel::get_buff_stack(uint32_t buff_id) const {
+    const auto it = active_buffs_.find(buff_id);
+    if (it == active_buffs_.end()) {
+        return 0;
+    }
+    return it->second;
+}
+
 void PlayerInfoPanel::render(UIRenderer& renderer) {
     if (!is_visible()) {
         return;
@@ -68,7 +94,8 @@ void PlayerInfoPanel::render(UIRenderer& renderer) {
     y_cursor += text_h + LINE_SPACING;
 
     // Row 3: Gold amount.
-    const std::string gold_text = "Gold: " + std::to_string(gold_);
+    const std::string gold_text = "Gold: " + std::to_string(gold_) +
+                                  " Buffs: " + std::to_string(active_buffs_.size());
     renderer.draw_text(gold_text, text_x + 1, y_cursor + 1, kTextShadow);
     renderer.draw_text(gold_text, text_x, y_cursor, kGoldColor);
 }

@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 #include "logic/handler_context.h"
 #include "logic/task.h"
@@ -30,10 +31,13 @@ class ClientRegistry;
 
 class CharacterHandler {
  public:
+  using OnLoginComplete = std::function<void(uint64_t player_id)>;
+
   CharacterHandler(ResponseSender& response_sender,
                    mir2::ecs::CharacterEntityManager& entity_manager,
                    RoleStore& role_store,
-                   ClientRegistry& client_registry);
+                   ClientRegistry& client_registry,
+                   OnLoginComplete on_login_complete = {});
 
   Task<void> HandleMessage(HandlerContext ctx, const uint8_t* payload, size_t payload_size);
 
@@ -47,6 +51,7 @@ class CharacterHandler {
   mir2::ecs::CharacterEntityManager& entity_manager_;
   RoleStore& role_store_;
   ClientRegistry& client_registry_;
+  OnLoginComplete on_login_complete_;
 };
 
 }  // namespace mir2::logic

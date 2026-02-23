@@ -4,6 +4,7 @@
  *
  * Decodes FlatBuffers payloads for inventory updates, use/drop/equip/unequip
  * responses and forwards the results to caller-provided callbacks.
+ * Also handles ground item pickup requests and responses.
  */
 
 #ifndef LEGEND2_CLIENT_HANDLERS_ITEM_HANDLER_H
@@ -38,6 +39,7 @@ struct ClientInventoryItem {
  * Responsibilities:
  * - Register item/inventory handlers with NetworkManager.
  * - Parse FlatBuffers payloads and forward results to callbacks.
+ * - Send pickup item requests and handle pickup responses.
  *
  * Threading: expected to be used on the main thread; handlers are invoked from
  * NetworkManager::update() context.
@@ -85,6 +87,11 @@ public:
                            uint32_t item_id)>
             on_unequip_response;
 
+        /// Called when the server confirms or rejects a pickup request.
+        std::function<void(mir2::proto::ErrorCode code,
+                           uint32_t item_id)>
+            on_pickup_item_response;
+
         std::function<void(const std::string& error)> on_parse_error;
     };
 
@@ -106,6 +113,27 @@ public:
     void HandleDropItemResponse(const NetworkPacket& packet);
     void HandleEquipResponse(const NetworkPacket& packet);
     void HandleUnequipResponse(const NetworkPacket& packet);
+    void HandlePickupItemResponse(const NetworkPacket& packet);
+
+    /// Build and send a PickupItemReq to the server.
+    /// @param manager Network manager to send through.
+    /// @param item_entity_id The entity ID of the ground item to pick up.
+    static void SendPickupRequest(mir2::client::INetworkManager& manager,
+                                  uint64_t item_entity_id);
+
+    /// Build and send an EquipReq to the server.
+    /// @param manager Network manager to send through.
+    /// @param inventory_slot Inventory slot index.
+    /// @param item_id Item template ID for validation.
+    static void SendEquipRequest(mir2::client::INetworkManager& manager,
+                                 uint16_t inventory_slot,
+                                 uint32_t item_id);
+
+    /// Build and send an UnequipReq to the server.
+    /// @param manager Network manager to send through.
+    /// @param equip_slot Equipment slot index.
+    static void SendUnequipRequest(mir2::client::INetworkManager& manager,
+                                   uint16_t equip_slot);
 
 private:
     Callbacks callbacks_;

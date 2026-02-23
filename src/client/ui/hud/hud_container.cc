@@ -86,6 +86,24 @@ void HudContainer::set_screen_size(int width, int height) {
     recalculate_layout();
 }
 
+void HudContainer::apply_buff(uint32_t buff_id, uint16_t stack_count) {
+    if (player_info_) {
+        player_info_->apply_buff(buff_id, stack_count);
+    }
+}
+
+void HudContainer::remove_buff(uint32_t buff_id) {
+    if (player_info_) {
+        player_info_->remove_buff(buff_id);
+    }
+}
+
+void HudContainer::clear_buffs() {
+    if (player_info_) {
+        player_info_->clear_buffs();
+    }
+}
+
 void HudContainer::recalculate_layout() {
     // The container itself spans the full screen (non-interactive overlay).
     set_bounds({0, 0, screen_width_, screen_height_});

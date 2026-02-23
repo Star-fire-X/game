@@ -5,14 +5,16 @@
 
 #include "game/map/gate_manager.h"
 
+#include <cstdlib>
 #include <filesystem>
-#include <iostream>
 #include <limits>
 #include <optional>
 #include <string_view>
 #include <system_error>
 
 #include <yaml-cpp/yaml.h>
+
+#include "log/logger.h"
 
 namespace mir2::game::map {
 
@@ -60,9 +62,20 @@ std::optional<std::filesystem::path> ResolveAllowedConfigBase() {
     return std::nullopt;
   }
 
+  std::filesystem::path configured_base;
+  if (const char* env_base = std::getenv("LEGEND2_CONFIG_BASE_PATH");
+      env_base != nullptr && env_base[0] != '\0') {
+    configured_base = std::filesystem::path(env_base);
+    if (!configured_base.is_absolute()) {
+      configured_base = (cwd / configured_base).lexically_normal();
+    }
+  } else {
+    configured_base = cwd / "config";
+  }
+
   std::error_code canonical_ec;
   const std::filesystem::path canonical_base =
-      std::filesystem::canonical(cwd / "config", canonical_ec);
+      std::filesystem::canonical(configured_base, canonical_ec);
   if (canonical_ec) {
     return std::nullopt;
   }
@@ -238,7 +251,7 @@ void GateManager::LoadFromConfig(const std::string& config_path) {
       AddGate(gate);
     }
   } catch (const std::exception& ex) {
-    std::cerr << "Gate config load failed: " << ex.what() << std::endl;
+    SYSLOG_ERROR("Gate config load failed: {}", ex.what());
   }
 }
 

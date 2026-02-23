@@ -266,6 +266,26 @@ Task<void> RunAsyncCancelledByStopTokenTask(CoroutineExecutor* executor,
   co_return;
 }
 
+Task<void> RunAsyncCancelledByStopTokenWithoutTimeoutTask(
+    CoroutineExecutor* executor,
+    std::stop_token stop_token,
+    std::promise<std::string>* result_promise) {
+  using namespace std::chrono_literals;
+
+  try {
+    co_await executor->Async([]() -> int {
+      std::this_thread::sleep_for(300ms);
+      return 1;
+    }, stop_token);
+    result_promise->set_value("no_cancel");
+  } catch (const CancelledError&) {
+    result_promise->set_value("cancelled");
+  } catch (const std::exception&) {
+    result_promise->set_value("other");
+  }
+  co_return;
+}
+
 Task<void> RunSleepCancelledByStopTokenTask(CoroutineExecutor* executor,
                                             std::stop_token stop_token,
                                             std::promise<std::string>* result_promise) {
@@ -350,6 +370,76 @@ Task<void> RunWhenAllOverLimitProbeTask(CoroutineExecutor* executor,
         }
       });
   done_promise->set_value();
+  co_return;
+}
+
+Task<void> RunWhenAllFailFastThrowTask(CoroutineExecutor* executor) {
+  using namespace std::chrono_literals;
+  co_await executor->SleepFor(20ms);
+  throw std::runtime_error("whenall_fail_fast");
+}
+
+Task<void> RunWhenAllCancellableSleepTask(CoroutineExecutor* executor,
+                                          std::atomic<int>* cancelled_counter,
+                                          std::atomic<int>* completed_counter) {
+  using namespace std::chrono_literals;
+  const std::stop_token stop_token = co_await CurrentStopToken();
+  try {
+    co_await executor->SleepFor(5s, stop_token);
+    completed_counter->fetch_add(1, std::memory_order_relaxed);
+  } catch (const CancelledError&) {
+    cancelled_counter->fetch_add(1, std::memory_order_relaxed);
+  }
+  co_return;
+}
+
+Task<void> RunWhenAllFailFastProbeTask(CoroutineExecutor* executor,
+                                       std::atomic<int>* cancelled_counter,
+                                       std::atomic<int>* completed_counter,
+                                       std::promise<std::string>* result_promise) {
+  std::vector<Task<void>> tasks;
+  tasks.reserve(3);
+  tasks.push_back(RunWhenAllFailFastThrowTask(executor));
+  tasks.push_back(RunWhenAllCancellableSleepTask(
+      executor, cancelled_counter, completed_counter));
+  tasks.push_back(RunWhenAllCancellableSleepTask(
+      executor, cancelled_counter, completed_counter));
+
+  try {
+    co_await executor->WhenAll(
+        std::move(tasks),
+        {},
+        {.fail_fast = true});
+    result_promise->set_value("no_exception");
+  } catch (const std::exception& ex) {
+    result_promise->set_value(ex.what());
+  }
+  co_return;
+}
+
+Task<void> RunWhenAllExternalCancelProbeTask(CoroutineExecutor* executor,
+                                             std::stop_token stop_token,
+                                             std::atomic<int>* cancelled_counter,
+                                             std::atomic<int>* completed_counter,
+                                             std::promise<std::string>* result_promise) {
+  std::vector<Task<void>> tasks;
+  tasks.reserve(2);
+  tasks.push_back(RunWhenAllCancellableSleepTask(
+      executor, cancelled_counter, completed_counter));
+  tasks.push_back(RunWhenAllCancellableSleepTask(
+      executor, cancelled_counter, completed_counter));
+
+  try {
+    co_await executor->WhenAll(
+        std::move(tasks),
+        {},
+        {.fail_fast = false, .stop_token = stop_token});
+    result_promise->set_value("no_cancel");
+  } catch (const CancelledError&) {
+    result_promise->set_value("cancelled");
+  } catch (const std::exception&) {
+    result_promise->set_value("other");
+  }
   co_return;
 }
 
@@ -531,6 +621,37 @@ TEST_F(CoroutineExecutorTest, AsyncWithTimeoutStopTokenCancelsAwaiterEarly) {
   io_thread.join();
 }
 
+TEST_F(CoroutineExecutorTest, AsyncStopTokenCancelsAwaiterEarlyWithoutTimeout) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::stop_source stop_source;
+  std::promise<std::string> result_promise;
+  auto result_future = result_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunAsyncCancelledByStopTokenWithoutTimeoutTask(
+      &executor, stop_source.get_token(), &result_promise)));
+
+  std::this_thread::sleep_for(20ms);
+  (void)stop_source.request_stop();
+
+  ASSERT_EQ(result_future.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  EXPECT_EQ(result_future.get(), "cancelled");
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+  EXPECT_EQ(executor.TimeoutBackgroundInflightCount(), 0);
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
 TEST_F(CoroutineExecutorTest, SleepForStopTokenCancelsAwaiterEarly) {
   using namespace std::chrono_literals;
 
@@ -626,6 +747,78 @@ TEST_F(CoroutineExecutorTest, WhenAllSpawnRejectUsesCallbackWithoutThrowing) {
       RunWhenAllOverLimitProbeTask(&executor, &over_limit_rejected, &done_promise)));
   ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
   EXPECT_EQ(over_limit_rejected.load(std::memory_order_relaxed), 1);
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
+TEST_F(CoroutineExecutorTest, WhenAllFailFastReturnsEarlyAndCancelsOtherBranches) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::atomic<int> cancelled_counter{0};
+  std::atomic<int> completed_counter{0};
+  std::promise<std::string> result_promise;
+  auto result_future = result_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunWhenAllFailFastProbeTask(
+      &executor, &cancelled_counter, &completed_counter, &result_promise)));
+
+  ASSERT_EQ(result_future.wait_for(500ms), std::future_status::ready);
+  EXPECT_EQ(result_future.get(), "whenall_fail_fast");
+
+  EXPECT_TRUE(WaitUntil([&cancelled_counter]() {
+    return cancelled_counter.load(std::memory_order_relaxed) >= 2;
+  }, 1s));
+  EXPECT_EQ(completed_counter.load(std::memory_order_relaxed), 0);
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
+TEST_F(CoroutineExecutorTest, WhenAllExternalStopTokenCancelsBranches) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::stop_source stop_source;
+  std::atomic<int> cancelled_counter{0};
+  std::atomic<int> completed_counter{0};
+  std::promise<std::string> result_promise;
+  auto result_future = result_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunWhenAllExternalCancelProbeTask(
+      &executor,
+      stop_source.get_token(),
+      &cancelled_counter,
+      &completed_counter,
+      &result_promise)));
+
+  std::this_thread::sleep_for(20ms);
+  (void)stop_source.request_stop();
+
+  ASSERT_EQ(result_future.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(result_future.get(), "cancelled");
+
+  EXPECT_TRUE(WaitUntil([&cancelled_counter]() {
+    return cancelled_counter.load(std::memory_order_relaxed) >= 2;
+  }, 1s));
+  EXPECT_EQ(completed_counter.load(std::memory_order_relaxed), 0);
 
   EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
 
@@ -1038,30 +1231,35 @@ TEST_F(CoroutineExecutorTest, SnapshotTracksCoroutineMetadataAndLifecycle) {
   ASSERT_EQ(entered_future.wait_for(2s), std::future_status::ready);
   ASSERT_TRUE(WaitUntil([&executor]() { return executor.SuspendedCount() > 0; }, 2s));
 
-  const auto snapshots = executor.SnapshotActiveCoroutines();
-  ASSERT_FALSE(snapshots.empty());
-  const auto it = std::find_if(
-      snapshots.begin(),
-      snapshots.end(),
-      [](const CoroutineSnapshot& snapshot) {
-        return snapshot.name == "handler.snapshot_test";
-      });
-  ASSERT_NE(it, snapshots.end());
-  EXPECT_EQ(it->trace_id, 9001u);
-  EXPECT_EQ(it->msg_id, 2201u);
-  EXPECT_EQ(it->client_id, 7788u);
-  EXPECT_EQ(it->handler_key, "snapshot_test");
-  EXPECT_EQ(it->status, CoroutineStatus::kSuspendedAsync);
-  EXPECT_GT(it->suspend_count, 0u);
+  CoroutineSnapshot target_snapshot;
+  ASSERT_TRUE(WaitUntil([&executor, &target_snapshot]() {
+    const auto snapshots = executor.SnapshotActiveCoroutines();
+    const auto it = std::find_if(
+        snapshots.begin(),
+        snapshots.end(),
+        [](const CoroutineSnapshot& snapshot) {
+          return snapshot.name == "handler.snapshot_test";
+        });
+    if (it == snapshots.end()) {
+      return false;
+    }
+    target_snapshot = *it;
+    return target_snapshot.status == CoroutineStatus::kSuspendedAsync &&
+           target_snapshot.suspend_count > 0u;
+  }, 2s));
+  EXPECT_EQ(target_snapshot.trace_id, 9001u);
+  EXPECT_EQ(target_snapshot.msg_id, 2201u);
+  EXPECT_EQ(target_snapshot.client_id, 7788u);
+  EXPECT_EQ(target_snapshot.handler_key, "snapshot_test");
 
-  const auto single_snapshot = executor.SnapshotCoroutine(it->coroutine_id);
+  const auto single_snapshot = executor.SnapshotCoroutine(target_snapshot.coroutine_id);
   ASSERT_TRUE(single_snapshot.has_value());
   EXPECT_EQ(single_snapshot->trace_id, 9001u);
 
   unblock_promise.set_value();
   ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
   EXPECT_TRUE(executor.DrainAndJoin(2s));
-  EXPECT_FALSE(executor.SnapshotCoroutine(it->coroutine_id).has_value());
+  EXPECT_FALSE(executor.SnapshotCoroutine(target_snapshot.coroutine_id).has_value());
 
   guard.reset();
   io_context.stop();

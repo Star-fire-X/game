@@ -30,5 +30,23 @@ if(TARGET mir2_server_lib)
 
     # NPC Handler
     npc/npc_command_handler.cc
+
+    # Party Handler
+    party/party_handler.cc
+
+    # Mail Handler
+    mail/mail_handler.cc
+
+    # Ranking Handler
+    ranking/ranking_handler.cc
+
+    # Achievement Handler
+    achievement/achievement_handler.cc
+
+    # Auction Handler
+    auction/auction_handler.cc
+
+    # Trade Handler
+    trade/trade_handler.cc
   )
 endif()

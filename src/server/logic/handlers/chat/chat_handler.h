@@ -33,7 +33,8 @@ class ChatHandler {
   ChatHandler(ResponseSender& response_sender,
               PlayerPresenceService& player_presence_service,
               mir2::game::map::AOIManager& aoi_mgr,
-              entt::registry& ecs_registry);
+              entt::registry& ecs_registry,
+              bool batch_send_enabled = true);
   ~ChatHandler();
 
   Task<void> HandleMessage(HandlerContext ctx, const uint8_t* payload, size_t payload_size);
@@ -57,6 +58,7 @@ class ChatHandler {
   ResponseSender& response_sender_;
   mir2::game::map::AOIManager& aoi_mgr_;
   entt::registry& ecs_registry_;
+  bool batch_send_enabled_ = true;
   std::unique_ptr<mir2::game::chat::ChatService> chat_service_;
 };
 

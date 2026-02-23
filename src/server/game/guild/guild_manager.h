@@ -32,30 +32,30 @@ class GuildManager : public core::Singleton<GuildManager> {
   friend class core::Singleton<GuildManager>;
 
  public:
-  entt::entity CreateGuild(uint32_t guild_id, const std::string& name,
+  entt::entity CreateGuild(ecs::GuildId guild_id, const std::string& name,
                            entt::entity leader, entt::registry& registry);
-  bool DeleteGuild(uint32_t guild_id, entt::registry& registry);
-  entt::entity GetGuildEntity(uint32_t guild_id) const;
+  bool DeleteGuild(ecs::GuildId guild_id, entt::registry& registry);
+  entt::entity GetGuildEntity(ecs::GuildId guild_id) const;
   entt::entity GetGuildByName(const std::string& name) const;
-  ecs::GuildComponent* GetGuild(uint32_t guild_id, entt::registry& registry);
-  bool AddMember(uint32_t guild_id, entt::entity member,
+  ecs::GuildComponent* GetGuild(ecs::GuildId guild_id, entt::registry& registry);
+  bool AddMember(ecs::GuildId guild_id, entt::entity member,
                  entt::registry& registry);
-  bool RemoveMember(uint32_t guild_id, entt::entity member,
+  bool RemoveMember(ecs::GuildId guild_id, entt::entity member,
                     entt::registry& registry);
-  bool DeclareWar(uint32_t attacker_id, uint32_t target_id,
+  bool DeclareWar(ecs::GuildId attacker_id, ecs::GuildId target_id,
                   entt::registry& registry);
-  bool CancelWar(uint32_t guild1_id, uint32_t guild2_id,
+  bool CancelWar(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                  entt::registry& registry);
-  bool IsAtWar(uint32_t guild1_id, uint32_t guild2_id) const;
-  bool MakeAlliance(uint32_t guild1_id, uint32_t guild2_id,
+  bool IsAtWar(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const;
+  bool MakeAlliance(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                     entt::registry& registry);
-  bool BreakAlliance(uint32_t guild1_id, uint32_t guild2_id,
+  bool BreakAlliance(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                      entt::registry& registry);
-  bool IsAllied(uint32_t guild1_id, uint32_t guild2_id) const;
-  int GetGuildRelation(uint32_t guild1_id, uint32_t guild2_id) const;
-  uint8_t GetMemberColor(uint32_t viewer_guild_id,
-                         uint32_t target_guild_id) const;
-  uint32_t GenerateGuildId();
+  bool IsAllied(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const;
+  int GetGuildRelation(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const;
+  uint8_t GetMemberColor(ecs::GuildId viewer_guild_id,
+                         ecs::GuildId target_guild_id) const;
+  ecs::GuildId GenerateGuildId();
   size_t GuildCount() const;
 
   template <typename Func>
@@ -73,9 +73,9 @@ class GuildManager : public core::Singleton<GuildManager> {
   GuildManager() = default;
   ~GuildManager() = default;
 
-  std::unordered_map<uint32_t, entt::entity> guilds_;
-  std::unordered_map<std::string, uint32_t> name_to_id_;
-  uint32_t next_guild_id_ = 1;
+  std::unordered_map<ecs::GuildId, entt::entity> guilds_;
+  std::unordered_map<std::string, ecs::GuildId> name_to_id_;
+  ecs::GuildId next_guild_id_ = ecs::kInvalidGuildId + 1;
   mutable std::mutex mutex_;
 };
 

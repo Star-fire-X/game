@@ -30,19 +30,19 @@ namespace {
 
 using mir2::common::DecodeStatus;
 using mir2::common::NetworkPacket;
-using mir2::common::PacketHeader;
+using mir2::common::PacketHeaderV2;
 
 struct PacketInspection {
     bool header_ok = false;
-    PacketHeader header{};
+    PacketHeaderV2 header{};
     DecodeStatus decode_status = DecodeStatus::kTruncated;
     NetworkPacket packet{};
 };
 
 PacketInspection InspectPacket(const std::vector<uint8_t>& bytes) {
     PacketInspection inspection;
-    inspection.header_ok = PacketHeader::FromBytes(bytes.data(), bytes.size(), &inspection.header);
-    inspection.decode_status = mir2::common::DecodePacket(bytes.data(), bytes.size(), &inspection.packet);
+    inspection.header_ok = PacketHeaderV2::FromBytes(bytes.data(), bytes.size(), &inspection.header);
+    inspection.decode_status = mir2::common::DecodePacketV2(bytes.data(), bytes.size(), &inspection.packet);
     return inspection;
 }
 
@@ -52,7 +52,7 @@ void ExpectPacketMatches(uint16_t msg_id,
     ASSERT_FALSE(bytes.empty());
     const auto inspection = InspectPacket(bytes);
     EXPECT_TRUE(inspection.header_ok);
-    EXPECT_EQ(inspection.header.magic, PacketHeader::kMagic);
+    EXPECT_EQ(inspection.header.magic, PacketHeaderV2::kMagic);
     EXPECT_EQ(inspection.header.msg_id, msg_id);
     EXPECT_EQ(inspection.header.payload_size, payload.size());
     EXPECT_EQ(inspection.decode_status, DecodeStatus::kOk);
@@ -62,7 +62,7 @@ void ExpectPacketMatches(uint16_t msg_id,
 
 std::vector<uint8_t> EncodePacketBytes(uint16_t msg_id, const std::vector<uint8_t>& payload) {
     const uint8_t* data = payload.empty() ? nullptr : payload.data();
-    return mir2::common::EncodePacket(msg_id, data, payload.size());
+    return mir2::common::EncodePacketV2(msg_id, data, payload.size(), /*sequence=*/0);
 }
 
 mir2::game::map::SceneManager::MapConfig BuildMapConfig(int map_id,

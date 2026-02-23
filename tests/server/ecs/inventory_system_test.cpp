@@ -8,6 +8,7 @@
 #include "ecs/components/character_components.h"
 #include "ecs/components/equipment_component.h"
 #include "ecs/components/ground_item_component.h"
+#include "ecs/components/inventory_snapshot_component.h"
 #include "ecs/components/item_component.h"
 #include "ecs/components/party_component.h"
 #include "ecs/components/skill_component.h"

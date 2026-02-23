@@ -163,3 +163,41 @@ TEST_F(MapInstanceTest, EmptyMap) {
   auto entities = map_->GetEntitiesInView(50, 50);
   EXPECT_EQ(entities.size(), 0);
 }
+
+TEST_F(MapInstanceTest, AOILeaveEventUsesLeaverLatestCoordinates) {
+  entt::entity watcher = entt::entity{1};
+  entt::entity leaver = entt::entity{2};
+
+  struct CapturedEvent {
+    AOIEventType type;
+    entt::entity watcher;
+    entt::entity target;
+    int32_t x;
+    int32_t y;
+  };
+
+  std::vector<CapturedEvent> events;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    events.push_back({event_type, watcher_entity, target_entity, x, y});
+  });
+
+  ASSERT_TRUE(map_->AddEntity(watcher, 10, 10));
+  ASSERT_TRUE(map_->AddEntity(leaver, 11, 10));
+
+  events.clear();
+  ASSERT_TRUE(map_->UpdateEntityPosition(leaver, 90, 90));
+
+  auto leave_it = std::find_if(
+      events.begin(), events.end(), [&](const CapturedEvent& event) {
+        return event.type == AOIEventType::kLeave &&
+               event.watcher == watcher &&
+               event.target == leaver;
+      });
+  ASSERT_TRUE(leave_it != events.end());
+  EXPECT_EQ(leave_it->x, 90);
+  EXPECT_EQ(leave_it->y, 90);
+}

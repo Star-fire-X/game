@@ -24,6 +24,13 @@ using mir2::ecs::NpcShopComponent;
 using mir2::ecs::ShopItem;
 
 std::filesystem::path GetTestItemsPath() {
+#ifdef MIR2_TEST_DATA_DIR
+    const auto configured = std::filesystem::path(MIR2_TEST_DATA_DIR) / "test_items.json";
+    if (std::filesystem::exists(configured)) {
+        return configured;
+    }
+#endif
+
     std::filesystem::path root = std::filesystem::current_path();
     for (int i = 0; i < 6; ++i) {
         auto candidate = root / "tests" / "data" / "test_items.json";

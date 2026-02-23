@@ -180,6 +180,29 @@ inline TaskDetachedExceptionReporter SetTaskDetachedExceptionReporter(
       reporter, std::memory_order_acq_rel);
 }
 
+class CurrentStopTokenAwaiter {
+ public:
+  bool await_ready() const noexcept { return false; }
+
+  template <typename Promise>
+    requires requires(Promise& promise) {
+      { promise.GetStopToken() } -> std::convertible_to<std::stop_token>;
+    }
+  bool await_suspend(std::coroutine_handle<Promise> handle) noexcept {
+    token_ = handle.promise().GetStopToken();
+    return false;
+  }
+
+  std::stop_token await_resume() const noexcept { return token_; }
+
+ private:
+  std::stop_token token_;
+};
+
+inline CurrentStopTokenAwaiter CurrentStopToken() noexcept {
+  return {};
+}
+
 template <typename T>
 class Task {
  public:

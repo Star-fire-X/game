@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -56,6 +57,8 @@ struct Entity {
     uint8_t monster_state = 0;       ///< 怪物AI状态（仅对Monster有效）
     uint32_t monster_template_id = 0; ///< 怪物模板ID（仅对Monster有效）
     uint64_t target_id = 0;          ///< 当前目标ID（仅对Monster有效）
+    uint32_t template_id = 0;        ///< 物品/怪物模板ID
+    std::string name;                ///< 实体名称（地面物品/怪物/NPC）
     legend2::EntityInterpolator interpolator;  ///< 网络位置插值器
 };
 

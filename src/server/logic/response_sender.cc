@@ -32,4 +32,32 @@ Task<void> ResponseSender::SendAsync(uint64_t client_id,
   co_return;
 }
 
+Task<SendManyResult> ResponseSender::SendMany(const std::vector<uint64_t>& client_ids,
+                                              uint16_t msg_id,
+                                              const std::vector<uint8_t>& payload) {
+  SendManyResult result;
+  result.attempted = client_ids.size();
+
+  if (payload.empty()) {
+    result.dropped = client_ids.size();
+    co_return result;
+  }
+
+  for (const uint64_t client_id : client_ids) {
+    if (client_id == 0) {
+      ++result.dropped;
+      continue;
+    }
+
+    try {
+      Send(client_id, msg_id, payload);
+      ++result.sent;
+    } catch (...) {
+      ++result.failed;
+    }
+  }
+
+  co_return result;
+}
+
 }  // namespace mir2::logic

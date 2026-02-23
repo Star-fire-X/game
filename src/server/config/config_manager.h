@@ -7,7 +7,9 @@
 #define MIR2_CONFIG_CONFIG_MANAGER_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include <yaml-cpp/yaml.h>
 
@@ -47,14 +49,21 @@ struct ServerConfig {
   int coroutine_hung_threshold_ms = 5000;
   int coroutine_hung_scan_interval_ms = 500;
   int coroutine_dump_max_entries = 64;
+  bool session_cleanup_on_gateway_disconnect = true;
+  bool reconcile_cleanup_enabled = true;
+  bool zombie_detection_enabled = true;
+  int zombie_detection_scan_interval_ms = 5000;
+  int zombie_detection_idle_timeout_ms = 120000;
   bool legacy_fallback_enabled = true;
   bool legacy_fallback_allow_auth_whitelist = true;
   bool legacy_fallback_allow_critical_msgs = true;
   bool legacy_fallback_allow_normal_msgs = false;
+  bool chat_batch_send_enabled = true;
   int movement_speed_violation_severity = 10;
   int movement_teleport_violation_severity = 5;
   int login_ip_rate_limit_capacity = 5;
   int login_ip_rate_limit_refill_rate = 1;
+  bool enable_network_listener = true;
   uint16_t metrics_port = 0;
 };
 
@@ -105,6 +114,39 @@ struct EcsConfig {
 };
 
 /**
+ * @brief StorageEngine 配置
+ */
+struct StorageEngineConfig {
+  uint32_t l1_max_entries = 10000;
+  uint32_t l1_ttl_seconds = 300;
+  uint32_t l2_max_size_mb = 512;
+  std::string l2_path = "/var/lib/mir2/cache";
+  uint32_t l2_ttl_seconds = 604800;
+  uint32_t auto_sync_interval_ms = 5000;
+  uint32_t batch_size = 100;
+  uint32_t sync_timeout_ms = 30000;
+  size_t queue_capacity = 10000;
+  size_t queue_worker_threads = 2;
+  uint32_t queue_retry_count = 3;
+  uint32_t queue_retry_delay_ms = 100;
+  size_t dead_letter_max_items = 10000;
+  bool enable_strict_write_guarantee = true;
+  bool critical_data_no_ttl = true;
+  bool enable_outbox = true;
+  size_t outbox_replay_limit = 0;
+  size_t outbox_max_items = 200000;
+  uint32_t circuit_breaker_threshold = 5;
+  uint32_t circuit_breaker_timeout_ms = 60000;
+  bool enable_metrics = true;
+  bool enable_audit_log = true;
+  size_t audit_log_max_entries = 5000;
+  bool enable_access_control = false;
+  bool require_auth_for_reads = false;
+  std::string access_control_token;
+  std::vector<std::string> critical_key_prefixes = {"char:", "account:username:"};
+};
+
+/**
  * @brief 配置管理器
  *
  * 负责加载/热重载配置，集中提供配置信息。
@@ -135,6 +177,7 @@ class ConfigManager : public core::Singleton<ConfigManager> {
   const LogConfig& GetLogConfig() const { return log_config_; }
   const ServiceConfig& GetServiceConfig() const { return service_config_; }
   const EcsConfig& GetEcsConfig() const { return ecs_config_; }
+  const StorageEngineConfig& GetStorageEngineConfig() const { return storage_engine_config_; }
   const legend2::CombatConfig& GetCombatConfig() const { return combat_config_; }
 
  private:
@@ -150,6 +193,7 @@ class ConfigManager : public core::Singleton<ConfigManager> {
   LogConfig log_config_;
   ServiceConfig service_config_;
   EcsConfig ecs_config_;
+  StorageEngineConfig storage_engine_config_;
   legend2::CombatConfig combat_config_;
 };
 

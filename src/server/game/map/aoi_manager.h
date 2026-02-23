@@ -25,7 +25,9 @@ namespace mir2::game::map {
  */
 enum class AOIEventType : uint8_t {
   kEnter = 0,  // 实体进入视野
-  kLeave = 1,  // 实体离开视野
+  // 实体离开视野。当前实现下，(x, y) 为“离开方”的最新坐标；
+  // 对于目标实体的历史坐标，如有需要应在上层扩展事件载荷保存。
+  kLeave = 1,
   kMove = 2    // 实体在视野内移动
 };
 

@@ -8,6 +8,8 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -30,6 +32,7 @@
 #include "common/time_utils.h"
 #include "config/config_manager.h"
 #include "integration/test_helpers.h"
+#include "logic/services/session_role_store.h"
 #include "network/network_manager.h"
 #include "network/tcp_session.h"
 #include "system_generated.h"
@@ -45,6 +48,7 @@ using mir2::common::LoginResponse;
 using mir2::common::MessageCodecStatus;
 using mir2::common::MsgId;
 using mir2::common::NetworkPacket;
+using mir2::common::ProtocolVersion;
 using mir2::gateway::ConnectionHolder;
 using mir2::gateway::GatewayServer;
 using mir2::logic::LogicServer;
@@ -308,6 +312,64 @@ class ConnectionHoldingIntegrationTest : public ::testing::Test {
         [this]() { client_->update(); });
   }
 
+  bool WaitForStableLogicConnection(std::chrono::milliseconds timeout,
+                                    std::chrono::milliseconds stable_window = 200ms) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::optional<std::chrono::steady_clock::time_point> stable_since;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (client_) {
+        client_->update();
+      }
+      const bool connected =
+          gateway_ != nullptr && gateway_->IsLogicConnected() &&
+          !gateway_->logic_reconnecting_.load(std::memory_order_acquire);
+      if (connected) {
+        if (!stable_since.has_value()) {
+          stable_since = std::chrono::steady_clock::now();
+        } else if (std::chrono::steady_clock::now() - *stable_since >= stable_window) {
+          return true;
+        }
+      } else {
+        stable_since.reset();
+      }
+      std::this_thread::sleep_for(10ms);
+    }
+    return false;
+  }
+
+  bool WaitForContextRestoreRequestAfter(uint32_t previous_request_id,
+                                         std::chrono::milliseconds timeout) {
+    return WaitForCondition(
+        [this, previous_request_id]() {
+          return logic_ != nullptr &&
+                 logic_->last_context_request_id_.load(std::memory_order_relaxed) >
+                     previous_request_id;
+        },
+        timeout,
+        10ms,
+        [this]() { client_->update(); });
+  }
+
+  bool RunOnLogicThreadAndWait(const std::function<void()>& fn,
+                               std::chrono::milliseconds timeout = 2s) {
+    if (!logic_ || !logic_->io_context_ || !fn) {
+      return false;
+    }
+    auto done = std::make_shared<std::promise<void>>();
+    auto done_future = done->get_future();
+    asio::post(*logic_->io_context_, [fn, done]() {
+      fn();
+      done->set_value();
+    });
+    return done_future.wait_for(timeout) == std::future_status::ready;
+  }
+
+  void ForceGatewayLogicFlap() {
+    ASSERT_NE(gateway_, nullptr);
+    ASSERT_NE(gateway_->logic_client_, nullptr);
+    gateway_->logic_client_->Close();
+  }
+
   uint64_t WaitForClientConnectionId(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -336,6 +398,26 @@ class ConnectionHoldingIntegrationTest : public ::testing::Test {
       return false;
     }
     return it->second->HasBufferedMessages();
+  }
+
+  struct SessionConvergenceState {
+    bool kept_in_registry = false;
+    bool stale_in_registry = false;
+    bool kept_account_bound = false;
+    bool stale_account_bound = false;
+  };
+
+  SessionConvergenceState ReadConvergenceState(uint64_t kept_client_id,
+                                               uint64_t stale_client_id) const {
+    SessionConvergenceState state;
+    if (!logic_ || !logic_->role_store_) {
+      return state;
+    }
+    state.kept_in_registry = logic_->client_registry_.Contains(kept_client_id);
+    state.stale_in_registry = logic_->client_registry_.Contains(stale_client_id);
+    state.kept_account_bound = logic_->role_store_->GetAccountId(kept_client_id).has_value();
+    state.stale_account_bound = logic_->role_store_->GetAccountId(stale_client_id).has_value();
+    return state;
   }
 
   std::optional<NetworkPacket> WaitForPacket(uint16_t msg_id,
@@ -463,6 +545,203 @@ TEST_F(ConnectionHoldingIntegrationTest, BuffersAndFlushesOnLogicRestart) {
       10ms,
       [this]() { client_->update(); }));
   EXPECT_FALSE(HolderHasBufferedMessages(connection_id));
+}
+
+TEST_F(ConnectionHoldingIntegrationTest, BuffersAndFlushesOnLogicRestartWithLegacyV1ToggleClient) {
+  ASSERT_NE(client_, nullptr);
+  client_->set_use_v2_protocol(false);
+
+  ASSERT_TRUE(ConnectClient());
+  ASSERT_TRUE(WaitForLogicConnected(3s));
+
+  const uint64_t connection_id = WaitForClientConnectionId(2s);
+  ASSERT_NE(connection_id, 0u);
+
+  StopLogicServer();
+  ASSERT_TRUE(WaitForCondition(
+      [this]() { return GetHolderState() == ConnectionHolder::State::HOLDING; },
+      2s,
+      10ms,
+      [this]() { client_->update(); }));
+
+  const auto login_payload = BuildLoginPayload();
+  ASSERT_FALSE(login_payload.empty());
+  client_->send(kLoginReqMsgId, login_payload);
+
+  ASSERT_TRUE(WaitForCondition(
+      [this, connection_id]() {
+        if (!gateway_ || !gateway_->network_) {
+          return false;
+        }
+        auto session = gateway_->network_->GetSession(connection_id);
+        return session && session->GetProtocolVersion() == ProtocolVersion::kV2;
+      },
+      2s,
+      10ms,
+      [this]() { client_->update(); }));
+
+  auto immediate_rsp = WaitForPacket(kLoginRspMsgId, 200ms);
+  EXPECT_FALSE(immediate_rsp.has_value());
+  EXPECT_TRUE(HolderHasBufferedMessages(connection_id));
+
+  std::this_thread::sleep_for(100ms);
+  ASSERT_TRUE(StartLogicServer());
+
+  ASSERT_TRUE(WaitForLogicConnected(5s));
+  ASSERT_TRUE(WaitForCondition(
+      [this]() {
+        return logic_ &&
+               logic_->last_context_request_id_.load(std::memory_order_relaxed) > 0;
+      },
+      5s,
+      10ms,
+      [this]() { client_->update(); }));
+
+  auto reset_packet = WaitForPacket(kKcpResetMsgId, 5s);
+  ASSERT_TRUE(reset_packet.has_value());
+  flatbuffers::Verifier verifier(reset_packet->payload.data(),
+                                 reset_packet->payload.size());
+  EXPECT_TRUE(verifier.VerifyBuffer<mir2::proto::KcpReset>(nullptr));
+
+  auto login_rsp = WaitForPacket(kLoginRspMsgId, 5s);
+  ASSERT_TRUE(login_rsp.has_value());
+
+  LoginResponse response;
+  MessageCodecStatus status =
+      mir2::common::DecodeLoginResponse(login_rsp->msg_id,
+                                        login_rsp->payload,
+                                        &response);
+  EXPECT_EQ(status, MessageCodecStatus::kOk);
+  EXPECT_EQ(response.code, mir2::proto::ErrorCode::ERR_OK);
+
+  ASSERT_TRUE(WaitForCondition(
+      [this]() { return GetHolderState() == ConnectionHolder::State::FORWARDING; },
+      5s,
+      10ms,
+      [this]() { client_->update(); }));
+  EXPECT_FALSE(HolderHasBufferedMessages(connection_id));
+}
+
+TEST_F(ConnectionHoldingIntegrationTest, GatewayLogicFlapTriggersP0SessionCleanup) {
+  ASSERT_TRUE(ConnectClient());
+  ASSERT_TRUE(WaitForLogicConnected(3s));
+
+  const uint64_t connection_id = WaitForClientConnectionId(2s);
+  ASSERT_NE(connection_id, 0u);
+  const uint64_t stale_client_id = connection_id + 100000;
+
+  ASSERT_TRUE(RunOnLogicThreadAndWait([this, connection_id, stale_client_id]() {
+    if (!logic_ || !logic_->role_store_) {
+      return;
+    }
+    logic_->client_registry_.Track(connection_id);
+    logic_->client_registry_.Track(stale_client_id);
+    logic_->role_store_->BindClientAccount(connection_id, 7001);
+    logic_->role_store_->BindClientAccount(stale_client_id, 7002);
+  }));
+
+  const uint32_t previous_request_id =
+      logic_->last_context_request_id_.load(std::memory_order_relaxed);
+  ForceGatewayLogicFlap();
+
+  ASSERT_TRUE(WaitForLogicConnected(5s));
+  ASSERT_TRUE(WaitForContextRestoreRequestAfter(previous_request_id, 5s));
+
+  ASSERT_TRUE(WaitForCondition(
+      [this, connection_id, stale_client_id]() {
+        return !logic_->client_registry_.Contains(connection_id) &&
+               !logic_->client_registry_.Contains(stale_client_id);
+      },
+      3s,
+      10ms,
+      [this]() { client_->update(); }));
+  EXPECT_FALSE(logic_->role_store_->GetAccountId(connection_id).has_value());
+  EXPECT_FALSE(logic_->role_store_->GetAccountId(stale_client_id).has_value());
+}
+
+TEST_F(ConnectionHoldingIntegrationTest, ContextRestoreConvergesAfterRepeatedFlaps) {
+  ASSERT_TRUE(ConnectClient());
+  ASSERT_TRUE(WaitForLogicConnected(3s));
+
+  uint64_t connection_id = WaitForClientConnectionId(2s);
+  ASSERT_NE(connection_id, 0u);
+  constexpr uint64_t kStaleBase = 200000;
+  constexpr int kFlapRounds = 3;
+
+  ASSERT_TRUE(RunOnLogicThreadAndWait([this]() {
+    if (!logic_) {
+      return;
+    }
+    logic_->session_cleanup_on_gateway_disconnect_ = false;
+    logic_->reconcile_cleanup_enabled_ = true;
+    logic_->zombie_detection_enabled_ = false;
+  }));
+
+  for (int round = 0; round < kFlapRounds; ++round) {
+    const uint64_t stale_client_id = kStaleBase + static_cast<uint64_t>(round);
+    const uint64_t account_id_kept = 8000 + static_cast<uint64_t>(round);
+    const uint64_t account_id_stale = 9000 + static_cast<uint64_t>(round);
+    SCOPED_TRACE("round=" + std::to_string(round) +
+                 ", connection_id=" + std::to_string(connection_id));
+
+    ASSERT_TRUE(RunOnLogicThreadAndWait([this,
+                                         connection_id,
+                                         stale_client_id,
+                                         account_id_kept,
+                                         account_id_stale]() {
+      if (!logic_ || !logic_->role_store_) {
+        return;
+      }
+      logic_->client_registry_.Track(connection_id);
+      logic_->client_registry_.Track(stale_client_id);
+      logic_->role_store_->BindClientAccount(connection_id, account_id_kept);
+      logic_->role_store_->BindClientAccount(stale_client_id, account_id_stale);
+    }));
+
+    const uint32_t previous_request_id =
+        logic_->last_context_request_id_.load(std::memory_order_relaxed);
+    ForceGatewayLogicFlap();
+
+    ASSERT_TRUE(WaitForLogicConnected(5s));
+    ASSERT_TRUE(WaitForContextRestoreRequestAfter(previous_request_id, 5s));
+    const uint64_t refreshed_connection_id = WaitForClientConnectionId(2s);
+    ASSERT_NE(refreshed_connection_id, 0u);
+    connection_id = refreshed_connection_id;
+
+    const bool converged = WaitForCondition(
+        [this, connection_id, stale_client_id]() {
+          if (!logic_ || !logic_->role_store_) {
+            return false;
+          }
+          return logic_->client_registry_.Contains(connection_id) &&
+                 !logic_->client_registry_.Contains(stale_client_id) &&
+                 logic_->role_store_->GetAccountId(connection_id).has_value() &&
+                 !logic_->role_store_->GetAccountId(stale_client_id).has_value();
+        },
+        5s,
+        10ms,
+        [this]() { client_->update(); });
+    const SessionConvergenceState state =
+        ReadConvergenceState(connection_id, stale_client_id);
+    ASSERT_TRUE(converged)
+        << "round=" << round
+        << " connection_id=" << connection_id
+        << " stale_client_id=" << stale_client_id
+        << " kept_in_registry=" << state.kept_in_registry
+        << " stale_in_registry=" << state.stale_in_registry
+        << " kept_account_bound=" << state.kept_account_bound
+        << " stale_account_bound=" << state.stale_account_bound;
+  }
+
+  ASSERT_TRUE(WaitForStableLogicConnection(3s))
+      << "logic reconnect state did not stabilize";
+  const SessionConvergenceState final_state =
+      ReadConvergenceState(connection_id,
+                           kStaleBase + static_cast<uint64_t>(kFlapRounds - 1));
+  EXPECT_TRUE(final_state.kept_in_registry);
+  EXPECT_TRUE(final_state.kept_account_bound);
+  EXPECT_FALSE(final_state.stale_in_registry);
+  EXPECT_FALSE(final_state.stale_account_bound);
 }
 
 }  // namespace

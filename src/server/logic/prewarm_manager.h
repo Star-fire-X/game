@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "ecs/id_types.h"
 #include "logic/coroutine_executor.h"
 #include "logic/task.h"
 
@@ -19,8 +20,8 @@ namespace mir2::logic {
 
 struct PrewarmEntry {
   uint64_t client_id = 0;
-  uint32_t player_id = 0;
-  uint32_t account_id = 0;
+  ecs::CharacterId player_id = ecs::kInvalidCharacterId;
+  ecs::AccountId account_id = ecs::kInvalidAccountId;
   std::string ip_address;
   uint64_t connected_at_ms = 0;
   uint64_t last_active_ms = 0;

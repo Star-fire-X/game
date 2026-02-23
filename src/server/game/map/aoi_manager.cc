@@ -18,6 +18,38 @@ struct PendingAOIEvent {
   int32_t y = 0;
 };
 
+template <typename GridArrayT, typename GetEntitiesFn, typename VisitEntityFn>
+void CollectSurroundingEntities(const GridArrayT& surrounding,
+                                size_t surrounding_count,
+                                const GetEntitiesFn& get_entities,
+                                const VisitEntityFn& visit_entity) {
+  for (size_t i = 0; i < surrounding_count; ++i) {
+    const auto* entities = get_entities(surrounding[i]);
+    if (entities == nullptr) {
+      continue;
+    }
+    for (uint64_t entity_id : *entities) {
+      visit_entity(entity_id);
+    }
+  }
+}
+
+template <typename GridArrayT, typename ContainsGridFn, typename EmitOnGridFn>
+void EmitGridDeltaEvents(const GridArrayT& source_grids,
+                         size_t source_count,
+                         const GridArrayT& target_grids,
+                         size_t target_count,
+                         const ContainsGridFn& contains_grid,
+                         const EmitOnGridFn& emit_on_grid) {
+  for (size_t i = 0; i < source_count; ++i) {
+    const auto& grid = source_grids[i];
+    if (contains_grid(target_grids, target_count, grid)) {
+      continue;
+    }
+    emit_on_grid(grid);
+  }
+}
+
 void DispatchAOIEvents(const AOIManager::AOICallback& callback,
                        const std::vector<PendingAOIEvent>& events) {
   if (!callback) {
@@ -66,13 +98,15 @@ void AOIManager::Enter(uint64_t entity_id, int32_t x, int32_t y) {
     const size_t surrounding_count = FillSurroundingGrids(grid, surrounding);
 
     // 收集视野内事件，避免锁内执行用户回调。
-    for (size_t i = 0; i < surrounding_count; ++i) {
-      const auto* entities = GetEntitiesInGrid(surrounding[i]);
-      if (entities == nullptr) {
-        continue;
-      }
-      for (uint64_t other_id : *entities) {
-        if (other_id != entity_id) {
+    CollectSurroundingEntities(
+        surrounding, surrounding_count,
+        [this](const GridId& candidate_grid) {
+          return GetEntitiesInGrid(candidate_grid);
+        },
+        [&](uint64_t other_id) {
+          if (other_id == entity_id) {
+            return;
+          }
           pending_events.push_back(
               PendingAOIEvent{AOIEventType::kEnter, other_id, entity_id, x, y});
           auto it = entities_.find(other_id);
@@ -81,9 +115,7 @@ void AOIManager::Enter(uint64_t entity_id, int32_t x, int32_t y) {
                 AOIEventType::kEnter, entity_id, other_id, it->second.x,
                 it->second.y});
           }
-        }
-      }
-    }
+        });
 
     callback_snapshot = callback_;
   }
@@ -112,18 +144,18 @@ void AOIManager::Leave(uint64_t entity_id) {
     const size_t surrounding_count = FillSurroundingGrids(grid, surrounding);
 
     // 收集离开事件，避免锁内执行用户回调。
-    for (size_t i = 0; i < surrounding_count; ++i) {
-      const auto* entities = GetEntitiesInGrid(surrounding[i]);
-      if (entities == nullptr) {
-        continue;
-      }
-      for (uint64_t other_id : *entities) {
-        if (other_id != entity_id) {
+    CollectSurroundingEntities(
+        surrounding, surrounding_count,
+        [this](const GridId& candidate_grid) {
+          return GetEntitiesInGrid(candidate_grid);
+        },
+        [&](uint64_t other_id) {
+          if (other_id == entity_id) {
+            return;
+          }
           pending_events.push_back(
               PendingAOIEvent{AOIEventType::kLeave, other_id, entity_id, x, y});
-        }
-      }
-    }
+        });
 
     // 从格子中移除
     RemoveFromGrid(entity_id, grid);
@@ -160,18 +192,18 @@ void AOIManager::Move(uint64_t entity_id, int32_t new_x, int32_t new_y) {
     if (old_grid == new_grid) {
       GridArray surrounding{};
       const size_t surrounding_count = FillSurroundingGrids(new_grid, surrounding);
-      for (size_t i = 0; i < surrounding_count; ++i) {
-        const auto* entities = GetEntitiesInGrid(surrounding[i]);
-        if (entities == nullptr) {
-          continue;
-        }
-        for (uint64_t other_id : *entities) {
-          if (other_id != entity_id) {
+      CollectSurroundingEntities(
+          surrounding, surrounding_count,
+          [this](const GridId& candidate_grid) {
+            return GetEntitiesInGrid(candidate_grid);
+          },
+          [&](uint64_t other_id) {
+            if (other_id == entity_id) {
+              return;
+            }
             pending_events.push_back(PendingAOIEvent{
                 AOIEventType::kMove, other_id, entity_id, new_x, new_y});
-          }
-        }
-      }
+          });
       callback_snapshot = callback_;
     } else {
       // 格子发生变化，需要计算进入和离开的视野范围
@@ -187,63 +219,79 @@ void AOIManager::Move(uint64_t entity_id, int32_t new_x, int32_t new_y) {
       AddToGrid(entity_id, new_grid);
 
       // 处理离开视野的实体
-      for (size_t i = 0; i < old_surrounding_count; ++i) {
-        const GridId& g = old_surrounding[i];
-        if (!ContainsGrid(new_surrounding, new_surrounding_count, g)) {
-          // 这个格子不在新视野内
-          const auto* entities = GetEntitiesInGrid(g);
-          if (entities == nullptr) {
-            continue;
-          }
-          for (uint64_t other_id : *entities) {
-            if (other_id != entity_id) {
-              pending_events.push_back(PendingAOIEvent{
-                  AOIEventType::kLeave, other_id, entity_id, new_x, new_y});
-              auto other_it = entities_.find(other_id);
-              if (other_it != entities_.end()) {
-                pending_events.push_back(PendingAOIEvent{
-                    AOIEventType::kLeave, entity_id, other_id, other_it->second.x,
-                    other_it->second.y});
-              }
-            }
-          }
-        }
-      }
+      EmitGridDeltaEvents(
+          old_surrounding, old_surrounding_count, new_surrounding,
+          new_surrounding_count,
+          [this](const GridArray& grids, size_t count, const GridId& target) {
+            return ContainsGrid(grids, count, target);
+          },
+          [&](const GridId& delta_grid) {
+            CollectSurroundingEntities(
+                std::array<GridId, 1>{delta_grid}, 1,
+                [this](const GridId& candidate_grid) {
+                  return GetEntitiesInGrid(candidate_grid);
+                },
+                [&](uint64_t other_id) {
+                  if (other_id == entity_id) {
+                    return;
+                  }
+                  pending_events.push_back(PendingAOIEvent{
+                      AOIEventType::kLeave, other_id, entity_id, new_x, new_y});
+                  auto other_it = entities_.find(other_id);
+                  if (other_it != entities_.end()) {
+                    pending_events.push_back(PendingAOIEvent{
+                        AOIEventType::kLeave, entity_id, other_id, other_it->second.x,
+                        other_it->second.y});
+                  }
+                });
+          });
 
       // 处理进入视野的实体
+      EmitGridDeltaEvents(
+          new_surrounding, new_surrounding_count, old_surrounding,
+          old_surrounding_count,
+          [this](const GridArray& grids, size_t count, const GridId& target) {
+            return ContainsGrid(grids, count, target);
+          },
+          [&](const GridId& delta_grid) {
+            CollectSurroundingEntities(
+                std::array<GridId, 1>{delta_grid}, 1,
+                [this](const GridId& candidate_grid) {
+                  return GetEntitiesInGrid(candidate_grid);
+                },
+                [&](uint64_t other_id) {
+                  if (other_id == entity_id) {
+                    return;
+                  }
+                  pending_events.push_back(PendingAOIEvent{
+                      AOIEventType::kEnter, other_id, entity_id, new_x, new_y});
+                  auto other_it = entities_.find(other_id);
+                  if (other_it != entities_.end()) {
+                    pending_events.push_back(PendingAOIEvent{
+                        AOIEventType::kEnter, entity_id, other_id, other_it->second.x,
+                        other_it->second.y});
+                  }
+                });
+          });
+
+      // 仍在视野内，发送移动事件
       for (size_t i = 0; i < new_surrounding_count; ++i) {
-        const GridId& g = new_surrounding[i];
-        if (!ContainsGrid(old_surrounding, old_surrounding_count, g)) {
-          // 这个格子是新进入视野的
-          const auto* entities = GetEntitiesInGrid(g);
-          if (entities == nullptr) {
-            continue;
-          }
-          for (uint64_t other_id : *entities) {
-            if (other_id != entity_id) {
-              pending_events.push_back(PendingAOIEvent{
-                  AOIEventType::kEnter, other_id, entity_id, new_x, new_y});
-              auto other_it = entities_.find(other_id);
-              if (other_it != entities_.end()) {
-                pending_events.push_back(PendingAOIEvent{
-                    AOIEventType::kEnter, entity_id, other_id, other_it->second.x,
-                    other_it->second.y});
+        const GridId& grid = new_surrounding[i];
+        if (!ContainsGrid(old_surrounding, old_surrounding_count, grid)) {
+          continue;
+        }
+        CollectSurroundingEntities(
+            std::array<GridId, 1>{grid}, 1,
+            [this](const GridId& candidate_grid) {
+              return GetEntitiesInGrid(candidate_grid);
+            },
+            [&](uint64_t other_id) {
+              if (other_id == entity_id) {
+                return;
               }
-            }
-          }
-        } else {
-          // 仍在视野内，发送移动事件
-          const auto* entities = GetEntitiesInGrid(g);
-          if (entities == nullptr) {
-            continue;
-          }
-          for (uint64_t other_id : *entities) {
-            if (other_id != entity_id) {
               pending_events.push_back(PendingAOIEvent{
                   AOIEventType::kMove, other_id, entity_id, new_x, new_y});
-            }
-          }
-        }
+            });
       }
       callback_snapshot = callback_;
     }

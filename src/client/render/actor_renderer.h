@@ -102,6 +102,9 @@ struct ActorData {
 
     std::string name;                   ///< 角色名称
     int32_t  name_color = 0xFFFFFF;     ///< 名称颜色
+
+    int      hp = 0;                    ///< 当前血量
+    int      max_hp = 0;                ///< 最大血量
 };
 
 /// 角色动画状态
@@ -284,6 +287,7 @@ public:
     /// @param screen_x 屏幕X坐标
     /// @param screen_y 屏幕Y坐标
     /// @param hp_percent 血量百分比(0.0-1.0)
+    void draw_hp_bar(const Actor& actor, int screen_x, int screen_y, float hp_percent);
 
     // =========================================================================
     // 批量渲染 (Batch Rendering)

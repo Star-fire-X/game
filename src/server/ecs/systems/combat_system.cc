@@ -406,6 +406,7 @@ void CombatSystem::Respawn(entt::registry& registry, entt::entity entity,
         events::EntityRespawnEvent event;
         event.entity = entity;
         event.position = pos;
+        event.map_id = state.map_id;
         event.hp_percent = hp_percent;
         event.mp_percent = mp_percent;
         event_bus->Publish(event);

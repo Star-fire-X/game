@@ -118,6 +118,11 @@ class CoroutineExecutor {
   using ParallelSpawnRejectedCallback = std::function<void(size_t, SpawnResult)>;
   static constexpr size_t kWhenAnyNoTaskIndex = std::numeric_limits<size_t>::max();
 
+  struct WhenAllOptions {
+    bool fail_fast = false;
+    std::stop_token stop_token{};
+  };
+
   explicit CoroutineExecutor(asio::io_context& io_context,
                              size_t blocking_threads = std::max(1u, std::thread::hardware_concurrency()),
                              int64_t max_running_tasks = 0,
@@ -207,11 +212,20 @@ class CoroutineExecutor {
   Task<void> WhenAll(std::vector<Task<void>> tasks,
                      ParallelSpawnRejectedCallback on_spawn_rejected = {});
 
+  Task<void> WhenAll(std::vector<Task<void>> tasks,
+                     ParallelSpawnRejectedCallback on_spawn_rejected,
+                     WhenAllOptions options);
+
   Task<size_t> WhenAny(std::vector<Task<void>> tasks,
                        ParallelSpawnRejectedCallback on_spawn_rejected = {});
 
   template <typename Fn>
   auto Async(Fn&& fn) -> Task<std::invoke_result_t<Fn>> {
+    return Async(std::forward<Fn>(fn), std::stop_token{});
+  }
+
+  template <typename Fn>
+  auto Async(Fn&& fn, std::stop_token stop_token) -> Task<std::invoke_result_t<Fn>> {
     using FnType = std::decay_t<Fn>;
     using Result = std::invoke_result_t<FnType>;
     static_assert(!std::is_reference_v<Result>, "Async cannot return references");
@@ -219,7 +233,7 @@ class CoroutineExecutor {
                   "Async callable must return a plain value, not an awaitable");
     return RunAsync<FnType, Result>(
         this, FnType(std::forward<Fn>(fn)),
-        std::chrono::steady_clock::duration::zero(), false, std::stop_token{});
+        std::chrono::steady_clock::duration::zero(), false, stop_token);
   }
 
   template <typename Fn>
@@ -498,14 +512,60 @@ class CoroutineExecutor {
   };
 
   struct ParallelWaitState {
+    using StopCallback = std::stop_callback<std::function<void()>>;
+
     ParallelWaitState(CoroutineExecutor* executor,
                       asio::io_context& io_context,
                       size_t total_tasks,
-                      std::shared_ptr<CoroutineRuntimeState> runtime)
+                      std::shared_ptr<CoroutineRuntimeState> runtime,
+                      bool when_all_fail_fast)
         : executor(executor),
           io_context(io_context),
           remaining(total_tasks),
-          runtime(std::move(runtime)) {}
+          runtime(std::move(runtime)),
+          fail_fast_enabled(when_all_fail_fast) {}
+
+    bool FailFastEnabled() const noexcept { return fail_fast_enabled; }
+
+    bool IsCancellationRequested() const noexcept {
+      return cancellation_requested.load(std::memory_order_acquire);
+    }
+
+    void AttachExternalStopToken(std::stop_token stop_token) {
+      if (!stop_token.stop_possible()) {
+        return;
+      }
+
+      external_stop_callback = std::make_unique<StopCallback>(
+          stop_token,
+          [this]() {
+            RequestCancel(std::make_exception_ptr(CancelledError("WhenAll cancelled")));
+          });
+
+      if (stop_token.stop_requested()) {
+        RequestCancel(std::make_exception_ptr(CancelledError("WhenAll cancelled")));
+      }
+    }
+
+    void RegisterWhenAllBranchTask(const std::shared_ptr<Task<void>>& task) {
+      if (!task || !task->IsValid()) {
+        return;
+      }
+
+      bool cancel_now = false;
+      {
+        std::lock_guard<std::mutex> lock(cancellation_mutex);
+        if (cancellation_requested.load(std::memory_order_acquire)) {
+          cancel_now = true;
+        } else {
+          cancellable_tasks.emplace_back(task);
+        }
+      }
+
+      if (cancel_now) {
+        (void)task->RequestStop();
+      }
+    }
 
     void RecordException(const std::exception_ptr& exception) {
       if (!exception) {
@@ -522,6 +582,46 @@ class CoroutineExecutor {
       if (previous == 1) {
         PostResume();
       }
+    }
+
+    void RequestCancel(const std::exception_ptr& exception = nullptr) {
+      if (exception) {
+        RecordException(exception);
+      }
+
+      const bool first_cancel =
+          !cancellation_requested.exchange(true, std::memory_order_acq_rel);
+      if (!first_cancel) {
+        return;
+      }
+
+      cancel_source.request_stop();
+
+      std::vector<std::shared_ptr<Task<void>>> tasks_to_cancel;
+      {
+        std::lock_guard<std::mutex> lock(cancellation_mutex);
+        tasks_to_cancel.reserve(cancellable_tasks.size());
+        for (const auto& weak_task : cancellable_tasks) {
+          if (auto task = weak_task.lock()) {
+            tasks_to_cancel.push_back(std::move(task));
+          }
+        }
+        cancellable_tasks.clear();
+      }
+
+      for (const auto& task : tasks_to_cancel) {
+        (void)task->RequestStop();
+      }
+
+      if (executor) {
+        executor->IncrementMetricCounter("logic.coroutine.whenall.cancel_requested_total");
+        if (fail_fast_enabled) {
+          executor->IncrementMetricCounter(
+              "logic.coroutine.whenall.fail_fast_triggered_total");
+        }
+      }
+
+      PostResume();
     }
 
     void CompleteAny(size_t index, const std::exception_ptr& exception = nullptr) {
@@ -565,6 +665,12 @@ class CoroutineExecutor {
     std::exception_ptr first_exception;
     std::coroutine_handle<> continuation{};
     std::shared_ptr<CoroutineRuntimeState> runtime;
+    std::stop_source cancel_source;
+    std::atomic<bool> cancellation_requested{false};
+    bool fail_fast_enabled = false;
+    std::mutex cancellation_mutex;
+    std::vector<std::weak_ptr<Task<void>>> cancellable_tasks;
+    std::unique_ptr<StopCallback> external_stop_callback;
   };
 
   static std::exception_ptr BuildSpawnRejectedException(SpawnResult reason,
@@ -576,10 +682,22 @@ class CoroutineExecutor {
 
   static Task<void> RunWhenAllBranch(std::shared_ptr<ParallelWaitState> state,
                                      Task<void> task) {
+    auto branch_task = std::make_shared<Task<void>>(std::move(task));
+    state->RegisterWhenAllBranchTask(branch_task);
+    if (state->IsCancellationRequested()) {
+      (void)branch_task->RequestStop();
+    }
+
     try {
-      co_await std::move(task);
+      if (branch_task->IsValid()) {
+        co_await *branch_task;
+      }
     } catch (...) {
-      state->RecordException(std::current_exception());
+      const std::exception_ptr exception = std::current_exception();
+      state->RecordException(exception);
+      if (state->FailFastEnabled()) {
+        state->RequestCancel(exception);
+      }
     }
     state->CompleteAll();
     co_return;
@@ -883,10 +1001,12 @@ class CoroutineExecutor {
    public:
     WhenAllAwaiter(CoroutineExecutor* executor,
                    std::vector<Task<void>>&& tasks,
-                   ParallelSpawnRejectedCallback&& on_spawn_rejected)
+                   ParallelSpawnRejectedCallback&& on_spawn_rejected,
+                   WhenAllOptions options)
         : executor_(executor),
           tasks_(std::move(tasks)),
-          on_spawn_rejected_(std::move(on_spawn_rejected)) {}
+          on_spawn_rejected_(std::move(on_spawn_rejected)),
+          options_(options) {}
 
     bool await_ready() const noexcept { return tasks_.empty(); }
 
@@ -898,19 +1018,31 @@ class CoroutineExecutor {
           executor_,
           executor_->io_context_,
           tasks_.size(),
-          executor_->CurrentRuntime());
+          executor_->CurrentRuntime(),
+          options_.fail_fast);
       state_->continuation = continuation;
+      state_->AttachExternalStopToken(options_.stop_token);
 
       for (size_t i = 0; i < tasks_.size(); ++i) {
+        if (options_.fail_fast && state_->IsCancellationRequested()) {
+          state_->CompleteAll();
+          continue;
+        }
+
         SpawnResult result =
             executor_->TrySpawn(RunWhenAllBranch(state_, std::move(tasks_[i])));
         if (result == SpawnResult::kSpawned) {
           continue;
         }
+        std::exception_ptr spawn_exception;
         if (on_spawn_rejected_) {
           on_spawn_rejected_(i, result);
         } else {
-          state_->RecordException(BuildSpawnRejectedException(result, i));
+          spawn_exception = BuildSpawnRejectedException(result, i);
+          state_->RecordException(spawn_exception);
+        }
+        if (options_.fail_fast) {
+          state_->RequestCancel(spawn_exception);
         }
         state_->CompleteAll();
       }
@@ -936,6 +1068,7 @@ class CoroutineExecutor {
     CoroutineExecutor* executor_ = nullptr;
     std::vector<Task<void>> tasks_;
     ParallelSpawnRejectedCallback on_spawn_rejected_;
+    WhenAllOptions options_{};
     std::shared_ptr<ParallelWaitState> state_;
   };
 
@@ -958,7 +1091,8 @@ class CoroutineExecutor {
           executor_,
           executor_->io_context_,
           tasks_.size(),
-          executor_->CurrentRuntime());
+          executor_->CurrentRuntime(),
+          false);
       state_->continuation = continuation;
 
       for (size_t i = 0; i < tasks_.size(); ++i) {
@@ -1074,7 +1208,16 @@ inline Task<void> CoroutineExecutor::SleepFor(std::chrono::steady_clock::duratio
 inline Task<void> CoroutineExecutor::WhenAll(
     std::vector<Task<void>> tasks,
     ParallelSpawnRejectedCallback on_spawn_rejected) {
-  co_await WhenAllAwaiter(this, std::move(tasks), std::move(on_spawn_rejected));
+  co_await WhenAllAwaiter(
+      this, std::move(tasks), std::move(on_spawn_rejected), WhenAllOptions{});
+}
+
+inline Task<void> CoroutineExecutor::WhenAll(
+    std::vector<Task<void>> tasks,
+    ParallelSpawnRejectedCallback on_spawn_rejected,
+    WhenAllOptions options) {
+  co_await WhenAllAwaiter(
+      this, std::move(tasks), std::move(on_spawn_rejected), options);
 }
 
 inline Task<size_t> CoroutineExecutor::WhenAny(

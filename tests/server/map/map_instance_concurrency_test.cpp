@@ -4,6 +4,10 @@
 #include <thread>
 #include <vector>
 
+#include "ecs/components/character_components.h"
+#include "ecs/event_bus.h"
+#include "ecs/events/area_events.h"
+#include "game/map/area_trigger.h"
 #include "game/map/map_instance.h"
 
 namespace {
@@ -122,6 +126,42 @@ TEST(MapInstanceConcurrencyTest, ConcurrentMoveAndToggleDoesNotLeaveGhostState) 
   if (has_entity) {
     EXPECT_TRUE(map.IsValidPosition(x, y));
   }
+}
+
+TEST(MapInstanceConcurrencyTest, AreaEventSubscriberCanReenterMapReadApis) {
+  entt::registry registry;
+  mir2::ecs::EventBus event_bus(registry);
+  MapInstance map(/*map_id=*/3, /*map_width=*/64, /*map_height=*/64);
+  map.SetEventBus(&event_bus);
+
+  const entt::entity entity = registry.create();
+  auto& state = registry.emplace<mir2::ecs::CharacterStateComponent>(entity);
+  state.position.x = 10;
+  state.position.y = 10;
+  ASSERT_TRUE(map.AddEntity(entity, 10, 10));
+
+  mir2::game::map::ContinuousAreaEffect damage;
+  damage.effect_id = 3001;
+  damage.type = mir2::game::map::AreaEffectType::kDamage;
+  damage.center_x = 10;
+  damage.center_y = 10;
+  damage.radius = 3;
+  damage.tick_interval = 1.0f;
+  damage.damage_per_tick = 5;
+  map.AddContinuousAreaEffect(damage);
+
+  int tick_count = 0;
+  event_bus.Subscribe<mir2::ecs::events::AreaDamageTickEvent>(
+      [&](const mir2::ecs::events::AreaDamageTickEvent& event) {
+        if (event.entity != entity) {
+          return;
+        }
+        ++tick_count;
+        EXPECT_TRUE(map.HasEntity(entity));
+      });
+
+  map.UpdateAreaEvents(1.0f, registry);
+  EXPECT_EQ(tick_count, 1);
 }
 
 }  // namespace

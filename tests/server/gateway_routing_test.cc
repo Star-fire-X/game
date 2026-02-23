@@ -9,6 +9,7 @@
 #include <asio/io_context.hpp>
 
 #include "common/enums.h"
+#include "common/protocol/universal_forward_msg_ids.h"
 #include "gateway/message_router.h"
 #include "guild_generated.h"
 
@@ -98,36 +99,12 @@ TEST(GatewayRoutingTest, UniversalForwardModeRegistersAllMessages) {
 
   server.RegisterHandlers();
 
-  const std::vector<uint16_t> expected_ids = {
-      static_cast<uint16_t>(common::MsgId::kHeartbeat),
-      static_cast<uint16_t>(common::MsgId::kLoginReq),
-      static_cast<uint16_t>(common::MsgId::kLogout),
-      static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
-      static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
-      static_cast<uint16_t>(common::MsgId::kRoleListReq),
-      static_cast<uint16_t>(common::MsgId::kMoveReq),
-      static_cast<uint16_t>(common::MsgId::kAttackReq),
-      static_cast<uint16_t>(common::MsgId::kSkillReq),
-      static_cast<uint16_t>(common::MsgId::kChatReq),
-      static_cast<uint16_t>(common::MsgId::kUseItemReq),
-      static_cast<uint16_t>(common::MsgId::kDropItemReq),
-      static_cast<uint16_t>(common::MsgId::kPickupItemReq),
-      static_cast<uint16_t>(common::MsgId::kEquipReq),
-      static_cast<uint16_t>(common::MsgId::kUnequipReq),
-      static_cast<uint16_t>(common::MsgId::kNpcInteractReq),
-      static_cast<uint16_t>(common::MsgId::kNpcMenuSelect),
-      static_cast<uint16_t>(common::MsgId::kGuildChat),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::KICK),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::MAKE_ALLY),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::BREAK_ALLY),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_NOTICE),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
-  };
+  std::vector<uint16_t> expected_ids;
+  expected_ids.reserve(mir2::common::protocol::kUniversalForwardMsgIds.size() + 1);
+  expected_ids.push_back(static_cast<uint16_t>(common::MsgId::kHeartbeat));
+  expected_ids.insert(expected_ids.end(),
+                      mir2::common::protocol::kUniversalForwardMsgIds.begin(),
+                      mir2::common::protocol::kUniversalForwardMsgIds.end());
 
   EXPECT_EQ(manager_ptr->HandlerCount(), expected_ids.size());
   for (auto msg_id : expected_ids) {

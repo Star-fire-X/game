@@ -7,6 +7,7 @@
 #if defined(ASIO_HAS_LOCAL_SOCKETS)
 #include <asio/local/stream_protocol.hpp>
 #endif
+#include <asio/post.hpp>
 
 namespace mir2::network {
 
@@ -18,7 +19,8 @@ constexpr size_t kServiceWriteQueueSize = 8192;
 }  // namespace
 
 TcpClient::TcpClient(asio::io_context& io_context)
-    : io_context_(io_context) {}
+    : io_context_(io_context),
+      send_strand_(asio::make_strand(io_context)) {}
 
 bool TcpClient::Connect(const std::string& host, uint16_t port) {
   if (connected_.load()) {
@@ -42,8 +44,8 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
       std::make_unique<AsioSocketAdapter>(std::move(socket)),
       1,
       kServiceWriteQueueSize);
-  protocol_version_ = ProtocolVersion::kV1;
-  protocol_version_detected_ = false;
+  protocol_version_ = ProtocolVersion::kV2;
+  protocol_version_detected_ = true;
   send_sequence_.store(0, std::memory_order_relaxed);
   recv_sequence_.store(0, std::memory_order_relaxed);
   read_buffer_.clear();
@@ -78,8 +80,8 @@ bool TcpClient::ConnectUnix(const std::string& socket_path) {
       std::make_unique<UdsSocketAdapter>(std::move(socket)),
       1,
       kServiceWriteQueueSize);
-  protocol_version_ = ProtocolVersion::kV1;
-  protocol_version_detected_ = false;
+  protocol_version_ = ProtocolVersion::kV2;
+  protocol_version_detected_ = true;
   send_sequence_.store(0, std::memory_order_relaxed);
   recv_sequence_.store(0, std::memory_order_relaxed);
   read_buffer_.clear();
@@ -98,17 +100,22 @@ bool TcpClient::ConnectUnix(const std::string& socket_path) {
 }
 
 void TcpClient::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
-  if (!connection_) {
+  if (!connected_.load(std::memory_order_acquire)) {
     return;
   }
-  std::vector<uint8_t> buffer;
-  if (protocol_version_ == ProtocolVersion::kV2) {
+
+  // Keep sequence assignment and enqueue order serialized to avoid sequence-window
+  // false positives when many threads call Send() concurrently.
+  asio::post(send_strand_, [this, msg_id, payload]() {
+    if (!connection_ || !connected_.load(std::memory_order_acquire)) {
+      return;
+    }
+
     const uint16_t sequence = send_sequence_.fetch_add(1, std::memory_order_relaxed);
-    buffer = PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
-  } else {
-    buffer = PacketCodec::Encode(msg_id, payload.data(), payload.size());
-  }
-  connection_->SendRaw(std::move(buffer));
+    std::vector<uint8_t> buffer =
+        PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
+    connection_->SendRaw(std::move(buffer));
+  });
 }
 
 void TcpClient::Close() {
@@ -184,31 +191,24 @@ void TcpClient::HandleBytes(const uint8_t* data, size_t size) {
       protocol_version_ = mir2::common::DetectProtocolVersion(frame);
       protocol_version_detected_ = true;
     }
+    if (protocol_version_ == ProtocolVersion::kV1) {
+      Close();
+      return;
+    }
 
-    const size_t header_size = protocol_version_ == ProtocolVersion::kV2
-                                   ? PacketHeaderV2::kSize
-                                   : PacketHeader::kSize;
+    const size_t header_size = PacketHeaderV2::kSize;
     if (buffered < header_size) {
       return;
     }
 
     size_t payload_size = 0;
-    if (protocol_version_ == ProtocolVersion::kV2) {
-      PacketHeaderV2 header{};
-      if (!PacketHeaderV2::FromBytes(frame, header_size, &header) ||
-          header.version != PacketHeaderV2::kVersion) {
-        Close();
-        return;
-      }
-      payload_size = header.payload_size;
-    } else {
-      PacketHeader header{};
-      if (!PacketHeader::FromBytes(frame, header_size, &header)) {
-        Close();
-        return;
-      }
-      payload_size = header.payload_size;
+    PacketHeaderV2 header{};
+    if (!PacketHeaderV2::FromBytes(frame, header_size, &header) ||
+        header.version != PacketHeaderV2::kVersion) {
+      Close();
+      return;
     }
+    payload_size = header.payload_size;
 
     if (payload_size > mir2::common::kMaxPayloadSize) {
       Close();
@@ -220,20 +220,12 @@ void TcpClient::HandleBytes(const uint8_t* data, size_t size) {
       return;
     }
 
-    if (protocol_version_ == ProtocolVersion::kV2) {
-      uint16_t sequence = 0;
-      const auto status =
-          PacketCodec::DecodeV2(frame, packet_size, &decode_packet_, &sequence);
-      if (status != DecodeStatus::kOk || !CheckRecvSequence(sequence)) {
-        Close();
-        return;
-      }
-    } else {
-      const auto status = PacketCodec::Decode(frame, packet_size, &decode_packet_);
-      if (status != DecodeStatus::kOk) {
-        Close();
-        return;
-      }
+    uint16_t sequence = 0;
+    const auto status =
+        PacketCodec::DecodeV2(frame, packet_size, &decode_packet_, &sequence);
+    if (status != DecodeStatus::kOk || !CheckRecvSequence(sequence)) {
+      Close();
+      return;
     }
 
     if (packet_handler_) {

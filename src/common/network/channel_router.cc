@@ -57,10 +57,14 @@ void ChannelRouter::InitializeDefaults() {
 
   // HP/MP and lightweight state sync broadcasts.
   add_kcp(MsgId::kStateSync);
+  add_kcp(MsgId::kPartyUpdate);
 
   // Combat visuals (attack animation, hit/death effects, skill visuals).
   add_kcp(MsgId::kAttackRsp);
   add_kcp(MsgId::kDeath);
+  add_kcp(MsgId::kRespawn);
+  add_kcp(MsgId::kBuffAdd);
+  add_kcp(MsgId::kBuffRemove);
   add_kcp(MsgId::kSkillEffect);
   add_kcp(MsgId::kPlayEffect);
   add_kcp(MsgId::kPlaySound);

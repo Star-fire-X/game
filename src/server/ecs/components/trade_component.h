@@ -18,8 +18,10 @@ enum class TradeState : uint8_t {
 };
 
 struct TradeComponent {
+    uint64_t trade_id = 0;
     entt::entity partner = entt::null;
     TradeState state = TradeState::kNone;
+    int64_t started_at_ms = 0;
     // EnTT's null sentinel is not guaranteed to be zero; initialize explicitly.
     std::array<entt::entity, kMaxTradeSlots> offered_items = [] {
         std::array<entt::entity, kMaxTradeSlots> value{};

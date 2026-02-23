@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <asio/error_code.hpp>
@@ -26,6 +27,7 @@
 #include <asio/steady_timer.hpp>
 
 #include "core/application.h"
+#include "ecs/id_types.h"
 #include "game/map/gate_manager.h"
 #include "logic/services/client_registry.h"
 #include "logic/task.h"
@@ -49,6 +51,10 @@ class TeleportSystem;
 namespace mir2::storage_engine {
 class StorageEngine;
 }  // namespace mir2::storage_engine
+
+namespace mir2::db {
+class PgConnectionPool;
+}  // namespace mir2::db
 
 namespace mir2::game::map {
 class AOIManager;
@@ -80,10 +86,18 @@ class ChatHandler;
 class PlayerPresenceService;
 class EcsCombatService;
 class EcsInventoryService;
+class WorldSyncBroadcastService;
 class ItemHandler;
 class GuildHandler;
+class TradeHandler;
+class PartyHandler;
+class MailHandler;
+class RankingHandler;
+class AchievementHandler;
+class AuctionHandler;
 class NpcCommandHandler;
 class RoleStore;
+class RankingService;
 struct HandlerContext;
 
 struct WorldSystemBundle {
@@ -101,6 +115,7 @@ struct WorldSystemBundle {
   std::unique_ptr<ecs::SkillSystem> skill_system;
   std::unique_ptr<ecs::MonsterAISystem> monster_ai_system;
   std::unique_ptr<ecs::MonsterDropSystem> monster_drop_system;
+  std::unique_ptr<WorldSyncBroadcastService> world_sync_broadcast_service;
   ecs::TeleportSystem* teleport_system = nullptr;
 };
 
@@ -127,6 +142,7 @@ class LogicServer {
   void OnTick(const asio::error_code& ec);
   void MaybeScanHungCoroutines(std::chrono::steady_clock::time_point now);
   void DumpActiveCoroutines(const char* reason) const;
+  bool ReloadStorageRuntimeConfig();
   void RegisterSignalHandlers();
   void OnSignal(const asio::error_code& ec, int signal);
   void RequestStop();
@@ -146,6 +162,7 @@ class LogicServer {
                                    const std::vector<uint8_t>& payload);
   Task<void> RunPlayerMailbox(uint64_t client_id);
   Task<void> ExecuteQueuedEvent(const events::HotEvent& event);
+  bool CancelMailbox(uint64_t client_id, const char* reason);
   void HandleMailboxSpawnRejected(uint64_t client_id, SpawnResult reason);
   void PublishMailboxQueueMetrics() const;
   bool TryReserveBackpressureSignal(uint64_t client_id,
@@ -156,6 +173,14 @@ class LogicServer {
                                   uint32_t duration_ms,
                                   int64_t cooldown_ms);
   void KickMailboxOverflow(uint64_t client_id);
+  void KickMailboxException(uint64_t client_id);
+  void OnGatewayDisconnected();
+  void CleanupAllClientSessions(const char* reason);
+  bool CleanupClientSession(uint64_t client_id, const char* reason);
+  void ReconcileWithGatewaySnapshot(const std::unordered_set<uint64_t>& restored_client_ids,
+                                    uint32_t request_id);
+  void MarkClientActivity(uint64_t client_id, int64_t now_ms);
+  void ScanZombieSessions(int64_t now_ms);
   void HandleServiceHello(const std::shared_ptr<network::TcpSession>& session,
                           const std::vector<uint8_t>& payload);
   void HandleRoutedMessage(const std::shared_ptr<network::TcpSession>& session,
@@ -166,7 +191,10 @@ class LogicServer {
   void HandleContextRestoreResponse(const std::shared_ptr<network::TcpSession>& session,
                                     const std::vector<uint8_t>& payload);
   Task<void> RunPrewarm(std::vector<PrewarmEntry> entries);
-  bool RestoreSessionFromPrewarm(uint64_t client_id, uint32_t player_id, uint32_t account_id);
+  bool RestoreSessionFromPrewarm(uint64_t client_id,
+                                 ecs::CharacterId player_id,
+                                 ecs::AccountId account_id);
+  void TriggerImmediateStateSync(uint64_t player_id);
   bool PostToMainThread(std::function<void()> fn);
   void SendContextRestore();
   void SendLogicReady(uint32_t prewarm_count, uint64_t duration_ms);
@@ -193,8 +221,16 @@ class LogicServer {
   std::unique_ptr<ItemHandler> item_handler_;
   std::unique_ptr<EcsInventoryService> ecs_inventory_service_;
   std::unique_ptr<GuildHandler> guild_handler_;
+  std::unique_ptr<TradeHandler> trade_handler_;
+  std::unique_ptr<PartyHandler> party_handler_;
+  std::unique_ptr<MailHandler> mail_handler_;
+  std::unique_ptr<RankingHandler> ranking_handler_;
+  std::unique_ptr<AchievementHandler> achievement_handler_;
+  std::unique_ptr<AuctionHandler> auction_handler_;
   std::unique_ptr<NpcCommandHandler> npc_command_handler_;
+  std::unique_ptr<RankingService> ranking_service_;
   std::unique_ptr<game::map::AOIManager> chat_aoi_manager_;
+  std::shared_ptr<db::PgConnectionPool> db_pool_;
   ecs::GuildSystem* guild_system_ = nullptr;
   std::unique_ptr<RoleStore> role_store_;
   ClientRegistry client_registry_;
@@ -202,6 +238,7 @@ class LogicServer {
   ecs::RegistryManager* registry_manager_ = nullptr;
   std::unique_ptr<game::map::SceneManager> scene_manager_;
   std::unordered_map<uint32_t, std::unique_ptr<WorldSystemBundle>> world_systems_;
+  std::string config_path_;
   std::unique_ptr<asio::steady_timer> tick_timer_;
   std::unique_ptr<asio::signal_set> signal_set_;
   std::chrono::steady_clock::time_point last_tick_time_;
@@ -224,6 +261,7 @@ class LogicServer {
   };
   // Accessed only on the logic io_context thread.
   std::unordered_map<uint64_t, PlayerMailbox> player_mailboxes_;
+  std::unordered_set<uint64_t> cancelled_mailbox_clients_;
   size_t mailbox_pending_events_total_ = 0;
   size_t mailbox_active_runners_ = 0;
   std::mutex backpressure_mutex_;
@@ -235,10 +273,16 @@ class LogicServer {
   std::chrono::steady_clock::time_point next_coroutine_scan_time_{};
   size_t hot_event_max_drain_per_tick_ = 2048;
   std::chrono::milliseconds hot_event_max_drain_duration_per_tick_{5};
+  bool session_cleanup_on_gateway_disconnect_ = true;
+  bool reconcile_cleanup_enabled_ = true;
+  bool zombie_detection_enabled_ = true;
+  int64_t zombie_scan_interval_ms_ = 5000;
+  int64_t zombie_idle_timeout_ms_ = 120000;
   bool legacy_fallback_enabled_ = true;
   bool legacy_fallback_allow_auth_whitelist_ = true;
   bool legacy_fallback_allow_critical_msgs_ = true;
   bool legacy_fallback_allow_normal_msgs_ = false;
+  bool chat_batch_send_enabled_ = true;
   uint32_t backpressure_pause_ms_ = 100;
   int64_t backpressure_signal_cooldown_ms_ = 100;
   uint32_t mailbox_soft_backpressure_pause_ms_ = 100;
@@ -252,6 +296,9 @@ class LogicServer {
   uint8_t mailbox_overflow_kick_threshold_ = 3;
   size_t mailbox_global_pending_hard_limit_ = 20000;
   size_t mailbox_global_pending_soft_limit_ = 15000;
+  std::unordered_map<uint64_t, int64_t> client_last_activity_ms_;
+  std::unordered_set<uint64_t> last_reconciled_client_ids_;
+  int64_t last_zombie_scan_ms_ = 0;
   mutable std::mutex gateway_mutex_;
   std::shared_ptr<network::TcpSession> gateway_session_;
 };

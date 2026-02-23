@@ -75,13 +75,14 @@ SessionPair CreateSessionPair(asio::io_context& io_context, uint64_t connection_
 void ReadKickMessage(asio::ip::tcp::socket& socket,
                      common::ErrorCode expected_reason,
                      const std::string& expected_text) {
-    std::array<uint8_t, network::PacketHeader::kSize> header_bytes{};
+    std::array<uint8_t, network::PacketHeaderV2::kSize> header_bytes{};
     asio::error_code ec;
     asio::read(socket, asio::buffer(header_bytes), ec);
     ASSERT_FALSE(ec);
 
-    network::PacketHeader header{};
-    ASSERT_TRUE(network::PacketHeader::FromBytes(header_bytes.data(), header_bytes.size(), &header));
+    network::PacketHeaderV2 header{};
+    ASSERT_TRUE(network::PacketHeaderV2::FromBytes(
+        header_bytes.data(), header_bytes.size(), &header));
     EXPECT_EQ(header.msg_id, static_cast<uint16_t>(common::MsgId::kKick));
     ASSERT_GT(header.payload_size, 0u);
 

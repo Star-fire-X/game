@@ -14,11 +14,19 @@
 #include "internal_generated.h"
 #include "item_generated.h"
 #include "login_generated.h"
+#include "mail_generated.h"
+#include "party_generated.h"
+#include "ranking_generated.h"
 #include "system_generated.h"
+#include "trade_generated.h"
+#include "achievement_generated.h"
+#include "auction_generated.h"
 
 namespace mir2::common {
 
 namespace {
+
+constexpr uint32_t kLegacyV1Magic = 0x4D495232;  // "MIR2"
 
 constexpr uint16_t kCrc16Table[256] = {
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
@@ -145,6 +153,10 @@ bool VerifyFlatBufferPayload(uint16_t msg_id, const uint8_t* data, size_t size) 
             return verifier.VerifyBuffer<mir2::proto::Teleport>(nullptr);
         case static_cast<uint16_t>(MsgId::kStateSync):
             return verifier.VerifyBuffer<mir2::proto::StateSync>(nullptr);
+        case static_cast<uint16_t>(MsgId::kBonusPointReq):
+            return verifier.VerifyBuffer<mir2::proto::BonusPointReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kBonusPointRsp):
+            return verifier.VerifyBuffer<mir2::proto::BonusPointRsp>(nullptr);
         case static_cast<uint16_t>(MsgId::kAttackReq):
             return verifier.VerifyBuffer<mir2::proto::AttackReq>(nullptr);
         case static_cast<uint16_t>(MsgId::kAttackRsp):
@@ -206,6 +218,48 @@ bool VerifyFlatBufferPayload(uint16_t msg_id, const uint8_t* data, size_t size) 
         case static_cast<uint16_t>(MsgId::kAreaChat):
         case static_cast<uint16_t>(MsgId::kSystemMsg):
             return verifier.VerifyBuffer<mir2::proto::ChatMessage>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildCreateReq):
+            return verifier.VerifyBuffer<mir2::proto::CreateGuildRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildCreateRsp):
+            return verifier.VerifyBuffer<mir2::proto::CreateGuildResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildJoinReq):
+            return verifier.VerifyBuffer<mir2::proto::JoinGuildRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildJoinRsp):
+            return verifier.VerifyBuffer<mir2::proto::JoinGuildResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildLeaveReq):
+            return verifier.VerifyBuffer<mir2::proto::LeaveGuildRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildLeaveRsp):
+            return verifier.VerifyBuffer<mir2::proto::LeaveGuildResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildKickReq):
+            return verifier.VerifyBuffer<mir2::proto::KickGuildRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildKickRsp):
+            return verifier.VerifyBuffer<mir2::proto::KickGuildResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildDeclareWarReq):
+            return verifier.VerifyBuffer<mir2::proto::DeclareWarRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildDeclareWarRsp):
+            return verifier.VerifyBuffer<mir2::proto::DeclareWarResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildCancelWarReq):
+            return verifier.VerifyBuffer<mir2::proto::CancelWarRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildCancelWarRsp):
+            return verifier.VerifyBuffer<mir2::proto::CancelWarResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildMakeAllyReq):
+            return verifier.VerifyBuffer<mir2::proto::MakeAllianceRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildMakeAllyRsp):
+            return verifier.VerifyBuffer<mir2::proto::MakeAllianceResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildBreakAllyReq):
+            return verifier.VerifyBuffer<mir2::proto::BreakAllianceRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildBreakAllyRsp):
+            return verifier.VerifyBuffer<mir2::proto::BreakAllianceResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildUpdateNoticeReq):
+            return verifier.VerifyBuffer<mir2::proto::UpdateNoticeRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildUpdateNoticeRsp):
+            return verifier.VerifyBuffer<mir2::proto::UpdateNoticeResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildUpdateRankReq):
+            return verifier.VerifyBuffer<mir2::proto::UpdateRankRequest>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildUpdateRankRsp):
+            return verifier.VerifyBuffer<mir2::proto::UpdateRankResponse>(nullptr);
+        case static_cast<uint16_t>(MsgId::kGuildInfoSync):
+            return verifier.VerifyBuffer<mir2::proto::GuildInfoSync>(nullptr);
         case static_cast<uint16_t>(MsgId::kHeartbeat):
             return verifier.VerifyBuffer<mir2::proto::Heartbeat>(nullptr);
         case static_cast<uint16_t>(MsgId::kHeartbeatRsp):
@@ -222,6 +276,106 @@ bool VerifyFlatBufferPayload(uint16_t msg_id, const uint8_t* data, size_t size) 
             return verifier.VerifyBuffer<mir2::proto::KcpHeartbeat>(nullptr);
         case static_cast<uint16_t>(MsgId::kKcpHeartbeatAck):
             return verifier.VerifyBuffer<mir2::proto::KcpHeartbeatAck>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeReq):
+            return verifier.VerifyBuffer<mir2::proto::TradeReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeRsp):
+            return verifier.VerifyBuffer<mir2::proto::TradeRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeAddItemReq):
+            return verifier.VerifyBuffer<mir2::proto::TradeAddItemReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeAddItemRsp):
+            return verifier.VerifyBuffer<mir2::proto::TradeAddItemRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeSetGoldReq):
+            return verifier.VerifyBuffer<mir2::proto::TradeSetGoldReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeSetGoldRsp):
+            return verifier.VerifyBuffer<mir2::proto::TradeSetGoldRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeConfirmReq):
+            return verifier.VerifyBuffer<mir2::proto::TradeConfirmReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeConfirmRsp):
+            return verifier.VerifyBuffer<mir2::proto::TradeConfirmRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeCancelReq):
+            return verifier.VerifyBuffer<mir2::proto::TradeCancelReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeCancelRsp):
+            return verifier.VerifyBuffer<mir2::proto::TradeCancelRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeUpdate):
+            return verifier.VerifyBuffer<mir2::proto::TradeUpdate>(nullptr);
+        case static_cast<uint16_t>(MsgId::kTradeComplete):
+            return verifier.VerifyBuffer<mir2::proto::TradeComplete>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyInviteReq):
+            return verifier.VerifyBuffer<mir2::proto::PartyInviteReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyInviteRsp):
+            return verifier.VerifyBuffer<mir2::proto::PartyInviteRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyJoinReq):
+            return verifier.VerifyBuffer<mir2::proto::PartyJoinReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyJoinRsp):
+            return verifier.VerifyBuffer<mir2::proto::PartyJoinRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyLeaveReq):
+            return verifier.VerifyBuffer<mir2::proto::PartyLeaveReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyLeaveRsp):
+            return verifier.VerifyBuffer<mir2::proto::PartyLeaveRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyKickReq):
+            return verifier.VerifyBuffer<mir2::proto::PartyKickReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyKickRsp):
+            return verifier.VerifyBuffer<mir2::proto::PartyKickRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kPartyUpdate):
+            return verifier.VerifyBuffer<mir2::proto::PartyUpdate>(nullptr);
+        case static_cast<uint16_t>(MsgId::kRankingReq):
+            return verifier.VerifyBuffer<mir2::proto::RankingReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kRankingRsp):
+            return verifier.VerifyBuffer<mir2::proto::RankingRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kRankingMyRankReq):
+            return verifier.VerifyBuffer<mir2::proto::RankingMyRankReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kRankingMyRankRsp):
+            return verifier.VerifyBuffer<mir2::proto::RankingMyRankRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailSendReq):
+            return verifier.VerifyBuffer<mir2::proto::MailSendReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailSendRsp):
+            return verifier.VerifyBuffer<mir2::proto::MailSendRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailListReq):
+            return verifier.VerifyBuffer<mir2::proto::MailListReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailListRsp):
+            return verifier.VerifyBuffer<mir2::proto::MailListRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailReadReq):
+            return verifier.VerifyBuffer<mir2::proto::MailReadReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailReadRsp):
+            return verifier.VerifyBuffer<mir2::proto::MailReadRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailDeleteReq):
+            return verifier.VerifyBuffer<mir2::proto::MailDeleteReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailDeleteRsp):
+            return verifier.VerifyBuffer<mir2::proto::MailDeleteRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailClaimReq):
+            return verifier.VerifyBuffer<mir2::proto::MailClaimReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailClaimRsp):
+            return verifier.VerifyBuffer<mir2::proto::MailClaimRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kMailNotify):
+            return verifier.VerifyBuffer<mir2::proto::MailNotify>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAchievementListReq):
+            return verifier.VerifyBuffer<mir2::proto::AchievementListReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAchievementListRsp):
+            return verifier.VerifyBuffer<mir2::proto::AchievementListRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAchievementClaimReq):
+            return verifier.VerifyBuffer<mir2::proto::AchievementClaimReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAchievementClaimRsp):
+            return verifier.VerifyBuffer<mir2::proto::AchievementClaimRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAchievementUpdate):
+            return verifier.VerifyBuffer<mir2::proto::AchievementUpdate>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionListReq):
+            return verifier.VerifyBuffer<mir2::proto::AuctionListReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionListRsp):
+            return verifier.VerifyBuffer<mir2::proto::AuctionListRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionSellReq):
+            return verifier.VerifyBuffer<mir2::proto::AuctionSellReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionSellRsp):
+            return verifier.VerifyBuffer<mir2::proto::AuctionSellRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionBuyReq):
+            return verifier.VerifyBuffer<mir2::proto::AuctionBuyReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionBuyRsp):
+            return verifier.VerifyBuffer<mir2::proto::AuctionBuyRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionCancelReq):
+            return verifier.VerifyBuffer<mir2::proto::AuctionCancelReq>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionCancelRsp):
+            return verifier.VerifyBuffer<mir2::proto::AuctionCancelRsp>(nullptr);
+        case static_cast<uint16_t>(MsgId::kAuctionNotify):
+            return verifier.VerifyBuffer<mir2::proto::AuctionNotify>(nullptr);
         case static_cast<uint16_t>(InternalMsgId::kServiceHello):
             return verifier.VerifyBuffer<mir2::internal::ServiceHello>(nullptr);
         case static_cast<uint16_t>(InternalMsgId::kServiceHelloAck):
@@ -266,26 +420,6 @@ bool VerifyFlatBufferPayload(uint16_t msg_id, const uint8_t* data, size_t size) 
 
 }  // namespace
 
-std::array<uint8_t, PacketHeader::kSize> PacketHeader::ToBytes() const {
-    std::array<uint8_t, kSize> buffer{};
-    std::memcpy(buffer.data(), &magic, sizeof(magic));
-    std::memcpy(buffer.data() + sizeof(magic), &msg_id, sizeof(msg_id));
-    std::memcpy(buffer.data() + sizeof(magic) + sizeof(msg_id), &payload_size, sizeof(payload_size));
-    return buffer;
-}
-
-bool PacketHeader::FromBytes(const uint8_t* data, size_t len, PacketHeader* out_header) {
-    if (!data || len < kSize || !out_header) {
-        return false;
-    }
-    std::memcpy(&out_header->magic, data, sizeof(out_header->magic));
-    std::memcpy(&out_header->msg_id, data + sizeof(out_header->magic), sizeof(out_header->msg_id));
-    std::memcpy(&out_header->payload_size,
-                data + sizeof(out_header->magic) + sizeof(out_header->msg_id),
-                sizeof(out_header->payload_size));
-    return out_header->magic == kMagic;
-}
-
 std::array<uint8_t, PacketHeaderV2::kSize> PacketHeaderV2::ToBytes() const {
     std::array<uint8_t, kSize> buffer{};
     size_t offset = 0;
@@ -328,59 +462,6 @@ bool PacketHeaderV2::FromBytes(const uint8_t* data, size_t len, PacketHeaderV2* 
 
 uint16_t CalcCRC16(const uint8_t* data, size_t length) {
     return UpdateCRC16(0xFFFF, data, length);
-}
-
-std::vector<uint8_t> EncodePacket(uint16_t msg_id, const uint8_t* payload, size_t payload_size) {
-    if (payload_size > kMaxPayloadSize ||
-        payload_size > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
-        return {};
-    }
-
-    std::vector<uint8_t> buffer(PacketHeader::kSize + payload_size);
-    size_t offset = 0;
-    const uint32_t magic = PacketHeader::kMagic;
-    std::memcpy(buffer.data() + offset, &magic, sizeof(magic));
-    offset += sizeof(magic);
-    std::memcpy(buffer.data() + offset, &msg_id, sizeof(msg_id));
-    offset += sizeof(msg_id);
-    const uint32_t size_field = static_cast<uint32_t>(payload_size);
-    std::memcpy(buffer.data() + offset, &size_field, sizeof(size_field));
-    offset += sizeof(size_field);
-    if (payload && payload_size > 0) {
-        std::memcpy(buffer.data() + offset, payload, payload_size);
-    }
-    return buffer;
-}
-
-DecodeStatus DecodePacket(const uint8_t* data, size_t length, NetworkPacket* out_packet) {
-    if (!data || !out_packet || length < PacketHeader::kSize) {
-        return DecodeStatus::kTruncated;
-    }
-
-    PacketHeader header{};
-    if (!PacketHeader::FromBytes(data, length, &header)) {
-        return DecodeStatus::kInvalidMagic;
-    }
-
-    if (header.payload_size > kMaxPayloadSize ||
-        header.payload_size > std::numeric_limits<size_t>::max() - PacketHeader::kSize) {
-        return DecodeStatus::kPayloadTooLarge;
-    }
-
-    const size_t expected_size = PacketHeader::kSize + static_cast<size_t>(header.payload_size);
-    if (length < expected_size) {
-        return DecodeStatus::kTruncated;
-    }
-
-    const uint8_t* payload_data = data + PacketHeader::kSize;
-    const size_t payload_size = static_cast<size_t>(header.payload_size);
-    if (!VerifyFlatBufferPayload(header.msg_id, payload_data, payload_size)) {
-        return DecodeStatus::kInvalidPayload;
-    }
-
-    out_packet->msg_id = header.msg_id;
-    out_packet->payload.assign(payload_data, payload_data + payload_size);
-    return DecodeStatus::kOk;
 }
 
 std::vector<uint8_t> EncodePacketV2(uint16_t msg_id,
@@ -440,7 +521,7 @@ DecodeStatus DecodePacketV2(const uint8_t* data,
 
     uint32_t magic = 0;
     std::memcpy(&magic, data, sizeof(magic));
-    if (magic == PacketHeader::kMagic) {
+    if (magic == kLegacyV1Magic) {
         return DecodeStatus::kProtocolNotSupported;
     }
 

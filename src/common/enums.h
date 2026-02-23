@@ -78,6 +78,29 @@ enum class MsgId : uint16_t {
   kAreaChat = 5040,
   kSystemMsg = 5050,
 
+  // ========== 行会模块 (5100-5199) ==========
+  kGuildCreateReq = 5101,
+  kGuildCreateRsp = 5102,
+  kGuildJoinReq = 5110,
+  kGuildJoinRsp = 5111,
+  kGuildLeaveReq = 5120,
+  kGuildLeaveRsp = 5121,
+  kGuildKickReq = 5130,
+  kGuildKickRsp = 5131,
+  kGuildDeclareWarReq = 5140,
+  kGuildDeclareWarRsp = 5141,
+  kGuildCancelWarReq = 5142,
+  kGuildCancelWarRsp = 5143,
+  kGuildMakeAllyReq = 5150,
+  kGuildMakeAllyRsp = 5151,
+  kGuildBreakAllyReq = 5152,
+  kGuildBreakAllyRsp = 5153,
+  kGuildUpdateNoticeReq = 5160,
+  kGuildUpdateNoticeRsp = 5161,
+  kGuildUpdateRankReq = 5162,
+  kGuildUpdateRankRsp = 5163,
+  kGuildInfoSync = 5170,
+
   // ========== NPC模块 (6000-6999) ==========
   kNpcInteractReq = 6001,   // 玩家点击NPC请求
   kNpcInteractRsp = 6002,   // NPC交互响应
@@ -87,6 +110,68 @@ enum class MsgId : uint16_t {
   kNpcShopClose = 6021,     // 关闭NPC商店
   kNpcQuestAccept = 6030,   // 接受任务
   kNpcQuestComplete = 6031, // 完成任务
+
+  // ========== 交易模块 (7000-7099) ==========
+  kTradeReq = 7001,
+  kTradeRsp = 7002,
+  kTradeAddItemReq = 7010,
+  kTradeAddItemRsp = 7011,
+  kTradeSetGoldReq = 7020,
+  kTradeSetGoldRsp = 7021,
+  kTradeConfirmReq = 7030,
+  kTradeConfirmRsp = 7031,
+  kTradeCancelReq = 7032,
+  kTradeCancelRsp = 7033,
+  kTradeUpdate = 7040,
+  kTradeComplete = 7041,
+
+  // ========== 组队模块 (7100-7199) ==========
+  kPartyInviteReq = 7101,
+  kPartyInviteRsp = 7102,
+  kPartyJoinReq = 7110,
+  kPartyJoinRsp = 7111,
+  kPartyLeaveReq = 7112,
+  kPartyLeaveRsp = 7113,
+  kPartyKickReq = 7114,
+  kPartyKickRsp = 7115,
+  kPartyUpdate = 7120,
+
+  // ========== 排行榜模块 (8000-8099) ==========
+  kRankingReq = 8001,
+  kRankingRsp = 8002,
+  kRankingMyRankReq = 8010,
+  kRankingMyRankRsp = 8011,
+
+  // ========== 邮件模块 (8100-8199) ==========
+  kMailSendReq = 8101,
+  kMailSendRsp = 8102,
+  kMailListReq = 8110,
+  kMailListRsp = 8111,
+  kMailReadReq = 8120,
+  kMailReadRsp = 8121,
+  kMailDeleteReq = 8130,
+  kMailDeleteRsp = 8131,
+  kMailClaimReq = 8140,
+  kMailClaimRsp = 8141,
+  kMailNotify = 8150,
+
+  // ========== 成就模块 (8200-8299) ==========
+  kAchievementListReq = 8201,
+  kAchievementListRsp = 8202,
+  kAchievementClaimReq = 8210,
+  kAchievementClaimRsp = 8211,
+  kAchievementUpdate = 8220,
+
+  // ========== 拍卖行模块 (8300-8399) ==========
+  kAuctionListReq = 8301,
+  kAuctionListRsp = 8302,
+  kAuctionSellReq = 8310,
+  kAuctionSellRsp = 8311,
+  kAuctionBuyReq = 8320,
+  kAuctionBuyRsp = 8321,
+  kAuctionCancelReq = 8330,
+  kAuctionCancelRsp = 8331,
+  kAuctionNotify = 8340,
 
   // ========== 系统模块 (9000-9999) ==========
   kHeartbeat = 9001,

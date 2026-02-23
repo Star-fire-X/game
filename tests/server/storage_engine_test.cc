@@ -15,8 +15,12 @@
 #include <condition_variable>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace mir2::storage_engine;
@@ -46,6 +50,122 @@ public:
     mutable std::atomic<uint32_t> health_checks{0};
 };
 
+class SaveCountingBackend : public test::NoopStorageBackend {
+public:
+    IStorageBackend::StorageResult Save(
+        const std::string&,
+        uint64_t,
+        const std::vector<uint8_t>&) override {
+        save_calls.fetch_add(1, std::memory_order_relaxed);
+        return IStorageBackend::StorageResult{true, "", 0};
+    }
+
+    IStorageBackend::StorageResult SaveBatch(
+        const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
+        override {
+        save_batch_calls.fetch_add(1, std::memory_order_relaxed);
+        return IStorageBackend::StorageResult{true, "", 0};
+    }
+
+    std::atomic<uint32_t> save_calls{0};
+    std::atomic<uint32_t> save_batch_calls{0};
+};
+
+class FailingSaveBackend : public test::NoopStorageBackend {
+public:
+    IStorageBackend::StorageResult Save(
+        const std::string&,
+        uint64_t,
+        const std::vector<uint8_t>&) override {
+        save_calls.fetch_add(1, std::memory_order_relaxed);
+        return IStorageBackend::StorageResult{false, "forced save failure", 0};
+    }
+
+    IStorageBackend::StorageResult SaveBatch(
+        const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
+        override {
+        return IStorageBackend::StorageResult{false, "forced batch failure", 0};
+    }
+
+    bool IsHealthy() const override {
+        return true;
+    }
+
+    std::atomic<uint32_t> save_calls{0};
+};
+
+struct DurableToggleBackendState {
+    mutable std::mutex mutex;
+    std::map<std::string, std::pair<uint64_t, std::vector<uint8_t>>> store;
+    std::atomic<bool> healthy{true};
+    std::atomic<uint32_t> save_calls{0};
+};
+
+class DurableToggleBackend : public IStorageBackend {
+public:
+    explicit DurableToggleBackend(std::shared_ptr<DurableToggleBackendState> state)
+        : state_(std::move(state)) {}
+
+    StorageResult Save(const std::string& key,
+                       uint64_t version,
+                       const std::vector<uint8_t>& data) override {
+        if (!IsHealthy()) {
+            return StorageResult{false, "backend not healthy", 0};
+        }
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        auto it = state_->store.find(key);
+        if (it == state_->store.end() || it->second.first < version) {
+            state_->store[key] = std::make_pair(version, data);
+        }
+        state_->save_calls.fetch_add(1, std::memory_order_relaxed);
+        return StorageResult{true, "", 0};
+    }
+
+    StorageResult SaveBatch(
+        const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items)
+        override {
+        if (!IsHealthy()) {
+            return StorageResult{false, "backend not healthy", 0};
+        }
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        for (const auto& [key, version, data] : items) {
+            auto it = state_->store.find(key);
+            if (it == state_->store.end() || it->second.first < version) {
+                state_->store[key] = std::make_pair(version, data);
+            }
+            state_->save_calls.fetch_add(1, std::memory_order_relaxed);
+        }
+        return StorageResult{true, "", 0};
+    }
+
+    std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(
+        const std::string& key) override {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        auto it = state_->store.find(key);
+        if (it == state_->store.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    std::optional<std::map<std::string, std::pair<uint64_t, std::vector<uint8_t>>>> LoadAll()
+        override {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        return state_->store;
+    }
+
+    StorageResult Validate() override {
+        return StorageResult{true, "", 0};
+    }
+
+    bool IsHealthy() const override {
+        return state_->healthy.load(std::memory_order_relaxed);
+    }
+
+private:
+    std::shared_ptr<DurableToggleBackendState> state_;
+};
+
 class AccountPayloadBackend : public test::NoopStorageBackend {
 public:
     explicit AccountPayloadBackend(std::string username)
@@ -71,6 +191,86 @@ public:
 
     std::string account_key_;
     std::atomic<uint32_t> load_calls{0};
+};
+
+class TestInvalidationAdapter : public StorageEngine::IInvalidationAdapter {
+public:
+    bool Start(StorageEngine::InvalidationInboundHandler inbound_handler) override {
+        if (!start_success_) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        started_ = true;
+        stopped_ = false;
+        inbound_handler_ = std::move(inbound_handler);
+        return true;
+    }
+
+    void Stop() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopped_ = true;
+        inbound_handler_ = nullptr;
+    }
+
+    bool Publish(const StorageEngine::InvalidationEvent& event) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        published_events_.push_back(event);
+        return publish_success_;
+    }
+
+    void SetStartSuccess(bool value) {
+        start_success_ = value;
+    }
+
+    void SetPublishSuccess(bool value) {
+        publish_success_ = value;
+    }
+
+    bool EmitInbound(const StorageEngine::InvalidationEvent& event) {
+        StorageEngine::InvalidationInboundHandler handler;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            handler = inbound_handler_;
+        }
+        if (!handler) {
+            return false;
+        }
+        handler(event);
+        return true;
+    }
+
+    size_t published_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return published_events_.size();
+    }
+
+    std::optional<StorageEngine::InvalidationEvent> published_at(
+        size_t index) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (index >= published_events_.size()) {
+            return std::nullopt;
+        }
+        return published_events_[index];
+    }
+
+    bool started() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return started_;
+    }
+
+    bool stopped() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return stopped_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    bool start_success_ = true;
+    bool publish_success_ = true;
+    bool started_ = false;
+    bool stopped_ = false;
+    StorageEngine::InvalidationInboundHandler inbound_handler_;
+    std::vector<StorageEngine::InvalidationEvent> published_events_;
 };
 
 // ===== 测试夹具 =====
@@ -111,6 +311,174 @@ TEST_F(StorageEngineTest, SetAndGet) {
     auto result = engine.Get("test_key");
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->data, data);
+}
+
+TEST_F(StorageEngineTest, CompareAndSetUpdatesWhenVersionMatches) {
+    auto& engine = StorageEngine::Instance();
+    const std::vector<uint8_t> original = {1, 2, 3};
+    ASSERT_TRUE(engine.Set("cas:key", original));
+
+    auto current = engine.Get("cas:key");
+    ASSERT_TRUE(current.has_value());
+    const uint64_t expected_version = current->version;
+
+    const std::vector<uint8_t> updated = {9, 9, 9};
+    ASSERT_TRUE(engine.CompareAndSet("cas:key", expected_version, updated));
+
+    auto after = engine.Get("cas:key");
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->data, updated);
+}
+
+TEST_F(StorageEngineTest, CompareAndSetRejectsVersionMismatch) {
+    auto& engine = StorageEngine::Instance();
+    const std::vector<uint8_t> original = {1, 2, 3};
+    ASSERT_TRUE(engine.Set("cas:mismatch", original));
+    auto current = engine.Get("cas:mismatch");
+    ASSERT_TRUE(current.has_value());
+
+    const std::vector<uint8_t> updated = {4, 5, 6};
+    EXPECT_FALSE(
+        engine.CompareAndSet("cas:mismatch", current->version + 100, updated));
+
+    auto after = engine.Get("cas:mismatch");
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->data, original);
+}
+
+TEST_F(StorageEngineTest, BatchSetAndBatchGetRoundTrip) {
+    auto& engine = StorageEngine::Instance();
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>> kvs = {
+        {"batch:a", {1, 1}},
+        {"batch:b", {2, 2}},
+        {"batch:c", {3, 3}},
+    };
+    ASSERT_TRUE(engine.BatchSet(kvs));
+
+    const auto result =
+        engine.BatchGet({"batch:a", "batch:b", "batch:c", "batch:missing"});
+    ASSERT_EQ(result.size(), 4u);
+    ASSERT_TRUE(result[0].has_value());
+    ASSERT_TRUE(result[1].has_value());
+    ASSERT_TRUE(result[2].has_value());
+    EXPECT_EQ(result[0]->data, (std::vector<uint8_t>{1, 1}));
+    EXPECT_EQ(result[1]->data, (std::vector<uint8_t>{2, 2}));
+    EXPECT_EQ(result[2]->data, (std::vector<uint8_t>{3, 3}));
+    EXPECT_FALSE(result[3].has_value());
+}
+
+TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
+    auto& engine = StorageEngine::Instance();
+    ASSERT_TRUE(engine.Set("inv:one", {1}));
+    ASSERT_TRUE(engine.Set("inv:two", {2}));
+    ASSERT_TRUE(engine.Set("other:key", {3}));
+
+    EXPECT_TRUE(engine.Invalidate("inv:one"));
+    EXPECT_FALSE(engine.Get("inv:one").has_value());
+
+    const size_t removed = engine.InvalidateByPrefix("inv:");
+    EXPECT_GE(removed, 1u);
+    EXPECT_FALSE(engine.Get("inv:two").has_value());
+    EXPECT_TRUE(engine.Get("other:key").has_value());
+}
+
+TEST_F(StorageEngineTest, InvalidationSubscriberReceivesEvents) {
+    auto& engine = StorageEngine::Instance();
+    ASSERT_TRUE(engine.Set("sub:key", {1, 2, 3}));
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<StorageEngine::InvalidationEvent> events;
+    const uint64_t subscription_id = engine.SubscribeInvalidation(
+        [&](const StorageEngine::InvalidationEvent& event) {
+            std::lock_guard<std::mutex> lock(mutex);
+            events.push_back(event);
+            cv.notify_all();
+        });
+    ASSERT_NE(subscription_id, 0u);
+
+    ASSERT_TRUE(engine.Invalidate("sub:key"));
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(1), [&]() {
+            return !events.empty();
+        }));
+    }
+    ASSERT_TRUE(engine.UnsubscribeInvalidation(subscription_id));
+
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front().type, StorageEngine::InvalidationEventType::kKey);
+    EXPECT_EQ(events.front().key_or_prefix, "sub:key");
+    EXPECT_FALSE(events.front().from_broadcast);
+}
+
+TEST_F(StorageEngineTest, BroadcastInvalidationRemovesData) {
+    auto& engine = StorageEngine::Instance();
+    ASSERT_TRUE(engine.Set("remote:key", {9, 8, 7}));
+    ASSERT_TRUE(engine.Get("remote:key").has_value());
+
+    ASSERT_TRUE(engine.InvalidateFromBroadcast("remote:key"));
+    EXPECT_FALSE(engine.Get("remote:key").has_value());
+}
+
+TEST_F(StorageEngineTest, InvalidationAdapterPublishesLocalEvents) {
+    auto& engine = StorageEngine::Instance();
+    auto adapter = std::make_shared<TestInvalidationAdapter>();
+    ASSERT_TRUE(engine.SetInvalidationAdapter(adapter));
+    ASSERT_TRUE(adapter->started());
+
+    ASSERT_TRUE(engine.Set("adapter:local:key", {1, 2}));
+    ASSERT_TRUE(engine.Invalidate("adapter:local:key"));
+
+    ASSERT_EQ(adapter->published_count(), 1u);
+    const auto event = adapter->published_at(0);
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->type, StorageEngine::InvalidationEventType::kKey);
+    EXPECT_EQ(event->key_or_prefix, "adapter:local:key");
+    EXPECT_FALSE(event->from_broadcast);
+
+    engine.ClearInvalidationAdapter();
+    EXPECT_TRUE(adapter->stopped());
+}
+
+TEST_F(StorageEngineTest, InvalidationAdapterInboundEventIsAppliedLocally) {
+    auto& engine = StorageEngine::Instance();
+    auto adapter = std::make_shared<TestInvalidationAdapter>();
+    ASSERT_TRUE(engine.SetInvalidationAdapter(adapter));
+
+    ASSERT_TRUE(engine.Set("adapter:inbound:key", {9, 9, 9}));
+    ASSERT_TRUE(engine.Get("adapter:inbound:key").has_value());
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<StorageEngine::InvalidationEvent> events;
+    const uint64_t subscription_id = engine.SubscribeInvalidation(
+        [&](const StorageEngine::InvalidationEvent& event) {
+            std::lock_guard<std::mutex> lock(mutex);
+            events.push_back(event);
+            cv.notify_all();
+        });
+    ASSERT_NE(subscription_id, 0u);
+
+    ASSERT_TRUE(adapter->EmitInbound(StorageEngine::InvalidationEvent{
+        .type = StorageEngine::InvalidationEventType::kKey,
+        .key_or_prefix = "adapter:inbound:key",
+        .timestamp_ms = 0,
+        .from_broadcast = false,
+    }));
+
+    EXPECT_FALSE(engine.Get("adapter:inbound:key").has_value());
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(1), [&]() {
+            return !events.empty();
+        }));
+    }
+    ASSERT_TRUE(engine.UnsubscribeInvalidation(subscription_id));
+    ASSERT_FALSE(events.empty());
+    EXPECT_TRUE(events.front().from_broadcast);
+    EXPECT_EQ(events.front().key_or_prefix, "adapter:inbound:key");
 }
 
 TEST_F(StorageEngineTest, UpdateWithPureComputation) {
@@ -309,15 +677,36 @@ TEST(StorageEngineSetSemanticsTest, SetFailsWhenNoPersistencePathAvailable) {
     StorageEngine::Shutdown();
 }
 
-TEST(StorageEngineSetSemanticsTest, SetSucceedsWhenQueueAcceptsWithoutL2) {
+TEST(StorageEngineSetSemanticsTest, SetFailsWhenL2DownEvenIfQueueAcceptsInStrictMode) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.l2_path = "/dev/null/mir2_storage_engine_strict_queue_blocked";
+
+    auto backend = std::make_unique<FailingSaveBackend>();
+    auto* backend_ptr = backend.get();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    const std::vector<uint8_t> data = {1, 2, 3, 4};
+    EXPECT_FALSE(engine.Set("persist:queue", data));
+    EXPECT_GE(backend_ptr->save_calls.load(std::memory_order_relaxed), 1U);
+
+    StorageEngine::Shutdown();
+}
+
+TEST(StorageEngineSetSemanticsTest, QueueOnlySuccessCanBeEnabledByConfigForRollback) {
     if (StorageEngine::IsInitialized()) {
         StorageEngine::Shutdown();
     }
 
     StorageEngine::Config config;
     config.l2_path = "/dev/null/mir2_storage_engine_queue_only";
+    config.enable_strict_write_guarantee = false;
 
-    auto backend = std::make_unique<test::NoopStorageBackend>();
+    auto backend = std::make_unique<FailingSaveBackend>();
     ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
 
     auto& engine = StorageEngine::Instance();
@@ -328,7 +717,271 @@ TEST(StorageEngineSetSemanticsTest, SetSucceedsWhenQueueAcceptsWithoutL2) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->data, data);
 
+  StorageEngine::Shutdown();
+}
+
+TEST(StorageEngineAccessControlTest, EnforcesTokenAndProducesAuditEntries) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "secret-token";
+    config.l2_path = "/tmp/mir2_storage_engine_access_control_test";
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    const StorageEngine::AccessContext denied_ctx{
+        .principal = "alice",
+        .access_token = "bad-token",
+        .trusted = false};
+    const StorageEngine::AccessContext allowed_ctx{
+        .principal = "alice",
+        .access_token = "secret-token",
+        .trusted = false};
+
+    EXPECT_FALSE(engine.SetWithAccess("secure:key", {1, 1, 1}, denied_ctx));
+    EXPECT_TRUE(engine.SetWithAccess("secure:key", {2, 2, 2}, allowed_ctx));
+    EXPECT_FALSE(engine.GetWithAccess("secure:key", denied_ctx).has_value());
+    EXPECT_TRUE(engine.GetWithAccess("secure:key", allowed_ctx).has_value());
+
+    const auto audit = engine.GetRecentAuditEntries(16);
+    ASSERT_GE(audit.size(), 3u);
+    bool has_denied = false;
+    bool has_allowed = false;
+    for (const auto& entry : audit) {
+        if (entry.operation == "set" && !entry.success) {
+            has_denied = true;
+        }
+        if (entry.operation == "set" && entry.success) {
+            has_allowed = true;
+        }
+    }
+    EXPECT_TRUE(has_denied);
+    EXPECT_TRUE(has_allowed);
+
     StorageEngine::Shutdown();
+}
+
+TEST(StorageEngineSetSemanticsTest, RuntimeConfigCanDisableStrictWriteGuarantee) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.l2_path = "/dev/null/mir2_storage_engine_runtime_strict_toggle";
+    config.enable_strict_write_guarantee = true;
+
+    auto backend = std::make_unique<FailingSaveBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    const std::vector<uint8_t> data = {3, 1, 4, 1, 5, 9};
+    EXPECT_FALSE(engine.Set("runtime:strict:key1", data));
+
+    StorageEngine::RuntimeTunableConfig runtime_cfg;
+    runtime_cfg.enable_strict_write_guarantee = false;
+    ASSERT_TRUE(engine.ApplyRuntimeConfig(runtime_cfg));
+
+    EXPECT_TRUE(engine.Set("runtime:strict:key2", data));
+    auto result = engine.Get("runtime:strict:key2");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->data, data);
+
+    StorageEngine::Shutdown();
+}
+
+TEST(StorageEngineSetSemanticsTest, CriticalPrefixSetAutoUsesSyncPath) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.l2_path = "/dev/null/mir2_storage_engine_critical_prefix_sync";
+    config.enable_strict_write_guarantee = false;
+    config.auto_sync_interval_ms = 60000;
+    config.critical_key_prefixes = {"critical:"};
+
+    auto backend = std::make_unique<SaveCountingBackend>();
+    auto* backend_ptr = backend.get();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    const std::vector<uint8_t> data = {7, 7, 7};
+
+    EXPECT_TRUE(engine.Set("normal:key", data));
+    const uint32_t save_calls_after_normal =
+        backend_ptr->save_calls.load(std::memory_order_relaxed);
+
+    EXPECT_TRUE(engine.Set("critical:key", data));
+    EXPECT_GE(backend_ptr->save_calls.load(std::memory_order_relaxed),
+              save_calls_after_normal + 1);
+
+    StorageEngine::Shutdown();
+}
+
+TEST(StorageEngineDurableOutboxTest, ReplaysPendingWritesAfterRestartWhenBackendRecovers) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path =
+        "/tmp/mir2_storage_engine_pr3_outbox_replay_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+
+    StorageEngine::Config config;
+    config.l2_path = l2_path;
+    config.enable_strict_write_guarantee = false;
+    config.enable_outbox = true;
+    config.auto_sync_interval_ms = 10;
+    config.batch_size = 1;
+
+    auto state = std::make_shared<DurableToggleBackendState>();
+    state->healthy.store(false, std::memory_order_relaxed);
+
+    auto backend1 = std::make_unique<DurableToggleBackend>(state);
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend1), config));
+
+    auto& engine = StorageEngine::Instance();
+    const std::string key = "outbox:replay:key";
+    const std::vector<uint8_t> payload = {9, 8, 7, 6};
+    EXPECT_TRUE(engine.Set(key, payload, Priority::NORMAL));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    StorageEngine::Shutdown();
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        EXPECT_EQ(state->store.size(), 0U);
+    }
+
+    state->healthy.store(true, std::memory_order_relaxed);
+    auto backend2 = std::make_unique<DurableToggleBackend>(state);
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend2), config));
+
+    bool persisted = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            auto it = state->store.find(key);
+            if (it != state->store.end()) {
+                persisted = true;
+                EXPECT_EQ(it->second.second, payload);
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_TRUE(persisted);
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
+}
+
+TEST(StorageEngineDurableOutboxTest, ReplayLimitRestrictsRecoveredItemsPerStartup) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path =
+        "/tmp/mir2_storage_engine_pr3_outbox_limit_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+
+    StorageEngine::Config config;
+    config.l2_path = l2_path;
+    config.enable_strict_write_guarantee = false;
+    config.enable_outbox = true;
+    config.outbox_replay_limit = 1;
+    config.auto_sync_interval_ms = 10;
+    config.batch_size = 1;
+
+    auto state = std::make_shared<DurableToggleBackendState>();
+    state->healthy.store(false, std::memory_order_relaxed);
+
+    auto backend1 = std::make_unique<DurableToggleBackend>(state);
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend1), config));
+    auto& engine = StorageEngine::Instance();
+    EXPECT_TRUE(engine.Set("outbox:limit:1", std::vector<uint8_t>{1}, Priority::NORMAL));
+    EXPECT_TRUE(engine.Set("outbox:limit:2", std::vector<uint8_t>{2}, Priority::NORMAL));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    StorageEngine::Shutdown();
+
+    state->healthy.store(true, std::memory_order_relaxed);
+    auto backend2 = std::make_unique<DurableToggleBackend>(state);
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend2), config));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        EXPECT_EQ(state->store.size(), 1U);
+    }
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
+}
+
+TEST(StorageEngineTtlIsolationTest,
+     StartupRecoveryRepairsPersistentTierWithoutScanningTtlTier) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path =
+        "/tmp/mir2_storage_engine_pr4_tier_recovery_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+
+    StorageEngine::Config config;
+    config.l2_path = l2_path;
+    config.enable_strict_write_guarantee = false;
+    config.enable_outbox = false;
+    config.auto_sync_interval_ms = 60000;
+    config.batch_size = 64;
+    config.critical_key_prefixes = {"critical:"};
+
+    auto state = std::make_shared<DurableToggleBackendState>();
+    state->healthy.store(false, std::memory_order_relaxed);
+
+    auto backend1 = std::make_unique<DurableToggleBackend>(state);
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend1), config));
+    auto& engine = StorageEngine::Instance();
+
+    EXPECT_TRUE(engine.Set("normal:ttl:key", std::vector<uint8_t>{1, 2, 3}));
+    EXPECT_TRUE(engine.Set("critical:persistent:key", std::vector<uint8_t>{9, 8, 7}));
+
+    StorageEngine::Shutdown();
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        EXPECT_TRUE(state->store.empty());
+    }
+
+    state->healthy.store(true, std::memory_order_relaxed);
+    auto backend2 = std::make_unique<DurableToggleBackend>(state);
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend2), config));
+    auto& recovered_engine = StorageEngine::Instance();
+    EXPECT_TRUE(recovered_engine.PerformStartupRecovery());
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        EXPECT_EQ(state->store.size(), 1U);
+        auto it = state->store.find("critical:persistent:key");
+        ASSERT_NE(it, state->store.end());
+        EXPECT_EQ(it->second.second, std::vector<uint8_t>({9, 8, 7}));
+        EXPECT_EQ(state->store.count("normal:ttl:key"), 0U);
+    }
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
 }
 
 TEST(StorageEngineValidationTest, RejectsInvalidKeysAndOversizedValues) {

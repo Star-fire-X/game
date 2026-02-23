@@ -1,0 +1,55 @@
+// party.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table PartyInviteReq {
+  target_character_id: uint;
+}
+
+table PartyInviteRsp {
+  success: bool;
+  error_code: int;
+}
+
+table PartyJoinReq {
+  party_id: ulong;
+}
+
+table PartyJoinRsp {
+  success: bool;
+  error_code: int;
+}
+
+table PartyLeaveReq {
+}
+
+table PartyLeaveRsp {
+  success: bool;
+  error_code: int;
+}
+
+table PartyKickReq {
+  target_character_id: uint;
+}
+
+table PartyKickRsp {
+  success: bool;
+  error_code: int;
+}
+
+table PartyMemberInfo {
+  character_id: uint;
+  name: string;
+  hp: uint;
+  max_hp: uint;
+  map_id: uint;
+  x: uint;
+  y: uint;
+  online: bool;
+}
+
+table PartyUpdate {
+  party_id: ulong;
+  leader_character_id: uint;
+  members: [PartyMemberInfo];
+}

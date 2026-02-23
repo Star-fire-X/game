@@ -11,6 +11,8 @@
 #include <optional>
 #include <string>
 
+#include "ecs/id_types.h"
+
 namespace mir2::game::npc {
 
 // Map coordinate limits.
@@ -59,7 +61,7 @@ struct NpcConfig {
   bool enabled = true;      // Interactable
   std::string script_id;    // Script ID
   uint32_t store_id = 0;    // Store ID (merchant)
-  uint32_t guild_id = 0;    // Guild ID (guild)
+  mir2::ecs::GuildId guild_id = mir2::ecs::kInvalidGuildId;  // Guild ID (guild)
   std::optional<NpcTeleportTarget> teleport_target; // Teleport target
 };
 

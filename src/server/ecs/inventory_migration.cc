@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-namespace mir2::ecs::inventory {
+namespace mir2::ecs::inventory::compat {
 namespace {
 
 using json = nlohmann::json;
@@ -923,4 +923,4 @@ void MigrateAllCharacters(entt::registry& registry) {
     SYSLOG_INFO("InventoryMigration: migrated {} characters to inventory snapshots", migrated);
 }
 
-}  // namespace mir2::ecs::inventory
+}  // namespace mir2::ecs::inventory::compat

@@ -41,13 +41,13 @@ class GuildSystem : public System {
     // Transfer leadership. Returns: 0=success, -1=not leader, -2=target not in guild.
     int TransferLeadership(entt::registry& registry, entt::entity current_leader,
                            entt::entity new_leader);
-    // Update rank structure. Returns: 0=success, -2=leader missing, -3=leader name empty,
+    // Update rank structure. Returns: 0=success, -2=leader missing, -3=leader rank empty,
     // -4=leader count exceeded, -5=no leader online, -6=member mismatch, -7=invalid rank.
     int UpdateRankStructure(entt::registry& registry, entt::entity player,
                             const std::vector<ecs::GuildRank>& new_ranks);
     // Update member rank based on current rank structure.
     bool SetMemberRank(entt::registry& registry, entt::entity operator_entity,
-                       const std::string& member_name, uint8_t new_rank);
+                       CharacterId target_character_id, uint8_t new_rank);
 
     // Declare war. Returns: 0=success, -1=not leader, -2=insufficient gold,
     // -3=target not found, -4=allied.

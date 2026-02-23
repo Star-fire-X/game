@@ -81,7 +81,10 @@ class CharacterHandlerTest : public ::testing::Test {
     handler_ = std::make_unique<CharacterHandler>(*response_sender_,
                                                    *entity_manager_,
                                                    *role_store_,
-                                                   client_registry_);
+                                                   client_registry_,
+                                                   [this](uint64_t player_id) {
+                                                     login_completed_players_.push_back(player_id);
+                                                   });
   }
 
   void RunIoContext() {
@@ -97,6 +100,7 @@ class CharacterHandlerTest : public ::testing::Test {
   std::unique_ptr<RoleStore> role_store_;
   std::unique_ptr<CharacterHandler> handler_;
   ClientRegistry client_registry_;
+  std::vector<uint64_t> login_completed_players_;
 };
 
 // 角色列表请求成功返回角色列表与 OK。
@@ -381,6 +385,8 @@ TEST_F(CharacterHandlerTest, HandleSelectRoleSuccess) {
   EXPECT_EQ(*bound_role, record.player_id);
 
   EXPECT_TRUE(entity_manager_->TryGet(static_cast<uint32_t>(record.player_id)).has_value());
+  ASSERT_EQ(login_completed_players_.size(), 1u);
+  EXPECT_EQ(login_completed_players_[0], record.player_id);
 }
 
 TEST_F(CharacterHandlerTest, HandleSelectRoleDuplicateLoginKicksOldClient) {
@@ -468,6 +474,7 @@ TEST_F(CharacterHandlerTest, HandleSelectRoleFailsWithoutAuthenticatedAccount) {
   EXPECT_EQ(enter_rsp->player(), nullptr);
 
   EXPECT_FALSE(role_store_->GetRoleId(context.client_id).has_value());
+  EXPECT_TRUE(login_completed_players_.empty());
 }
 
 // 绑定账号与目标角色不一致时应拒绝登录。

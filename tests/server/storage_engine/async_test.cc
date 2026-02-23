@@ -11,11 +11,14 @@
 
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <thread>
 #include <vector>
 
 #include "logic/coroutine_executor.h"
+#include "storage_engine/l2/rocksdb_cache.h"
+#include "storage_engine/persistence/async_persistence_queue.h"
 #include "storage_engine/storage_engine.h"
 #include "storage_engine/test_backend_mocks.h"
 
@@ -63,6 +66,62 @@ class StorageEngineAsyncTest : public ::testing::Test {
   void TearDown() override {
     StorageEngine::Shutdown();
   }
+};
+
+class AlwaysUnhealthyBackend : public test::NoopStorageBackend {
+ public:
+  bool IsHealthy() const override {
+    return false;
+  }
+};
+
+class AlwaysFailBackend : public test::NoopStorageBackend {
+ public:
+  StorageResult Save(const std::string&,
+                     uint64_t,
+                     const std::vector<uint8_t>&) override {
+    return StorageResult{false, "forced save failure", 0};
+  }
+
+  StorageResult SaveBatch(
+      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
+      override {
+    return StorageResult{false, "forced batch failure", 0};
+  }
+
+  StorageResult SaveBatchAtomic(
+      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
+      override {
+    return StorageResult{false, "forced atomic batch failure", 0};
+  }
+
+  bool IsHealthy() const override {
+    return true;
+  }
+};
+
+class AtomicBatchCountingBackend : public test::NoopStorageBackend {
+ public:
+  StorageResult SaveBatch(
+      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
+      override {
+    save_batch_calls.fetch_add(1, std::memory_order_relaxed);
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult SaveBatchAtomic(
+      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&)
+      override {
+    save_batch_atomic_calls.fetch_add(1, std::memory_order_relaxed);
+    return StorageResult{true, "", 0};
+  }
+
+  bool IsHealthy() const override {
+    return true;
+  }
+
+  std::atomic<uint32_t> save_batch_calls{0};
+  std::atomic<uint32_t> save_batch_atomic_calls{0};
 };
 
 mir2::logic::Task<void> RunLoadFromDBAsyncTask(
@@ -177,6 +236,100 @@ TEST(StorageEngineAsyncLoadTest, LoadFromDBAsyncRunsOnBackgroundThread) {
   io_context.stop();
   io_thread.join();
   StorageEngine::Shutdown();
+}
+
+TEST(AsyncPersistenceQueueP1TailTest, DurableOutboxRejectsWhenCapacityReached) {
+  const std::string db_path =
+      "/tmp/mir2_storage_engine_p1_outbox_limit_" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  std::error_code ec;
+  std::filesystem::remove_all(db_path, ec);
+
+  {
+    l2::RocksDBCache::Config l2_config;
+    l2_config.db_path = db_path;
+    l2_config.ttl_seconds = 3600;
+    l2::RocksDBCache cache(l2_config);
+    ASSERT_TRUE(cache.Initialize());
+
+    AlwaysUnhealthyBackend backend;
+    persistence::AsyncPersistenceQueue::Config queue_config;
+    queue_config.enable_durable_outbox = true;
+    queue_config.outbox_max_items = 1;
+    queue_config.worker_threads = 2;
+    queue_config.batch_interval_ms = 1000;
+    queue_config.batch_size = 16;
+
+    persistence::AsyncPersistenceQueue queue(&backend, &cache, queue_config);
+
+    VersionedData first{
+        .version = 1,
+        .data = std::vector<uint8_t>{1},
+        .timestamp_ms = 1};
+    VersionedData second{
+        .version = 2,
+        .data = std::vector<uint8_t>{2},
+        .timestamp_ms = 2};
+
+    EXPECT_TRUE(queue.Enqueue("outbox:key:1", first, Priority::NORMAL));
+    EXPECT_FALSE(queue.Enqueue("outbox:key:2", second, Priority::NORMAL));
+
+    auto stats = queue.GetStats();
+    EXPECT_EQ(stats.outbox_depth, 1U);
+    EXPECT_EQ(stats.outbox_rejected, 1U);
+  }
+  std::filesystem::remove_all(db_path, ec);
+}
+
+TEST(AsyncPersistenceQueueP1TailTest, FailedItemsEnterDeadLetterQueue) {
+  AlwaysFailBackend backend;
+  persistence::AsyncPersistenceQueue::Config queue_config;
+  queue_config.worker_threads = 2;
+  queue_config.batch_size = 1;
+  queue_config.batch_interval_ms = 20;
+  queue_config.retry_count = 1;
+  queue_config.retry_delay_ms = 10;
+  queue_config.dead_letter_max_items = 16;
+
+  persistence::AsyncPersistenceQueue queue(&backend, queue_config);
+  VersionedData data{
+      .version = 42,
+      .data = std::vector<uint8_t>{4, 2},
+      .timestamp_ms = 42};
+  ASSERT_TRUE(queue.Enqueue("dead:letter:key", data, Priority::NORMAL));
+  ASSERT_TRUE(queue.FlushAll(2000));
+
+  const auto stats = queue.GetStats();
+  EXPECT_EQ(stats.dead_letter_depth, 1U);
+  EXPECT_EQ(stats.dead_letter_enqueued, 1U);
+  EXPECT_EQ(stats.dead_letter_dropped, 0U);
+
+  const auto snapshot = queue.GetDeadLetterSnapshot(8);
+  ASSERT_EQ(snapshot.size(), 1U);
+  EXPECT_EQ(snapshot[0].key, "dead:letter:key");
+  EXPECT_EQ(snapshot[0].version, 42U);
+  EXPECT_GE(snapshot[0].attempts, 1U);
+}
+
+TEST(AsyncPersistenceQueueP1TailTest, BatchWorkerUsesAtomicBatchSave) {
+  AtomicBatchCountingBackend backend;
+  persistence::AsyncPersistenceQueue::Config queue_config;
+  queue_config.worker_threads = 2;
+  queue_config.batch_size = 1;
+  queue_config.batch_interval_ms = 10;
+  queue_config.retry_count = 0;
+  queue_config.retry_delay_ms = 0;
+
+  persistence::AsyncPersistenceQueue queue(&backend, queue_config);
+  VersionedData data{
+      .version = 7,
+      .data = std::vector<uint8_t>{7},
+      .timestamp_ms = 7};
+  ASSERT_TRUE(queue.Enqueue("batch:atomic:key", data, Priority::NORMAL));
+  ASSERT_TRUE(queue.FlushAll(2000));
+
+  EXPECT_GT(backend.save_batch_atomic_calls.load(std::memory_order_relaxed), 0U);
+  EXPECT_EQ(backend.save_batch_calls.load(std::memory_order_relaxed), 0U);
 }
 
 }  // namespace mir2::storage_engine

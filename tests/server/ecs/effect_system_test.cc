@@ -168,3 +168,20 @@ TEST(EffectSystemTest, FrenzyMultipliersAndPresence) {
     EXPECT_EQ(attributes.attack, 170);
     EXPECT_EQ(attributes.defense, 30);
 }
+
+TEST(EffectSystemTest, EffectListCacheTracksCategoryAndExpiry) {
+    EffectListComponent effects;
+
+    ActiveEffect invisible = MakeEffect(EffectCategory::INVISIBLE);
+    invisible.end_time_ms = 500;
+    effects.add_effect(invisible);
+
+    EXPECT_TRUE(effects.has_category(EffectCategory::INVISIBLE));
+    EXPECT_FALSE(effects.has_expired(499));
+    EXPECT_TRUE(effects.has_expired(500));
+
+    effects.remove_expired(500);
+
+    EXPECT_FALSE(effects.has_category(EffectCategory::INVISIBLE));
+    EXPECT_FALSE(effects.has_expired(500));
+}

@@ -48,7 +48,7 @@ TEST(PostgresDatabaseTest, CharacterOperationsReturnNotImplemented) {
     EXPECT_FALSE(load_name_result);
     EXPECT_EQ(load_name_result.error_code, ErrorCode::NOT_IMPLEMENTED);
 
-    auto load_account_result = db.load_characters_by_account("account");
+    auto load_account_result = db.load_characters_by_account(1001);
     EXPECT_FALSE(load_account_result);
     EXPECT_EQ(load_account_result.error_code, ErrorCode::NOT_IMPLEMENTED);
 

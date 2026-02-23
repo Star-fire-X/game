@@ -2,14 +2,51 @@
 
 #include "ecs/components/character_components.h"
 #include "ecs/dirty_tracker.h"
+#include "ecs/event_bus.h"
+#include "ecs/events/skill_events.h"
 
 #include <algorithm>
 #include <cstdlib>
+#include <vector>
 
 namespace mir2::ecs {
 
-EffectSystem::EffectSystem(entt::registry& registry)
-    : registry_(registry) {}
+EffectSystem::EffectSystem(entt::registry& registry, EventBus* event_bus)
+    : registry_(registry),
+      event_bus_(event_bus) {}
+
+void EffectSystem::publish_buff_added(entt::entity target,
+                                      const ActiveEffect& effect) {
+    if (!event_bus_) {
+        return;
+    }
+
+    events::BuffAppliedEvent event;
+    event.target = target;
+    event.source = effect.source_entity;
+    event.category = effect.category;
+    event.skill_id = effect.skill_id;
+    event.duration_ms = effect.end_time_ms > effect.start_time_ms
+        ? (effect.end_time_ms - effect.start_time_ms)
+        : 0;
+    event_bus_->Publish(event);
+}
+
+void EffectSystem::publish_buff_removed(entt::entity target,
+                                        EffectCategory category,
+                                        uint32_t skill_id,
+                                        bool expired) {
+    if (!event_bus_) {
+        return;
+    }
+
+    events::BuffRemovedEvent event;
+    event.target = target;
+    event.category = category;
+    event.skill_id = skill_id;
+    event.expired = expired;
+    event_bus_->Publish(event);
+}
 
 void EffectSystem::apply_effect(entt::entity target, const ActiveEffect& effect) {
     if (!registry_.valid(target)) {
@@ -18,6 +55,7 @@ void EffectSystem::apply_effect(entt::entity target, const ActiveEffect& effect)
 
     auto& effects = registry_.get_or_emplace<EffectListComponent>(target);
     effects.add_effect(effect);
+    publish_buff_added(target, effect);
 
     if (effect.category == EffectCategory::STAT_BUFF ||
         effect.category == EffectCategory::STAT_DEBUFF) {
@@ -35,7 +73,18 @@ void EffectSystem::remove_effect(entt::entity target, uint32_t skill_id) {
         return;
     }
 
+    std::vector<EffectCategory> removed_categories;
+    removed_categories.reserve(effects->effects.size());
+    for (const auto& effect : effects->effects) {
+        if (effect.skill_id == skill_id) {
+            removed_categories.push_back(effect.category);
+        }
+    }
+
     effects->remove_effects_by_skill(skill_id);
+    for (EffectCategory category : removed_categories) {
+        publish_buff_removed(target, category, skill_id, /*expired=*/false);
+    }
     apply_stat_modifiers(target);
 }
 
@@ -76,6 +125,14 @@ int EffectSystem::absorb_damage(entt::entity entity, int damage) {
     }
 
     if (shield_changed) {
+        std::vector<uint32_t> removed_skill_ids;
+        const std::size_t original_size = effects->effects.size();
+        for (const auto& effect : effects->effects) {
+            if (effect.category == EffectCategory::SHIELD &&
+                effect.shield_remaining <= 0) {
+                removed_skill_ids.push_back(effect.skill_id);
+            }
+        }
         effects->effects.erase(
             std::remove_if(
                 effects->effects.begin(),
@@ -85,6 +142,15 @@ int EffectSystem::absorb_damage(entt::entity entity, int damage) {
                         effect.shield_remaining <= 0;
                 }),
             effects->effects.end());
+        if (effects->effects.size() != original_size) {
+            effects->mark_effects_dirty();
+            for (uint32_t skill_id : removed_skill_ids) {
+                publish_buff_removed(entity,
+                                    EffectCategory::SHIELD,
+                                    skill_id,
+                                    /*expired=*/false);
+            }
+        }
     }
 
     return damage;
@@ -95,14 +161,7 @@ bool EffectSystem::is_invisible(entt::entity entity) const {
     if (!effects) {
         return false;
     }
-
-    for (const auto& effect : effects->effects) {
-        if (effect.category == EffectCategory::INVISIBLE) {
-            return true;
-        }
-    }
-
-    return false;
+    return effects->has_category(EffectCategory::INVISIBLE);
 }
 
 void EffectSystem::break_invisibility(entt::entity entity) {
@@ -111,6 +170,15 @@ void EffectSystem::break_invisibility(entt::entity entity) {
         return;
     }
 
+    std::vector<uint32_t> removed_skill_ids;
+    removed_skill_ids.reserve(effects->effects.size());
+    for (const auto& effect : effects->effects) {
+        if (effect.category == EffectCategory::INVISIBLE) {
+            removed_skill_ids.push_back(effect.skill_id);
+        }
+    }
+
+    const std::size_t original_size = effects->effects.size();
     effects->effects.erase(
         std::remove_if(
             effects->effects.begin(),
@@ -118,7 +186,16 @@ void EffectSystem::break_invisibility(entt::entity entity) {
             [](const ActiveEffect& effect) {
                 return effect.category == EffectCategory::INVISIBLE;
             }),
-        effects->effects.end());
+            effects->effects.end());
+    if (effects->effects.size() != original_size) {
+        effects->mark_effects_dirty();
+        for (uint32_t skill_id : removed_skill_ids) {
+            publish_buff_removed(entity,
+                                EffectCategory::INVISIBLE,
+                                skill_id,
+                                /*expired=*/false);
+        }
+    }
 }
 
 bool EffectSystem::is_immobilized(entt::entity entity) const {
@@ -126,16 +203,11 @@ bool EffectSystem::is_immobilized(entt::entity entity) const {
     if (!effects) {
         return false;
     }
-
-    for (const auto& effect : effects->effects) {
-        if (effect.category == EffectCategory::STUN ||
-            effect.category == EffectCategory::HOLY_SEIZE ||
-            effect.category == EffectCategory::PARALYSIS) {
-            return true;
-        }
-    }
-
-    return false;
+    return effects->has_any_category({
+        EffectCategory::STUN,
+        EffectCategory::HOLY_SEIZE,
+        EffectCategory::PARALYSIS,
+    });
 }
 
 void EffectSystem::process_dot_effects(int64_t now_ms) {
@@ -143,6 +215,11 @@ void EffectSystem::process_dot_effects(int64_t now_ms) {
     for (auto entity : view) {
         auto& effects = view.get<EffectListComponent>(entity);
         auto& attributes = view.get<CharacterAttributesComponent>(entity);
+
+        if (!effects.has_any_category(
+                {EffectCategory::DAMAGE_OVER_TIME, EffectCategory::HEAL_OVER_TIME})) {
+            continue;
+        }
 
         if (attributes.hp <= 0) {
             continue;
@@ -195,18 +272,27 @@ void EffectSystem::process_expired_effects(int64_t now_ms) {
     auto view = registry_.view<EffectListComponent>();
     for (auto entity : view) {
         auto& effects = view.get<EffectListComponent>(entity);
+        if (!effects.has_expired(now_ms)) {
+            continue;
+        }
 
         bool stat_expired = false;
+        std::vector<std::pair<EffectCategory, uint32_t>> expired_effects;
+        expired_effects.reserve(effects.effects.size());
         for (const auto& effect : effects.effects) {
-            if (effect.end_time_ms > 0 && effect.end_time_ms <= now_ms &&
-                (effect.category == EffectCategory::STAT_BUFF ||
-                 effect.category == EffectCategory::STAT_DEBUFF)) {
-                stat_expired = true;
-                break;
+            if (effect.end_time_ms > 0 && effect.end_time_ms <= now_ms) {
+                expired_effects.emplace_back(effect.category, effect.skill_id);
+                if (effect.category == EffectCategory::STAT_BUFF ||
+                    effect.category == EffectCategory::STAT_DEBUFF) {
+                    stat_expired = true;
+                }
             }
         }
 
         effects.remove_expired(now_ms);
+        for (const auto& [category, skill_id] : expired_effects) {
+            publish_buff_removed(entity, category, skill_id, /*expired=*/true);
+        }
 
         if (stat_expired) {
             apply_stat_modifiers(entity);
@@ -287,6 +373,10 @@ void EffectSystem::process_poison_effects(int64_t now_ms) {
         auto& effects = view.get<EffectListComponent>(entity);
         auto& attributes = view.get<CharacterAttributesComponent>(entity);
 
+        if (!effects.has_category(EffectCategory::POISON)) {
+            continue;
+        }
+
         if (attributes.hp <= 0) {
             continue;
         }
@@ -328,6 +418,18 @@ void EffectSystem::process_frenzy_effects() {
         auto& effects = view.get<EffectListComponent>(entity);
         auto& attributes = view.get<CharacterAttributesComponent>(entity);
 
+        if (!effects.has_category(EffectCategory::FRENZY)) {
+            if (effects.applied_frenzy_attack_bonus != 0 ||
+                effects.applied_frenzy_defense_penalty != 0) {
+                attributes.attack -= effects.applied_frenzy_attack_bonus;
+                attributes.defense += effects.applied_frenzy_defense_penalty;
+                effects.applied_frenzy_attack_bonus = 0;
+                effects.applied_frenzy_defense_penalty = 0;
+                dirty_tracker::mark_attributes_dirty(registry_, entity);
+            }
+            continue;
+        }
+
         int frenzy_attack_bonus = 0;
         int frenzy_defense_penalty = 0;
 
@@ -361,12 +463,7 @@ bool EffectSystem::has_frenzy(entt::entity entity) const {
     if (!effects) {
         return false;
     }
-    for (const auto& effect : effects->effects) {
-        if (effect.category == EffectCategory::FRENZY) {
-            return true;
-        }
-    }
-    return false;
+    return effects->has_category(EffectCategory::FRENZY);
 }
 
 float EffectSystem::get_attack_multiplier(entt::entity entity) const {

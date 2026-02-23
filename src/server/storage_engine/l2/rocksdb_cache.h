@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <functional>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -33,23 +34,37 @@ public:
 
     bool Initialize();
 
+    enum class DataTier {
+        kPersistent,
+        kTtl,
+    };
+
     std::optional<VersionedData> Get(const std::string& key);
+    std::optional<VersionedData> Get(const std::string& key, DataTier tier);
 
     bool Set(const std::string& key, const VersionedData& data);
+    bool Set(const std::string& key, const VersionedData& data, DataTier tier);
 
     bool BatchSet(
         const std::vector<std::pair<std::string, VersionedData>>& batch);
+    bool BatchSet(
+        const std::vector<std::pair<std::string, VersionedData>>& batch,
+        DataTier tier);
 
     bool Delete(const std::string& key);
+    bool Delete(const std::string& key, DataTier tier);
 
     /// Synchronous write (WAL fsync). Use for crash-safe commits.
     bool SetSync(const std::string& key, const VersionedData& data);
+    bool SetSync(const std::string& key, const VersionedData& data,
+                 DataTier tier);
 
     /// Iterate all user entries (skips internal keys like __max_version__).
     /// Callback returns true to continue, false to stop early.
     /// Returns count of entries visited.
     using IteratorCallback = std::function<bool(const std::string& key, const VersionedData& data)>;
     size_t ForEach(IteratorCallback cb);
+    size_t ForEach(IteratorCallback cb, DataTier tier);
 
     bool UpdateMaxVersion(uint64_t version);
 
@@ -61,7 +76,48 @@ public:
 
     std::string GetDBStats();
 
+    struct OutboxEntry {
+        uint64_t outbox_id = 0;
+        std::string key;
+        VersionedData data;
+        Priority priority = Priority::NORMAL;
+    };
+
+    bool AppendOutbox(const std::string& key,
+                      const VersionedData& data,
+                      Priority priority,
+                      uint64_t* outbox_id = nullptr);
+
+    bool AckOutbox(uint64_t outbox_id);
+
+    size_t ReplayOutbox(size_t limit,
+                        const std::function<bool(const OutboxEntry&)>& cb);
+
+    size_t OutboxDepth() const;
+
 private:
+    static constexpr size_t kDefaultCFIndex = 0;
+    static constexpr size_t kDataPersistentCFIndex = 1;
+    static constexpr size_t kDataTtlCFIndex = 2;
+    static constexpr size_t kOutboxCFIndex = 3;
+    static constexpr size_t kMetaCFIndex = 4;
+    static constexpr size_t kColumnFamilyCount = 5;
+
+    bool AssignColumnFamilies(std::vector<rocksdb::ColumnFamilyHandle*> handles);
+    void DestroyColumnFamilies();
+    bool WriteSchemaVersionMarker();
+    bool LoadOutboxNextId();
+    bool PersistOutboxNextIdLocked(uint64_t next_id);
+    rocksdb::ColumnFamilyHandle* ResolveDataColumnFamily(DataTier tier) const;
+    rocksdb::ColumnFamilyHandle* ResolvePeerDataColumnFamily(DataTier tier) const;
+    std::optional<VersionedData> GetFromColumnFamily(
+        const std::string& key, rocksdb::ColumnFamilyHandle* cf);
+    bool PutToDataColumnFamily(const std::string& key,
+                               const VersionedData& data,
+                               DataTier tier,
+                               bool sync);
+    bool UpdateMaxVersionCache(uint64_t version);
+
     void MaybePersistMaxVersion(uint64_t version, bool force);
 
     std::vector<uint8_t> SerializeVersionedData(
@@ -69,14 +125,57 @@ private:
 
     bool DeserializeVersionedData(const rocksdb::Slice& data,
                                   VersionedData& result);
+    std::string MakeOutboxStorageKey(uint64_t outbox_id) const;
+    bool ParseOutboxStorageKey(const rocksdb::Slice& storage_key,
+                               uint64_t* outbox_id) const;
+    std::vector<uint8_t> SerializeOutboxValue(const std::string& key,
+                                              const VersionedData& data,
+                                              Priority priority) const;
+    bool DeserializeOutboxValue(const rocksdb::Slice& value,
+                                OutboxEntry* entry);
+    std::string EncodeUint64ToString(uint64_t value) const;
+    bool DecodeUint64FromSlice(const rocksdb::Slice& value,
+                               uint64_t* out) const;
 
     static std::string GetMaxVersionKey() {
         return "__max_version__";
+    }
+    static std::string GetSchemaVersionKey() {
+        return "__storage_schema_version__";
+    }
+    static std::string GetSchemaVersionValue() {
+        return "multi_cf_v1";
+    }
+    static std::string GetDataPersistentCFName() {
+        return "cf_data_persistent";
+    }
+    static std::string GetDataTtlCFName() {
+        return "cf_data_ttl";
+    }
+    static std::string GetOutboxCFName() {
+        return "cf_outbox";
+    }
+    static std::string GetMetaCFName() {
+        return "cf_meta";
+    }
+    static std::string GetOutboxNextIdKey() {
+        return "__outbox_next_id__";
+    }
+    static std::string GetOutboxStoragePrefix() {
+        return "outbox:";
     }
 
     Config config_;
     std::unique_ptr<rocksdb::DBWithTTL> db_;
     std::shared_ptr<rocksdb::Cache> block_cache_;
+    std::vector<rocksdb::ColumnFamilyHandle*> cf_handles_;
+    rocksdb::ColumnFamilyHandle* default_cf_ = nullptr;
+    rocksdb::ColumnFamilyHandle* data_persistent_cf_ = nullptr;
+    rocksdb::ColumnFamilyHandle* data_ttl_cf_ = nullptr;
+    rocksdb::ColumnFamilyHandle* outbox_cf_ = nullptr;
+    rocksdb::ColumnFamilyHandle* meta_cf_ = nullptr;
+    mutable std::mutex outbox_mutex_;
+    uint64_t outbox_next_id_ = 1;
     std::atomic<uint64_t> max_version_{0};
     std::atomic<uint64_t> persisted_max_version_{0};
     mutable std::mutex max_version_persist_mutex_;

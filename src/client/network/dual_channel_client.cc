@@ -323,6 +323,16 @@ void DualChannelClient::set_route(uint16_t msg_id, mir2::common::ChannelType cha
   router_.SetRoute(msg_id, channel);
 }
 
+void DualChannelClient::set_use_v2_protocol(bool enable) {
+  if (tcp_client_) {
+    tcp_client_->set_use_v2_protocol(enable);
+  }
+}
+
+bool DualChannelClient::use_v2_protocol() const {
+  return tcp_client_ ? tcp_client_->use_v2_protocol() : true;
+}
+
 void DualChannelClient::wire_tcp_callbacks() {
   if (!tcp_client_) {
     return;

@@ -39,7 +39,7 @@ class MapEventManager {
                                entt::entity caster, int32_t shield);
   uint32_t AddMineEvent(int32_t x, int32_t y, int32_t radius);
 
-  void RemoveEvent(uint32_t event_id);
+  void RemoveEvent(uint32_t event_id, MapInstance* map = nullptr);
   void Update(float delta_time, entt::registry& registry, MapInstance* map);
 
   void CleanupClosedEvents();  // 清理已关闭>5分钟的事件

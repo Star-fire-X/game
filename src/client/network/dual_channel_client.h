@@ -82,6 +82,8 @@ class DualChannelClient : public INetworkClient {
 
   KcpUpgradeState get_kcp_state() const;
   void set_route(uint16_t msg_id, mir2::common::ChannelType channel);
+  void set_use_v2_protocol(bool enable);
+  bool use_v2_protocol() const;
 
  private:
   struct KcpSessionInfo {

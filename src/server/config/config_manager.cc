@@ -114,6 +114,40 @@ bool ConfigManager::Load(const std::string& config_path) {
         server,
         "coroutine_dump_max_entries",
         server_config_.coroutine_dump_max_entries);
+    server_config_.session_cleanup_on_gateway_disconnect = ReadOrDefault(
+        server,
+        "session_cleanup_on_gateway_disconnect",
+        server_config_.session_cleanup_on_gateway_disconnect);
+    server_config_.reconcile_cleanup_enabled = ReadOrDefault(
+        server,
+        "reconcile_cleanup_enabled",
+        server_config_.reconcile_cleanup_enabled);
+    server_config_.zombie_detection_enabled = ReadOrDefault(
+        server,
+        "zombie_detection_enabled",
+        server_config_.zombie_detection_enabled);
+    server_config_.zombie_detection_scan_interval_ms = ReadOrDefault(
+        server,
+        "zombie_detection_scan_interval_ms",
+        server_config_.zombie_detection_scan_interval_ms);
+    server_config_.zombie_detection_idle_timeout_ms = ReadOrDefault(
+        server,
+        "zombie_detection_idle_timeout_ms",
+        server_config_.zombie_detection_idle_timeout_ms);
+    if (const YAML::Node zombie_detection = server["zombie_detection"]) {
+      server_config_.zombie_detection_enabled = ReadOrDefault(
+          zombie_detection,
+          "enabled",
+          server_config_.zombie_detection_enabled);
+      server_config_.zombie_detection_scan_interval_ms = ReadOrDefault(
+          zombie_detection,
+          "scan_interval_ms",
+          server_config_.zombie_detection_scan_interval_ms);
+      server_config_.zombie_detection_idle_timeout_ms = ReadOrDefault(
+          zombie_detection,
+          "idle_timeout_ms",
+          server_config_.zombie_detection_idle_timeout_ms);
+    }
     server_config_.legacy_fallback_enabled = ReadOrDefault(
         server,
         "legacy_fallback_enabled",
@@ -130,6 +164,10 @@ bool ConfigManager::Load(const std::string& config_path) {
         server,
         "legacy_fallback_allow_normal_msgs",
         server_config_.legacy_fallback_allow_normal_msgs);
+    server_config_.chat_batch_send_enabled = ReadOrDefault(
+        server,
+        "chat_batch_send_enabled",
+        server_config_.chat_batch_send_enabled);
     server_config_.movement_speed_violation_severity = ReadOrDefault(
         server,
         "movement_speed_violation_severity",
@@ -146,6 +184,10 @@ bool ConfigManager::Load(const std::string& config_path) {
         server,
         "login_ip_rate_limit_refill_rate",
         server_config_.login_ip_rate_limit_refill_rate);
+    server_config_.enable_network_listener = ReadOrDefault(
+        server,
+        "enable_network_listener",
+        server_config_.enable_network_listener);
     server_config_.metrics_port = ReadOrDefault(server, "metrics_port", server_config_.metrics_port);
 
     const YAML::Node database = root["database"];
@@ -182,6 +224,83 @@ bool ConfigManager::Load(const std::string& config_path) {
     const YAML::Node ecs = root["ecs"];
     ecs_config_.world_registry_reserve =
         ReadOrDefault(ecs, "world_registry_reserve", ecs_config_.world_registry_reserve);
+
+    const YAML::Node storage_engine = root["storage_engine"];
+    storage_engine_config_.l1_max_entries = ReadOrDefault(
+        storage_engine, "l1_max_entries", storage_engine_config_.l1_max_entries);
+    storage_engine_config_.l1_ttl_seconds = ReadOrDefault(
+        storage_engine, "l1_ttl_seconds", storage_engine_config_.l1_ttl_seconds);
+    storage_engine_config_.l2_max_size_mb = ReadOrDefault(
+        storage_engine, "l2_max_size_mb", storage_engine_config_.l2_max_size_mb);
+    storage_engine_config_.l2_path = ReadOrDefault(
+        storage_engine, "l2_path", storage_engine_config_.l2_path);
+    storage_engine_config_.l2_ttl_seconds = ReadOrDefault(
+        storage_engine, "l2_ttl_seconds", storage_engine_config_.l2_ttl_seconds);
+    storage_engine_config_.auto_sync_interval_ms = ReadOrDefault(
+        storage_engine, "auto_sync_interval_ms",
+        storage_engine_config_.auto_sync_interval_ms);
+    storage_engine_config_.batch_size = ReadOrDefault(
+        storage_engine, "batch_size", storage_engine_config_.batch_size);
+    storage_engine_config_.sync_timeout_ms = ReadOrDefault(
+        storage_engine, "sync_timeout_ms", storage_engine_config_.sync_timeout_ms);
+    storage_engine_config_.queue_capacity = ReadOrDefault(
+        storage_engine, "queue_capacity", storage_engine_config_.queue_capacity);
+    storage_engine_config_.queue_worker_threads = ReadOrDefault(
+        storage_engine, "queue_worker_threads",
+        storage_engine_config_.queue_worker_threads);
+    storage_engine_config_.queue_retry_count = ReadOrDefault(
+        storage_engine, "queue_retry_count",
+        storage_engine_config_.queue_retry_count);
+    storage_engine_config_.queue_retry_delay_ms = ReadOrDefault(
+        storage_engine, "queue_retry_delay_ms",
+        storage_engine_config_.queue_retry_delay_ms);
+    storage_engine_config_.dead_letter_max_items = ReadOrDefault(
+        storage_engine, "dead_letter_max_items",
+        storage_engine_config_.dead_letter_max_items);
+    storage_engine_config_.enable_strict_write_guarantee = ReadOrDefault(
+        storage_engine, "enable_strict_write_guarantee",
+        storage_engine_config_.enable_strict_write_guarantee);
+    storage_engine_config_.critical_data_no_ttl = ReadOrDefault(
+        storage_engine, "critical_data_no_ttl",
+        storage_engine_config_.critical_data_no_ttl);
+    storage_engine_config_.enable_outbox = ReadOrDefault(
+        storage_engine, "enable_outbox", storage_engine_config_.enable_outbox);
+    storage_engine_config_.outbox_replay_limit = ReadOrDefault(
+        storage_engine, "outbox_replay_limit",
+        storage_engine_config_.outbox_replay_limit);
+    storage_engine_config_.outbox_max_items = ReadOrDefault(
+        storage_engine, "outbox_max_items", storage_engine_config_.outbox_max_items);
+    storage_engine_config_.circuit_breaker_threshold = ReadOrDefault(
+        storage_engine, "circuit_breaker_threshold",
+        storage_engine_config_.circuit_breaker_threshold);
+    storage_engine_config_.circuit_breaker_timeout_ms = ReadOrDefault(
+        storage_engine, "circuit_breaker_timeout_ms",
+        storage_engine_config_.circuit_breaker_timeout_ms);
+    storage_engine_config_.enable_metrics = ReadOrDefault(
+        storage_engine, "enable_metrics", storage_engine_config_.enable_metrics);
+    storage_engine_config_.enable_audit_log = ReadOrDefault(
+        storage_engine, "enable_audit_log", storage_engine_config_.enable_audit_log);
+    storage_engine_config_.audit_log_max_entries = ReadOrDefault(
+        storage_engine, "audit_log_max_entries",
+        storage_engine_config_.audit_log_max_entries);
+    storage_engine_config_.enable_access_control = ReadOrDefault(
+        storage_engine, "enable_access_control",
+        storage_engine_config_.enable_access_control);
+    storage_engine_config_.require_auth_for_reads = ReadOrDefault(
+        storage_engine, "require_auth_for_reads",
+        storage_engine_config_.require_auth_for_reads);
+    storage_engine_config_.access_control_token = ReadOrDefault(
+        storage_engine, "access_control_token",
+        storage_engine_config_.access_control_token);
+    if (storage_engine && storage_engine["critical_key_prefixes"]) {
+      storage_engine_config_.critical_key_prefixes.clear();
+      for (const auto& prefix_node : storage_engine["critical_key_prefixes"]) {
+        storage_engine_config_.critical_key_prefixes.push_back(prefix_node.as<std::string>());
+      }
+      if (storage_engine_config_.critical_key_prefixes.empty()) {
+        storage_engine_config_.critical_key_prefixes = {"char:", "account:username:"};
+      }
+    }
 
     const auto config_dir = std::filesystem::path(config_path).parent_path();
     if (!config_dir.empty()) {

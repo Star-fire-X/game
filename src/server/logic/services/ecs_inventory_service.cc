@@ -14,6 +14,7 @@
 #include "ecs/components/item_component.h"
 #include "ecs/registry_manager.h"
 #include "ecs/systems/inventory_system.h"
+#include "ecs/systems/trade_system.h"
 #include "ecs/world.h"
 #include "log/logger.h"
 #include "logic/services/error_code_adapter.h"
@@ -23,9 +24,14 @@ namespace mir2::logic {
 namespace {
 
 constexpr int kMaxInventorySlots = mir2::common::constants::MAX_INVENTORY_SIZE;
+constexpr int kMaxEquipmentSlots = mir2::common::constants::MAX_EQUIPMENT_SLOTS;
 
 bool IsValidSlot(int slot) {
   return slot >= 0 && slot < kMaxInventorySlots;
+}
+
+bool IsValidEquipmentSlot(int slot) {
+  return slot >= 0 && slot < kMaxEquipmentSlots;
 }
 
 int FindFreeSlot(entt::registry& registry, entt::entity character) {
@@ -410,6 +416,169 @@ ItemDropResult EcsInventoryService::DropItem(uint64_t character_id,
                character_id, slot, item_id, count);
 
   return result;
+}
+
+ItemEquipResult EcsInventoryService::EquipItem(uint64_t character_id,
+                                               uint16_t slot,
+                                               uint32_t item_id) {
+  ItemEquipResult result;
+  result.slot = slot;
+  result.item_id = item_id;
+
+  if (character_id == 0 || item_id == 0) {
+    SYSLOG_WARN("EcsInventoryService::EquipItem invalid input (character_id={}, item_id={})",
+                character_id, item_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  if (!IsValidSlot(slot)) {
+    SYSLOG_WARN("EcsInventoryService::EquipItem invalid inventory slot (character_id={}, slot={})",
+                character_id, slot);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  auto& character_manager = registry_manager_.GetCharacterManager();
+  auto character_opt = character_manager.TryGet(static_cast<uint32_t>(character_id));
+  entt::entity character = character_opt.has_value() ? *character_opt : entt::null;
+  entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(character_id));
+  if (!registry || character == entt::null || !registry->valid(character)) {
+    SYSLOG_WARN("EcsInventoryService::EquipItem invalid registry (character_id={})",
+                character_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  entt::entity item_entity = FindItemInSlot(*registry, character, static_cast<int>(slot));
+  if (item_entity == entt::null) {
+    SYSLOG_WARN("EcsInventoryService::EquipItem item not found (character_id={}, slot={})",
+                character_id, slot);
+    result.code = ToLegacyError(mir2::common::ErrorCode::ITEM_NOT_FOUND);
+    return result;
+  }
+
+  auto* item_component = registry->try_get<mir2::ecs::ItemComponent>(item_entity);
+  if (!item_component || item_component->item_id != item_id) {
+    SYSLOG_WARN("EcsInventoryService::EquipItem item mismatch (character_id={}, slot={}, item_id={})",
+                character_id, slot, item_id);
+    result.code = ToLegacyError(mir2::common::ErrorCode::ITEM_NOT_FOUND);
+    return result;
+  }
+
+  if (!IsValidEquipmentSlot(item_component->equip_slot)) {
+    SYSLOG_WARN("EcsInventoryService::EquipItem invalid equip slot (character_id={}, slot={}, equip_slot={})",
+                character_id, slot, item_component->equip_slot);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  result.slot = static_cast<uint16_t>(item_component->equip_slot);
+  const auto map_id = character_manager.TryGetMapId(static_cast<uint32_t>(character_id));
+  mir2::ecs::EventBus* event_bus = ResolveEventBus(registry_manager_, map_id);
+  if (!mir2::ecs::InventorySystem::EquipItem(*registry, character, item_entity, event_bus)) {
+    SYSLOG_WARN("EcsInventoryService::EquipItem failed (character_id={}, slot={}, item_id={})",
+                character_id, slot, item_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  result.code = mir2::common::ErrorCode::kOk;
+  SYSLOG_DEBUG("EcsInventoryService::EquipItem character_id={} slot={} equip_slot={} item_id={}",
+               character_id, slot, result.slot, item_id);
+
+  return result;
+}
+
+ItemUnequipResult EcsInventoryService::UnequipItem(uint64_t character_id, uint16_t slot) {
+  ItemUnequipResult result;
+  result.slot = slot;
+
+  if (character_id == 0) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem invalid character_id=0");
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  if (!IsValidEquipmentSlot(slot)) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem invalid equip slot (character_id={}, slot={})",
+                character_id, slot);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  auto& character_manager = registry_manager_.GetCharacterManager();
+  auto character_opt = character_manager.TryGet(static_cast<uint32_t>(character_id));
+  entt::entity character = character_opt.has_value() ? *character_opt : entt::null;
+  entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(character_id));
+  if (!registry || character == entt::null || !registry->valid(character)) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem invalid registry (character_id={})",
+                character_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  auto* equipment = registry->try_get<mir2::ecs::EquipmentSlotComponent>(character);
+  if (!equipment) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem missing equipment component (character_id={})",
+                character_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  const std::size_t equipment_slot = static_cast<std::size_t>(slot);
+  entt::entity equipped_item = equipment->slots[equipment_slot];
+  if (equipped_item == entt::null || !registry->valid(equipped_item)) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem item not found (character_id={}, slot={})",
+                character_id, slot);
+    result.code = ToLegacyError(mir2::common::ErrorCode::ITEM_NOT_FOUND);
+    return result;
+  }
+
+  auto* item_component = registry->try_get<mir2::ecs::ItemComponent>(equipped_item);
+  if (!item_component) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem invalid item entity (character_id={}, slot={})",
+                character_id, slot);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  result.item_id = item_component->item_id;
+  if (FindFreeSlot(*registry, character) < 0) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem inventory full (character_id={}, slot={})",
+                character_id, slot);
+    result.code = ToLegacyError(mir2::common::ErrorCode::INVENTORY_FULL);
+    return result;
+  }
+
+  const auto map_id = character_manager.TryGetMapId(static_cast<uint32_t>(character_id));
+  mir2::ecs::EventBus* event_bus = ResolveEventBus(registry_manager_, map_id);
+  if (!mir2::ecs::InventorySystem::UnequipItem(
+          *registry, character, static_cast<int>(slot), event_bus)) {
+    SYSLOG_WARN("EcsInventoryService::UnequipItem failed (character_id={}, slot={})",
+                character_id, slot);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  result.code = mir2::common::ErrorCode::kOk;
+  SYSLOG_DEBUG("EcsInventoryService::UnequipItem character_id={} slot={} item_id={}",
+               character_id, slot, result.item_id);
+
+  return result;
+}
+
+bool EcsInventoryService::ExecuteTradeAtomic(entt::registry& registry,
+                                             entt::entity trader_a,
+                                             entt::entity trader_b,
+                                             mir2::ecs::EventBus* event_bus) {
+  if (trader_a == entt::null || trader_b == entt::null || !registry.valid(trader_a) ||
+      !registry.valid(trader_b)) {
+    SYSLOG_WARN("EcsInventoryService::ExecuteTradeAtomic invalid entities");
+    return false;
+  }
+
+  return mir2::ecs::TradeSystem::ExecuteTrade(registry, trader_a, trader_b, event_bus);
 }
 
 }  // namespace mir2::logic

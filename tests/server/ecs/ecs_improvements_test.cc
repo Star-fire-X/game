@@ -17,6 +17,7 @@
 #include "ecs/character_entity_manager.h"
 #include "ecs/component_utils.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/inventory_snapshot_component.h"
 #include "ecs/registry_manager.h"
 #include "logic/handler_context.h"
 

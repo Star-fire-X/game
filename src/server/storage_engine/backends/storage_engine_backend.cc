@@ -78,6 +78,11 @@ mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::Save(
 
 mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::SaveBatch(
     const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) {
+  return SaveBatchAtomic(items);
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::SaveBatchAtomic(
+    const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) {
   if (!IsHealthy()) {
     return StorageResult{false, "backend not healthy", 0};
   }

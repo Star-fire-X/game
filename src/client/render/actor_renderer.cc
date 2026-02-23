@@ -785,6 +785,48 @@ void ActorRenderer::draw_name(const Actor& actor, int screen_x, int screen_y) {
     // 可以使用 SDL_ttf 或位图字体
 }
 
+void ActorRenderer::draw_hp_bar(const Actor& actor, int screen_x, int screen_y, float hp_percent) {
+    constexpr int BAR_WIDTH = 40;
+    constexpr int BAR_HEIGHT = 4;
+    constexpr int BAR_Y_OFFSET = 50;
+
+    const int bar_x = screen_x - BAR_WIDTH / 2;
+    const int bar_y = screen_y - BAR_Y_OFFSET;
+
+    // Clamp hp_percent to [0, 1]
+    if (hp_percent < 0.0f) hp_percent = 0.0f;
+    if (hp_percent > 1.0f) hp_percent = 1.0f;
+
+    // Flush the sprite batch before drawing primitives
+    renderer_.get_batch().flush();
+
+    // Background (dark gray)
+    renderer_.draw_rect(
+        {bar_x, bar_y, BAR_WIDTH, BAR_HEIGHT},
+        {40, 40, 40, 200});
+
+    // Fill bar based on HP percentage
+    const int fill_width = static_cast<int>(BAR_WIDTH * hp_percent);
+    if (fill_width > 0) {
+        mir2::common::Color fill_color;
+        if (hp_percent > 0.5f) {
+            fill_color = {0, 200, 0, 255};       // Green -- healthy
+        } else if (hp_percent > 0.2f) {
+            fill_color = {200, 200, 0, 255};     // Yellow -- wounded
+        } else {
+            fill_color = {200, 0, 0, 255};       // Red -- critical
+        }
+        renderer_.draw_rect(
+            {bar_x, bar_y, fill_width, BAR_HEIGHT},
+            fill_color);
+    }
+
+    // Border (black outline)
+    renderer_.draw_rect_outline(
+        {bar_x, bar_y, BAR_WIDTH, BAR_HEIGHT},
+        {0, 0, 0, 255});
+}
+
 // =============================================================================
 // 批量渲染 (Batch Rendering)
 // =============================================================================

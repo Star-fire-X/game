@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace mir2::proto {
 enum class ErrorCode : uint16_t;
@@ -33,6 +34,8 @@ struct EntityEnteredEvent {
     int x;
     int y;
     uint8_t direction;
+    uint32_t template_id = 0;
+    std::string name;
 };
 
 struct EntityLeftEvent {
@@ -47,6 +50,40 @@ struct EntityStatsUpdatedEvent {
     int mp;
     int max_mp;
     uint16_t level;
+};
+
+struct RespawnEvent {
+    uint64_t entity_id;
+    mir2::proto::EntityType entity_type;
+    int x;
+    int y;
+    int hp;
+    int mp;
+};
+
+struct StateSyncEntitySnapshot {
+    uint64_t entity_id;
+    mir2::proto::EntityType entity_type;
+    int x;
+    int y;
+    uint8_t direction;
+    int hp;
+    int max_hp;
+    int mp;
+    int max_mp;
+};
+
+struct StateSyncEvent {
+    uint64_t player_id;
+    uint32_t map_id;
+    int x;
+    int y;
+    int hp;
+    int max_hp;
+    int mp;
+    int max_mp;
+    uint16_t level;
+    std::vector<StateSyncEntitySnapshot> entities;
 };
 
 } // namespace mir2::game::events
@@ -89,6 +126,10 @@ public:
         std::function<void(uint64_t id, int x, int y, uint8_t dir)> on_monster_move;
         std::function<void(uint64_t id, int hp, int max_hp)> on_monster_stats;
         std::function<void(uint64_t id, uint64_t killer_id)> on_monster_death;
+        std::function<void(uint32_t map_id, int x, int y)> on_change_map;
+        std::function<void(uint32_t map_id, int x, int y)> on_teleport;
+        std::function<void(const events::RespawnEvent&)> on_respawn;
+        std::function<void(const events::StateSyncEvent&)> on_state_sync;
         std::function<void(const std::string& error)> on_parse_error;
     };
 
@@ -103,6 +144,10 @@ public:
     void HandleEntityDespawn(const NetworkPacket& packet);
     void HandleEntityUpdate(const NetworkPacket& packet);
     void HandleMonsterDeath(const NetworkPacket& packet);
+    void HandleChangeMap(const NetworkPacket& packet);
+    void HandleTeleport(const NetworkPacket& packet);
+    void HandleRespawn(const NetworkPacket& packet);
+    void HandleStateSync(const NetworkPacket& packet);
 
 private:
     Callbacks callbacks_;

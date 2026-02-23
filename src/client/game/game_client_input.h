@@ -72,6 +72,7 @@ public:
         std::function<void()> process_state_input;
         std::function<mir2::common::Position(int screen_x, int screen_y)> screen_to_world;
         std::function<void(uint64_t npc_id)> interact_with_npc;
+        std::function<void(uint64_t item_entity_id)> interact_with_ground_item;
         std::function<bool()> is_connected;
         std::function<void(const mir2::common::Position& target)> send_move_request;
         std::function<mir2::render::Actor*(int32_t actor_id)> find_actor;

@@ -9,10 +9,12 @@
 #include <cstdlib>
 #include <cstdint>
 #include <atomic>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -134,7 +136,7 @@ class PlayerMailboxCausalTest : public ::testing::Test {
 
     response_sender_ = std::make_unique<MockResponseSender>();
     server_ = std::make_unique<LogicServer>();
-    server_->executor_ = std::make_unique<CoroutineExecutor>(io_context_, 1);
+    server_->executor_ = std::make_unique<CoroutineExecutor>(io_context_, 2);
     server_->handler_registry_ = std::make_unique<HandlerRegistry>(*server_->executor_);
     server_->role_store_ = std::make_unique<RoleStore>();
     server_->logic_thread_id_ = io_thread_.get_id();
@@ -162,7 +164,9 @@ class PlayerMailboxCausalTest : public ::testing::Test {
           // Drain one more executor turn to ensure close-triggered callbacks run.
           asio::post(io_context_, [done]() mutable { done->set_value(); });
         });
-        done_future.wait();
+        if (done_future.wait_for(2s) != std::future_status::ready) {
+          ADD_FAILURE() << "Timed out waiting for gateway session close";
+        }
       }
     }
 
@@ -206,6 +210,19 @@ class PlayerMailboxCausalTest : public ::testing::Test {
       std::this_thread::sleep_for(5ms);
     }
     return socket->GetWrites().size() >= expected;
+  }
+
+  bool WaitUntil(const std::function<bool()>& condition,
+                 std::chrono::milliseconds timeout =
+                     std::chrono::milliseconds(2000)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (condition()) {
+        return true;
+      }
+      std::this_thread::sleep_for(5ms);
+    }
+    return condition();
   }
 
   bool FillHotQueueToFull() {
@@ -265,6 +282,7 @@ TEST_F(PlayerMailboxCausalTest, EquipThenSkillIsStrictlySequential) {
 
   const uint64_t client_id = 10001;
   server_->client_registry_.Track(client_id);
+  server_->role_store_->BindClientRole(client_id, 50001);
 
   auto* executor = server_->executor_.get();
   server_->handler_registry_->RegisterHandler(
@@ -581,7 +599,9 @@ TEST_F(PlayerMailboxCausalTest, ResponseSenderPrefersGatewaySessionWhenAvailable
 
   common::NetworkPacket packet;
   const auto& wire = gateway.socket->GetWrites().front();
-  ASSERT_EQ(common::DecodePacket(wire.data(), wire.size(), &packet), common::DecodeStatus::kOk);
+  uint16_t sequence = 0;
+  ASSERT_EQ(common::DecodePacketV2(wire.data(), wire.size(), &packet, &sequence),
+            common::DecodeStatus::kOk);
   EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage));
 
   common::RoutedMessageData routed;
@@ -644,6 +664,204 @@ TEST_F(PlayerMailboxCausalTest, MailboxSpawnRejectCleansStateAndLaterEventsStill
   EXPECT_TRUE(WaitForCount(handled, 1));
 }
 
+TEST_F(PlayerMailboxCausalTest, MailboxHandlerExceptionKicksAndCleansSession) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->handler_registry_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  const auto gateway = MakeActiveTcpSession(io_context_, 65003);
+  ASSERT_NE(gateway.socket, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+    server_->gateway_session_ = gateway.session;
+  }
+
+  const uint64_t client_id = 45003;
+  server_->client_registry_.Track(client_id);
+  server_->role_store_->BindClientAccount(client_id, 145003);
+
+  server_->handler_registry_->RegisterHandler(
+      static_cast<uint16_t>(mir2::common::MsgId::kEquipReq),
+      [](HandlerContext, const uint8_t*, size_t) -> Task<void> {
+        throw std::runtime_error("mailbox handler boom");
+        co_return;
+      });
+
+  events::HotEvent event{};
+  event.client_id = client_id;
+  event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  event.type = events::HotEventType::kGeneric;
+  DispatchHotEventOnIo(event);
+
+  struct SessionState {
+    bool tracked = false;
+    bool account_bound = false;
+    bool mailbox_exists = false;
+    size_t pending_events = 0;
+    size_t active_runners = 0;
+  };
+
+  auto read_state = [this, client_id]() -> SessionState {
+    auto promise = std::make_shared<std::promise<SessionState>>();
+    auto future = promise->get_future();
+    asio::post(io_context_, [this, client_id, promise]() mutable {
+      SessionState state;
+      state.tracked = server_->client_registry_.Contains(client_id);
+      state.account_bound = server_->role_store_->GetAccountId(client_id).has_value();
+      state.mailbox_exists =
+          server_->player_mailboxes_.find(client_id) != server_->player_mailboxes_.end();
+      state.pending_events = server_->mailbox_pending_events_total_;
+      state.active_runners = server_->mailbox_active_runners_;
+      promise->set_value(state);
+    });
+    return future.get();
+  };
+
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  SessionState state = read_state();
+  while (std::chrono::steady_clock::now() < deadline &&
+         (state.tracked || state.mailbox_exists || state.active_runners != 0)) {
+    std::this_thread::sleep_for(5ms);
+    state = read_state();
+  }
+
+  EXPECT_FALSE(state.tracked);
+  EXPECT_FALSE(state.account_bound);
+  EXPECT_FALSE(state.mailbox_exists);
+  EXPECT_EQ(state.pending_events, 0u);
+  EXPECT_EQ(state.active_runners, 0u);
+
+  ASSERT_TRUE(WaitForSocketWrites(gateway.socket, 1));
+  ASSERT_FALSE(gateway.socket->GetWrites().empty());
+
+  common::NetworkPacket packet;
+  const auto& wire = gateway.socket->GetWrites().back();
+  uint16_t sequence = 0;
+  ASSERT_EQ(common::DecodePacketV2(wire.data(), wire.size(), &packet, &sequence),
+            common::DecodeStatus::kOk);
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage));
+
+  common::RoutedMessageData routed;
+  ASSERT_TRUE(common::ParseRoutedMessage(packet.payload, &routed));
+  EXPECT_EQ(routed.client_id, client_id);
+  EXPECT_EQ(routed.msg_id, static_cast<uint16_t>(common::MsgId::kKick));
+
+  flatbuffers::Verifier verifier(routed.payload.data(), routed.payload.size());
+  ASSERT_TRUE(verifier.VerifyBuffer<mir2::proto::Kick>(nullptr));
+  const auto* kick = flatbuffers::GetRoot<mir2::proto::Kick>(routed.payload.data());
+  ASSERT_NE(kick, nullptr);
+  ASSERT_NE(kick->reason_text(), nullptr);
+  EXPECT_EQ(kick->reason_text()->str(), "mailbox exception");
+}
+
+TEST_F(PlayerMailboxCausalTest, CleanupClientSessionCancelsRunningMailboxAndDropsQueuedEvents) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->handler_registry_, nullptr);
+  ASSERT_NE(server_->executor_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  const uint64_t client_id = 45004;
+  server_->client_registry_.Track(client_id);
+  server_->role_store_->BindClientAccount(client_id, 145004);
+
+  std::atomic<int> started{0};
+  std::atomic<int> completed{0};
+  std::promise<void> release_promise;
+  auto release_signal = release_promise.get_future().share();
+  auto* executor = server_->executor_.get();
+
+  server_->handler_registry_->RegisterHandler(
+      static_cast<uint16_t>(mir2::common::MsgId::kEquipReq),
+      [executor, &started, &completed, release_signal](HandlerContext, const uint8_t*, size_t)
+          -> Task<void> {
+        started.fetch_add(1, std::memory_order_relaxed);
+        co_await executor->Async([release_signal]() mutable {
+          release_signal.wait();
+        });
+        completed.fetch_add(1, std::memory_order_relaxed);
+        co_return;
+      });
+
+  events::HotEvent first_event{};
+  first_event.client_id = client_id;
+  first_event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  first_event.type = events::HotEventType::kGeneric;
+  DispatchHotEventOnIo(first_event);
+
+  events::HotEvent second_event = first_event;
+  DispatchHotEventOnIo(second_event);
+
+  ASSERT_TRUE(WaitForCount(started, 1));
+
+  struct MailboxState {
+    bool tracked = false;
+    bool mailbox_exists = false;
+    bool mailbox_cancelled = false;
+    size_t pending_events = 0;
+    size_t active_runners = 0;
+  };
+  auto read_state = [this, client_id]() -> MailboxState {
+    auto promise = std::make_shared<std::promise<MailboxState>>();
+    auto future = promise->get_future();
+    asio::post(io_context_, [this, client_id, promise]() mutable {
+      MailboxState state;
+      state.tracked = server_->client_registry_.Contains(client_id);
+      state.mailbox_exists =
+          server_->player_mailboxes_.find(client_id) != server_->player_mailboxes_.end();
+      state.mailbox_cancelled =
+          server_->cancelled_mailbox_clients_.find(client_id) !=
+          server_->cancelled_mailbox_clients_.end();
+      state.pending_events = server_->mailbox_pending_events_total_;
+      state.active_runners = server_->mailbox_active_runners_;
+      promise->set_value(state);
+    });
+    return future.get();
+  };
+
+  const auto pending_deadline = std::chrono::steady_clock::now() + 2s;
+  MailboxState state = read_state();
+  while (std::chrono::steady_clock::now() < pending_deadline &&
+         state.pending_events == 0) {
+    std::this_thread::sleep_for(5ms);
+    state = read_state();
+  }
+  ASSERT_GE(state.pending_events, 1u);
+
+  auto cleanup_promise = std::make_shared<std::promise<bool>>();
+  auto cleanup_future = cleanup_promise->get_future();
+  asio::post(io_context_, [this, client_id, cleanup_promise]() mutable {
+    cleanup_promise->set_value(
+        server_->CleanupClientSession(client_id, "test_cancel_running_mailbox"));
+  });
+  ASSERT_EQ(cleanup_future.wait_for(2s), std::future_status::ready);
+  EXPECT_TRUE(cleanup_future.get());
+
+  events::HotEvent third_event = first_event;
+  DispatchHotEventOnIo(third_event);
+
+  release_promise.set_value();
+
+  ASSERT_TRUE(WaitForCount(completed, 1));
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(started.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(completed.load(std::memory_order_relaxed), 1);
+
+  const auto cleanup_deadline = std::chrono::steady_clock::now() + 2s;
+  state = read_state();
+  while (std::chrono::steady_clock::now() < cleanup_deadline &&
+         (state.mailbox_exists || state.mailbox_cancelled || state.active_runners != 0 ||
+          state.tracked)) {
+    std::this_thread::sleep_for(5ms);
+    state = read_state();
+  }
+
+  EXPECT_FALSE(state.tracked);
+  EXPECT_FALSE(state.mailbox_exists);
+  EXPECT_FALSE(state.mailbox_cancelled);
+  EXPECT_EQ(state.pending_events, 0u);
+  EXPECT_EQ(state.active_runners, 0u);
+}
+
 TEST_F(PlayerMailboxCausalTest, GlobalMailboxHardLimitDropsEventAndSignalsBackpressure) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->handler_registry_, nullptr);
@@ -681,7 +899,9 @@ TEST_F(PlayerMailboxCausalTest, GlobalMailboxHardLimitDropsEventAndSignalsBackpr
 
   common::NetworkPacket packet;
   const auto& wire = gateway.socket->GetWrites().back();
-  ASSERT_EQ(common::DecodePacket(wire.data(), wire.size(), &packet), common::DecodeStatus::kOk);
+  uint16_t sequence = 0;
+  ASSERT_EQ(common::DecodePacketV2(wire.data(), wire.size(), &packet, &sequence),
+            common::DecodeStatus::kOk);
   EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kBackpressureControl));
 }
 
@@ -726,13 +946,18 @@ TEST_F(PlayerMailboxCausalTest, PrewarmSpawnRejectStillSendsLogicReady) {
     done->set_value();
   });
   ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+  ASSERT_TRUE(WaitUntil([this]() {
+    return !server_->prewarm_running_.load(std::memory_order_acquire);
+  }, std::chrono::milliseconds(5000)));
 
   ASSERT_TRUE(WaitForSocketWrites(gateway.socket, 1));
   ASSERT_FALSE(gateway.socket->GetWrites().empty());
 
   common::NetworkPacket packet;
   const auto& wire = gateway.socket->GetWrites().front();
-  ASSERT_EQ(common::DecodePacket(wire.data(), wire.size(), &packet), common::DecodeStatus::kOk);
+  uint16_t sequence = 0;
+  ASSERT_EQ(common::DecodePacketV2(wire.data(), wire.size(), &packet, &sequence),
+            common::DecodeStatus::kOk);
   EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kLogicReady));
 
   hold_promise.set_value();
@@ -742,6 +967,222 @@ TEST_F(PlayerMailboxCausalTest, PrewarmSpawnRejectStillSendsLogicReady) {
     std::this_thread::sleep_for(5ms);
   }
   EXPECT_EQ(server_->executor_->RunningCount(), 0);
+}
+
+TEST_F(PlayerMailboxCausalTest, ContextRestorePreservesUint64AccountId) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  std::atomic<uint64_t> captured_client_id{0};
+  std::atomic<uint64_t> captured_player_id{0};
+  std::atomic<uint64_t> captured_account_id{0};
+  std::atomic<int> loader_calls{0};
+
+  server_->prewarm_manager_ = std::make_unique<PrewarmManager>(*server_->executor_);
+  server_->prewarm_manager_->SetLoader([this,
+                                        &captured_client_id,
+                                        &captured_player_id,
+                                        &captured_account_id,
+                                        &loader_calls](const PrewarmEntry& entry) {
+    captured_client_id.store(entry.client_id, std::memory_order_relaxed);
+    captured_player_id.store(entry.player_id, std::memory_order_relaxed);
+    captured_account_id.store(entry.account_id, std::memory_order_relaxed);
+    loader_calls.fetch_add(1, std::memory_order_relaxed);
+    server_->role_store_->BindClientAccount(entry.client_id, entry.account_id);
+    return true;
+  });
+
+  const auto gateway = MakeActiveTcpSession(io_context_, 65003);
+  ASSERT_NE(gateway.socket, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+    server_->gateway_session_ = gateway.session;
+  }
+
+  constexpr uint32_t kRequestId = 88;
+  constexpr uint64_t kClientId = 50002;
+  constexpr uint32_t kPlayerId = 60002;
+  constexpr uint64_t kAccountId = (1ULL << 32) + 12345ULL;
+  server_->last_context_request_id_.store(kRequestId);
+
+  flatbuffers::FlatBufferBuilder builder;
+  const auto ip = builder.CreateString("127.0.0.1");
+  const auto context = mir2::proto::CreateConnectionContext(
+      builder, kClientId, kPlayerId, kAccountId, ip, 1000, 1000);
+  std::vector<flatbuffers::Offset<mir2::proto::ConnectionContext>> contexts;
+  contexts.push_back(context);
+  const auto response = mir2::proto::CreateContextRestoreResponse(
+      builder, kRequestId, builder.CreateVector(contexts), 1);
+  builder.Finish(response);
+  const uint8_t* data = builder.GetBufferPointer();
+  std::vector<uint8_t> payload(data, data + builder.GetSize());
+
+  auto done = std::make_shared<std::promise<void>>();
+  auto done_future = done->get_future();
+  asio::post(io_context_, [this, session = gateway.session, payload, done]() mutable {
+    server_->HandleContextRestoreResponse(session, payload);
+    done->set_value();
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+  ASSERT_TRUE(WaitUntil([this, &loader_calls]() {
+    return loader_calls.load(std::memory_order_acquire) == 1 &&
+           !server_->prewarm_running_.load(std::memory_order_acquire);
+  }, std::chrono::milliseconds(5000)));
+
+  ASSERT_TRUE(WaitForSocketWrites(gateway.socket, 1));
+  ASSERT_FALSE(gateway.socket->GetWrites().empty());
+
+  common::NetworkPacket packet;
+  const auto& wire = gateway.socket->GetWrites().front();
+  uint16_t sequence = 0;
+  ASSERT_EQ(common::DecodePacketV2(wire.data(), wire.size(), &packet, &sequence),
+            common::DecodeStatus::kOk);
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kLogicReady));
+
+  EXPECT_EQ(captured_client_id.load(std::memory_order_relaxed), kClientId);
+  EXPECT_EQ(captured_player_id.load(std::memory_order_relaxed), kPlayerId);
+  EXPECT_EQ(captured_account_id.load(std::memory_order_relaxed), kAccountId);
+
+  const auto bound_account = server_->role_store_->GetAccountId(kClientId);
+  ASSERT_TRUE(bound_account.has_value());
+  EXPECT_EQ(*bound_account, kAccountId);
+}
+
+TEST_F(PlayerMailboxCausalTest, ContextRestoreReconcileCleansLocalOnlySessions) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  constexpr uint64_t kKeptClientId = 91001;
+  constexpr uint64_t kLocalOnlyClientId = 91002;
+  server_->client_registry_.Track(kKeptClientId);
+  server_->client_registry_.Track(kLocalOnlyClientId);
+  server_->role_store_->BindClientAccount(kKeptClientId, 191001);
+  server_->role_store_->BindClientAccount(kLocalOnlyClientId, 191002);
+
+  constexpr uint32_t kRequestId = 1901;
+  server_->last_context_request_id_.store(kRequestId);
+
+  flatbuffers::FlatBufferBuilder builder;
+  const auto ip = builder.CreateString("127.0.0.1");
+  const auto context =
+      mir2::proto::CreateConnectionContext(builder, kKeptClientId, 0, 0, ip, 1000, 1000);
+  std::vector<flatbuffers::Offset<mir2::proto::ConnectionContext>> contexts;
+  contexts.push_back(context);
+  const auto response = mir2::proto::CreateContextRestoreResponse(
+      builder, kRequestId, builder.CreateVector(contexts), 1);
+  builder.Finish(response);
+  const uint8_t* data = builder.GetBufferPointer();
+  std::vector<uint8_t> payload(data, data + builder.GetSize());
+
+  auto done = std::make_shared<std::promise<void>>();
+  auto done_future = done->get_future();
+  auto session = MakeTcpSession(io_context_, 69001);
+  asio::post(io_context_, [this, session = std::move(session), payload, done]() mutable {
+    server_->HandleContextRestoreResponse(session, payload);
+    done->set_value();
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+
+  EXPECT_TRUE(server_->client_registry_.Contains(kKeptClientId));
+  EXPECT_FALSE(server_->client_registry_.Contains(kLocalOnlyClientId));
+  EXPECT_TRUE(server_->role_store_->GetAccountId(kKeptClientId).has_value());
+  EXPECT_FALSE(server_->role_store_->GetAccountId(kLocalOnlyClientId).has_value());
+  EXPECT_EQ(server_->last_reconciled_client_ids_.count(kKeptClientId), 1u);
+  EXPECT_EQ(server_->last_reconciled_client_ids_.count(kLocalOnlyClientId), 0u);
+}
+
+TEST_F(PlayerMailboxCausalTest, OnGatewayDisconnectedCleansAllSessionState) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  constexpr uint64_t kClientA = 92001;
+  constexpr uint64_t kClientB = 92002;
+  server_->client_registry_.Track(kClientA);
+  server_->client_registry_.Track(kClientB);
+  server_->role_store_->BindClientAccount(kClientA, 292001);
+  server_->role_store_->BindClientAccount(kClientB, 292002);
+  server_->client_last_activity_ms_[kClientA] = network::TcpSession::NowMs();
+  server_->client_last_activity_ms_[kClientB] = network::TcpSession::NowMs();
+  server_->last_reconciled_client_ids_.insert(kClientA);
+  server_->last_reconciled_client_ids_.insert(kClientB);
+
+  {
+    std::lock_guard<std::mutex> lock(server_->backpressure_mutex_);
+    server_->backpressure_until_ms_[kClientA] = network::TcpSession::NowMs() + 1000;
+    server_->backpressure_until_ms_[kClientB] = network::TcpSession::NowMs() + 1000;
+  }
+
+  LogicServer::PlayerMailbox mailbox;
+  mailbox.executing = true;
+  events::HotEvent event{};
+  event.client_id = kClientA;
+  event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  event.type = events::HotEventType::kGeneric;
+  mailbox.high_priority_events.push_back(event);
+  server_->player_mailboxes_[kClientA] = mailbox;
+  server_->mailbox_pending_events_total_ = 1;
+  server_->mailbox_active_runners_ = 1;
+
+  auto done = std::make_shared<std::promise<void>>();
+  auto done_future = done->get_future();
+  asio::post(io_context_, [this, done]() mutable {
+    server_->OnGatewayDisconnected();
+    done->set_value();
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+
+  EXPECT_FALSE(server_->client_registry_.Contains(kClientA));
+  EXPECT_FALSE(server_->client_registry_.Contains(kClientB));
+  EXPECT_FALSE(server_->role_store_->GetAccountId(kClientA).has_value());
+  EXPECT_FALSE(server_->role_store_->GetAccountId(kClientB).has_value());
+  EXPECT_TRUE(server_->client_last_activity_ms_.empty());
+  EXPECT_TRUE(server_->last_reconciled_client_ids_.empty());
+  EXPECT_TRUE(server_->player_mailboxes_.empty());
+  EXPECT_EQ(server_->mailbox_pending_events_total_, 0u);
+  EXPECT_EQ(server_->mailbox_active_runners_, 0u);
+  {
+    std::lock_guard<std::mutex> lock(server_->backpressure_mutex_);
+    EXPECT_TRUE(server_->backpressure_until_ms_.empty());
+  }
+}
+
+TEST_F(PlayerMailboxCausalTest, ZombieScanUsesIdleAndReconcileDoubleCondition) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  constexpr uint64_t kZombieClient = 93001;
+  constexpr uint64_t kReconciledClient = 93002;
+  constexpr uint64_t kActiveClient = 93003;
+  server_->client_registry_.Track(kZombieClient);
+  server_->client_registry_.Track(kReconciledClient);
+  server_->client_registry_.Track(kActiveClient);
+  server_->role_store_->BindClientAccount(kZombieClient, 393001);
+  server_->role_store_->BindClientAccount(kReconciledClient, 393002);
+  server_->role_store_->BindClientAccount(kActiveClient, 393003);
+
+  const int64_t now_ms = network::TcpSession::NowMs();
+  server_->zombie_detection_enabled_ = true;
+  server_->zombie_scan_interval_ms_ = 1;
+  server_->zombie_idle_timeout_ms_ = 200;
+  server_->client_last_activity_ms_[kZombieClient] = now_ms - 1000;
+  server_->client_last_activity_ms_[kReconciledClient] = now_ms - 1000;
+  server_->client_last_activity_ms_[kActiveClient] = now_ms - 50;
+  server_->last_reconciled_client_ids_.insert(kReconciledClient);
+
+  auto done = std::make_shared<std::promise<void>>();
+  auto done_future = done->get_future();
+  asio::post(io_context_, [this, now_ms, done]() mutable {
+    server_->ScanZombieSessions(now_ms);
+    done->set_value();
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+
+  EXPECT_FALSE(server_->client_registry_.Contains(kZombieClient));
+  EXPECT_TRUE(server_->client_registry_.Contains(kReconciledClient));
+  EXPECT_TRUE(server_->client_registry_.Contains(kActiveClient));
+  EXPECT_FALSE(server_->role_store_->GetAccountId(kZombieClient).has_value());
+  EXPECT_TRUE(server_->role_store_->GetAccountId(kReconciledClient).has_value());
+  EXPECT_TRUE(server_->role_store_->GetAccountId(kActiveClient).has_value());
 }
 
 }  // namespace

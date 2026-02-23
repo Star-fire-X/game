@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <asio/io_context.hpp>
+#include <asio/strand.hpp>
 
 #include "network/packet_codec.h"
 #include "network/tcp_connection.h"
@@ -65,6 +66,7 @@ class TcpClient {
   void CompactReadBufferIfNeeded();
 
   asio::io_context& io_context_;
+  asio::strand<asio::io_context::executor_type> send_strand_;
   std::shared_ptr<TcpConnection> connection_;
   std::atomic<bool> connected_{false};
   PacketHandler packet_handler_;
@@ -72,7 +74,7 @@ class TcpClient {
   std::vector<uint8_t> read_buffer_;
   size_t read_offset_ = 0;
   Packet decode_packet_{};
-  ProtocolVersion protocol_version_ = ProtocolVersion::kV1;
+  ProtocolVersion protocol_version_ = ProtocolVersion::kV2;
   bool protocol_version_detected_ = false;
   std::atomic<uint16_t> send_sequence_{0};
   std::atomic<uint16_t> recv_sequence_{0};

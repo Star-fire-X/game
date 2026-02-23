@@ -29,15 +29,6 @@ inline void mark_state_dirty(entt::registry& registry, entt::entity entity) {
     dirty.state_dirty = true;
 }
 
-/// 兼容旧背包标记：同时标记物品/装备/技能
-inline void mark_inventory_dirty(entt::registry& registry, entt::entity entity) {
-    auto& dirty = registry.get_or_emplace<DirtyComponent>(entity);
-    dirty.inventory_dirty = true;
-    dirty.items_dirty = true;
-    dirty.equipment_dirty = true;
-    dirty.skills_dirty = true;
-}
-
 /// 标记物品脏数据（运行时实体物品通道）
 inline void mark_items_dirty(entt::registry& registry, entt::entity entity) {
     auto& dirty = registry.get_or_emplace<DirtyComponent>(entity);
@@ -62,7 +53,7 @@ inline bool is_dirty(entt::registry& registry, entt::entity entity) {
         return false;
     }
     return dirty->identity_dirty || dirty->attributes_dirty ||
-           dirty->state_dirty || dirty->inventory_dirty ||
+           dirty->state_dirty ||
            dirty->items_dirty || dirty->equipment_dirty ||
            dirty->skills_dirty;
 }

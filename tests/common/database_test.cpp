@@ -10,7 +10,7 @@ namespace {
 CharacterData make_character(uint32_t id, const std::string& name) {
     CharacterData data;
     data.id = id;
-    data.account_id = "test_account";
+    data.account_id = 10001;
     data.name = name;
     data.char_class = CharacterClass::WARRIOR;
     data.gender = Gender::MALE;
@@ -124,7 +124,7 @@ TEST_F(SQLiteDatabaseTest, LoadCharactersByAccount) {
         ASSERT_TRUE(db_->save_character(char_data));
     }
 
-    auto result = db_->load_characters_by_account("test_account");
+    auto result = db_->load_characters_by_account(10001);
     ASSERT_TRUE(result);
     EXPECT_EQ(result.value.size(), 3u);
 }

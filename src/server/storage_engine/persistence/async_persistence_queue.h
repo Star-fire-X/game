@@ -4,8 +4,10 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -14,6 +16,10 @@
 #include "storage_engine/interfaces/storage_backend.h"
 #include "storage_engine/persistence/blocking_queue.h"
 #include "storage_engine/storage_engine.h"
+
+namespace mir2::storage_engine::l2 {
+class RocksDBCache;
+}  // namespace mir2::storage_engine::l2
 
 namespace mir2::storage_engine::persistence {
 
@@ -27,11 +33,27 @@ public:
         size_t worker_threads = 2;
         uint32_t retry_count = 3;
         uint32_t retry_delay_ms = 100;
+        size_t dead_letter_max_items = 10000;
+        bool enable_durable_outbox = false;
+        size_t outbox_replay_limit = 0;  // 0 means replay all.
+        size_t outbox_max_items = 200000;  // 0 means unlimited.
+        bool enable_metrics = true;
+    };
+
+    struct RuntimeConfig {
+        std::optional<uint32_t> batch_interval_ms;
+        std::optional<size_t> batch_size;
+        std::optional<uint32_t> retry_count;
+        std::optional<uint32_t> retry_delay_ms;
+        std::optional<bool> enable_metrics;
     };
 
     explicit AsyncPersistenceQueue(IStorageBackend* backend);
     explicit AsyncPersistenceQueue(IStorageBackend* backend,
                                    const Config& config);
+    AsyncPersistenceQueue(IStorageBackend* backend,
+                          l2::RocksDBCache* durable_outbox_cache,
+                          const Config& config);
 
     ~AsyncPersistenceQueue();
 
@@ -44,27 +66,52 @@ public:
         return FlushAll(timeout_ms);
     }
 
+    bool ApplyRuntimeConfig(const RuntimeConfig& config);
+
     struct Stats {
         uint64_t enqueued_total = 0;
         uint64_t persisted_success = 0;
         uint64_t persisted_failed = 0;
         size_t high_priority_queue_depth = 0;
         size_t normal_priority_queue_depth = 0;
+        size_t outbox_depth = 0;
+        uint64_t outbox_replayed = 0;
+        uint64_t outbox_acked = 0;
+        uint64_t outbox_failed = 0;
+        uint64_t outbox_rejected = 0;
+        size_t dead_letter_depth = 0;
+        uint64_t dead_letter_enqueued = 0;
+        uint64_t dead_letter_dropped = 0;
     };
 
     Stats GetStats() const;
 
     int64_t PendingCount() const;
 
+    struct DeadLetterEntry {
+        std::string key;
+        uint64_t version = 0;
+        std::string error_message;
+        uint32_t attempts = 0;
+        uint64_t durable_outbox_id = 0;
+    };
+
+    std::vector<DeadLetterEntry> GetDeadLetterSnapshot(size_t limit = 100) const;
+
 private:
     struct PersistenceItem {
         std::string key;
         VersionedData data;
         uint64_t version;
+        uint64_t durable_outbox_id = 0;
 
         PersistenceItem() = default;
-        PersistenceItem(std::string k, VersionedData d, uint64_t v)
-            : key(std::move(k)), data(std::move(d)), version(v) {}
+        PersistenceItem(std::string k, VersionedData d, uint64_t v,
+                        uint64_t outbox_id = 0)
+            : key(std::move(k)),
+              data(std::move(d)),
+              version(v),
+              durable_outbox_id(outbox_id) {}
     };
 
     void HighPriorityWorker();
@@ -72,10 +119,26 @@ private:
     bool IsFlushDrained() const;
     void NotifyFlushCompletionIfDrained();
 
-    bool PersistSingleItem(const PersistenceItem& item);
-    bool PersistBatch(const std::vector<PersistenceItem>& batch);
+    bool PersistSingleItem(const PersistenceItem& item,
+                           uint32_t* attempts_out,
+                           std::string* error_message_out);
+    bool PersistBatch(const std::vector<PersistenceItem>& batch,
+                      uint32_t* attempts_out,
+                      std::string* error_message_out);
+    bool AckDurableOutboxItem(uint64_t outbox_id);
+    bool EnqueueItem(const PersistenceItem& item, Priority priority,
+                     bool count_as_enqueued);
+    size_t ReplayDurableOutbox(size_t limit);
+    bool CanAppendOutbox() const;
+    void RefreshOutboxDepthMetric();
+    void RefreshQueueDepthMetrics();
+    void RecordDeadLetter(const PersistenceItem& item,
+                          uint32_t attempts,
+                          const std::string& error_message);
+    void IncrementMetricCounter(const std::string& name, uint64_t delta = 1) const;
 
     IStorageBackend* backend_ = nullptr;
+    l2::RocksDBCache* durable_outbox_cache_ = nullptr;
     Config config_;
 
     std::unique_ptr<BlockingQueue<PersistenceItem>> high_priority_queue_;
@@ -87,11 +150,26 @@ private:
     mutable std::mutex flush_mutex_;
     std::condition_variable flush_complete_;
     std::atomic<uint64_t> pending_items_{0};
+    std::atomic<size_t> durable_outbox_depth_cached_{0};
+    std::atomic<uint32_t> batch_interval_ms_{30000};
+    std::atomic<size_t> batch_size_{100};
+    std::atomic<uint32_t> retry_count_{3};
+    std::atomic<uint32_t> retry_delay_ms_{100};
+    std::atomic<bool> enable_metrics_{true};
+    std::atomic<size_t> dead_letter_depth_cached_{0};
+    mutable std::mutex dead_letter_mutex_;
+    std::deque<DeadLetterEntry> dead_letter_queue_;
 
     struct Statistics {
         std::atomic<uint64_t> enqueued_total{0};
         std::atomic<uint64_t> persisted_success{0};
         std::atomic<uint64_t> persisted_failed{0};
+        std::atomic<uint64_t> outbox_replayed{0};
+        std::atomic<uint64_t> outbox_acked{0};
+        std::atomic<uint64_t> outbox_failed{0};
+        std::atomic<uint64_t> outbox_rejected{0};
+        std::atomic<uint64_t> dead_letter_enqueued{0};
+        std::atomic<uint64_t> dead_letter_dropped{0};
     };
     Statistics stats_;
 };

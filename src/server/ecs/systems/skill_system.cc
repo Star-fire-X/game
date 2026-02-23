@@ -690,7 +690,7 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
         stun_effect.end_time_ms = current_time_ms_ + 2000;
         stun_effect.last_tick_ms = current_time_ms_;
 
-        EffectSystem effect_system(registry_);
+        EffectSystem effect_system(registry_, event_bus_);
         effect_system.apply_effect(target, stun_effect);
 
         int damage = DamageCalculator::calculate_physical_damage(
@@ -870,7 +870,7 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
             stun_effect.end_time_ms = expire_time_ms;
             stun_effect.last_tick_ms = current_time_ms_;
 
-            EffectSystem effect_system(registry_);
+            EffectSystem effect_system(registry_, event_bus_);
             effect_system.apply_effect(entity, stun_effect);
         };
 

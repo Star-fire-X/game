@@ -161,3 +161,44 @@ TEST(MapLoaderTest, RejectsInvalidFile) {
   auto map = loader.Load(temp.path().string());
   EXPECT_FALSE(map.has_value());
 }
+
+TEST(MapLoaderTest, LoadFullMapsColumnMajorInputToExpectedCoordinates) {
+  constexpr int32_t kWidth = 3;
+  constexpr int32_t kHeight = 2;
+  std::vector<TileDef> tiles(static_cast<size_t>(kWidth * kHeight));
+
+  // tiles[y * width + x]
+  tiles[0].background = 100;  // (0,0)
+  tiles[1].background = 101;  // (1,0)
+  tiles[2].background = 102;  // (2,0)
+  tiles[3].background = 200;  // (0,1)
+  tiles[4].background = 201;  // (1,1)
+  tiles[5].background = 202;  // (2,1)
+
+  TempMapFile temp = WriteTestMapFile(kWidth, kHeight, tiles);
+
+  mir2::game::map::MapLoader loader;
+  auto full = loader.LoadFull(temp.path().string());
+  ASSERT_TRUE(full.has_value());
+
+  const auto* tile_00 = full->GetTile(0, 0);
+  const auto* tile_10 = full->GetTile(1, 0);
+  const auto* tile_20 = full->GetTile(2, 0);
+  const auto* tile_01 = full->GetTile(0, 1);
+  const auto* tile_11 = full->GetTile(1, 1);
+  const auto* tile_21 = full->GetTile(2, 1);
+
+  ASSERT_NE(tile_00, nullptr);
+  ASSERT_NE(tile_10, nullptr);
+  ASSERT_NE(tile_20, nullptr);
+  ASSERT_NE(tile_01, nullptr);
+  ASSERT_NE(tile_11, nullptr);
+  ASSERT_NE(tile_21, nullptr);
+
+  EXPECT_EQ(tile_00->bk_img, 100);
+  EXPECT_EQ(tile_10->bk_img, 101);
+  EXPECT_EQ(tile_20->bk_img, 102);
+  EXPECT_EQ(tile_01->bk_img, 200);
+  EXPECT_EQ(tile_11->bk_img, 201);
+  EXPECT_EQ(tile_21->bk_img, 202);
+}

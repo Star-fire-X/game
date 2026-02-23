@@ -40,11 +40,18 @@ class PgConnectionPool {
 
   bool IsReady() const { return initialized_; }
 
+  size_t PoolSize() const;
+  size_t InUseCount() const;
+
  private:
-  std::mutex mutex_;
+  void UpdateMetricsLocked();
+
+  mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::queue<std::shared_ptr<pqxx::connection>> pool_;
   bool initialized_ = false;
+  size_t configured_pool_size_ = 0;
+  size_t in_use_count_ = 0;
 };
 
 /**

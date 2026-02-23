@@ -68,13 +68,13 @@ TEST(KickMessageTest, KickSendsMessageAndCloses) {
                                "Heartbeat timeout");
     EXPECT_NE(session_pair.session->GetState(), TcpSession::SessionState::kActive);
 
-    std::array<uint8_t, PacketHeader::kSize> header_bytes{};
+    std::array<uint8_t, PacketHeaderV2::kSize> header_bytes{};
     asio::error_code ec;
     asio::read(session_pair.client_socket, asio::buffer(header_bytes), ec);
     ASSERT_FALSE(ec);
 
-    PacketHeader header{};
-    ASSERT_TRUE(PacketHeader::FromBytes(header_bytes.data(), header_bytes.size(), &header));
+    PacketHeaderV2 header{};
+    ASSERT_TRUE(PacketHeaderV2::FromBytes(header_bytes.data(), header_bytes.size(), &header));
     EXPECT_EQ(header.msg_id, static_cast<uint16_t>(mir2::common::MsgId::kKick));
     ASSERT_GT(header.payload_size, 0u);
 

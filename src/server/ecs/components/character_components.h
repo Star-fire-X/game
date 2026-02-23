@@ -2,14 +2,13 @@
  * @file character_components.h
  * @brief ECS 角色组件定义
  *
- * 合并角色身份、属性、状态与背包数据，便于统一管理。
+ * 合并角色身份、属性与状态组件，便于统一管理。
  */
 
 #ifndef MIR2_SERVER_ECS_CHARACTER_COMPONENTS_H_
 #define MIR2_SERVER_ECS_CHARACTER_COMPONENTS_H_
 
 #include "ecs/id_types.h"
-#include "ecs/components/inventory_snapshot_component.h"
 
 #include "common/types.h"
 #include <algorithm>
@@ -17,7 +16,6 @@
 #include <cstdint>
 #include <climits>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace mir2::ecs {
@@ -27,27 +25,17 @@ namespace mir2::ecs {
  */
 struct CharacterIdentityComponent {
     CharacterId id = kInvalidCharacterId; ///< 角色唯一ID
-    std::string account_id;               ///< 账号ID（兼容字符串镜像）
+    AccountId account_id = kInvalidAccountId;  ///< 账号ID（稳定数值ID）
     std::string name;                     ///< 角色名称
     mir2::common::CharacterClass char_class = mir2::common::CharacterClass::WARRIOR;  ///< 职业
     mir2::common::Gender gender = mir2::common::Gender::MALE;                         ///< 性别
-    AccountId account_id_value = kInvalidAccountId;  ///< 账号ID（稳定数值ID）
 
     void SetAccountIdValue(AccountId value) {
-        account_id_value = value;
-        account_id = AccountIdToString(value);
-    }
-
-    void SetAccountIdString(std::string value) {
-        account_id = std::move(value);
-        account_id_value = ParseAccountIdOr(account_id, kInvalidAccountId);
+        account_id = value;
     }
 
     AccountId ResolveAccountIdValue() const {
-        if (account_id_value != kInvalidAccountId) {
-            return account_id_value;
-        }
-        return ParseAccountIdOr(account_id, kInvalidAccountId);
+        return account_id;
     }
 };
 
@@ -142,7 +130,6 @@ struct DirtyComponent {
     bool identity_dirty = false;    ///< 身份数据变更
     bool attributes_dirty = false;  ///< 属性数据变更
     bool state_dirty = false;       ///< 状态数据变更
-    bool inventory_dirty = false;   ///< 旧版兼容脏标记（快照层）
     bool items_dirty = false;       ///< 物品数据变更
     bool equipment_dirty = false;   ///< 装备数据变更
     bool skills_dirty = false;      ///< 技能数据变更

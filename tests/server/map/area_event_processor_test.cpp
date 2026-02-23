@@ -227,6 +227,37 @@ TEST(AreaEventProcessorTest, UpdateHonorsTickIntervalAccumulation) {
   EXPECT_EQ(damage_ticks, 1);
 }
 
+TEST(AreaEventProcessorTest, RemoveContinuousEffectStopsDispatch) {
+  entt::registry registry;
+  EventBus event_bus(registry);
+  AreaEventProcessor processor;
+  processor.SetEventBus(&event_bus);
+
+  CreatePlayer(registry, 12, 12);
+
+  int damage_ticks = 0;
+  event_bus.Subscribe<AreaDamageTickEvent>([&](const AreaDamageTickEvent&) {
+    ++damage_ticks;
+  });
+
+  ContinuousAreaEffect damage;
+  damage.effect_id = 9;
+  damage.type = AreaEffectType::kDamage;
+  damage.center_x = 12;
+  damage.center_y = 12;
+  damage.radius = 3;
+  damage.tick_interval = 1.0f;
+  damage.damage_per_tick = 4;
+
+  processor.AddContinuousEffect(damage);
+  processor.Update(1.0f, registry);
+  EXPECT_EQ(damage_ticks, 1);
+
+  processor.RemoveContinuousEffect(damage.effect_id);
+  processor.Update(1.0f, registry);
+  EXPECT_EQ(damage_ticks, 1);
+}
+
 TEST(AreaEventProcessorTest, UpdateDispatchesFireMineAndHolyCurtainTicks) {
   entt::registry registry;
   EventBus event_bus(registry);
@@ -307,4 +338,62 @@ TEST(AreaEventProcessorTest, UpdateDispatchesFireMineAndHolyCurtainTicks) {
   EXPECT_EQ(last_holy.caster, caster);
   EXPECT_EQ(last_holy.target, player);
   EXPECT_EQ(last_holy.shield_bonus, holy.damage_per_tick);
+}
+
+TEST(AreaEventProcessorTest, MineTriggersOnlyOncePerEntityForSameEffect) {
+  entt::registry registry;
+  EventBus event_bus(registry);
+  AreaEventProcessor processor;
+  processor.SetEventBus(&event_bus);
+
+  CreatePlayer(registry, 30, 30);
+
+  int mine_ticks = 0;
+  event_bus.Subscribe<MineEvent>([&](const MineEvent&) {
+    ++mine_ticks;
+  });
+
+  ContinuousAreaEffect mine;
+  mine.effect_id = 200;
+  mine.type = AreaEffectType::kMine;
+  mine.center_x = 30;
+  mine.center_y = 30;
+  mine.radius = 4;
+  mine.tick_interval = 1.0f;
+
+  processor.AddContinuousEffect(mine);
+  processor.Update(1.0f, registry);
+  processor.Update(1.0f, registry);
+
+  EXPECT_EQ(mine_ticks, 1);
+}
+
+TEST(AreaEventProcessorTest, TickIntervalIsClampedToMinimumValue) {
+  entt::registry registry;
+  EventBus event_bus(registry);
+  AreaEventProcessor processor;
+  processor.SetEventBus(&event_bus);
+
+  CreatePlayer(registry, 40, 40);
+
+  int damage_ticks = 0;
+  event_bus.Subscribe<AreaDamageTickEvent>([&](const AreaDamageTickEvent&) {
+    ++damage_ticks;
+  });
+
+  ContinuousAreaEffect damage;
+  damage.effect_id = 201;
+  damage.type = AreaEffectType::kDamage;
+  damage.center_x = 40;
+  damage.center_y = 40;
+  damage.radius = 3;
+  damage.tick_interval = 0.0f;
+  damage.damage_per_tick = 1;
+
+  processor.AddContinuousEffect(damage);
+
+  processor.Update(0.01f, registry);
+  EXPECT_EQ(damage_ticks, 0);
+  processor.Update(0.041f, registry);
+  EXPECT_EQ(damage_ticks, 1);
 }

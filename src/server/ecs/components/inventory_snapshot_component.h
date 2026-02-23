@@ -62,11 +62,6 @@ struct InventorySnapshotComponent {
     std::vector<InventorySnapshotSkillData> skills;
 };
 
-// Backward-compatible aliases.
-using ItemData = InventorySnapshotItemData;
-using SkillData = InventorySnapshotSkillData;
-using InventoryComponent = InventorySnapshotComponent;
-
 }  // namespace mir2::ecs
 
 #endif  // MIR2_SERVER_ECS_INVENTORY_SNAPSHOT_COMPONENT_H_

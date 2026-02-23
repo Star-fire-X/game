@@ -263,6 +263,11 @@ class MapInstance {
   void AddContinuousAreaEffect(const ContinuousAreaEffect& effect);
 
   /**
+   * @brief 移除持续区域效果
+   */
+  void RemoveContinuousAreaEffect(uint32_t effect_id);
+
+  /**
    * @brief 更新区域效果
    */
   void UpdateAreaEvents(float delta_time, entt::registry& registry);

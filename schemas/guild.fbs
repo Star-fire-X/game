@@ -2,6 +2,7 @@
 include "common.fbs";
 namespace mir2.proto;
 
+// Legacy guild message ids (1-10). Kept for compatibility during MsgId migration.
 enum GuildMessageType : ubyte {
   CREATE = 1,
   JOIN = 2,
@@ -59,25 +60,30 @@ table JoinGuildRequest {
   guild_id: uint;
 }
 
-table LeaveGuildRequest {
-}
-
-table DeclareWarRequest {
-  target_guild_id: uint;
-}
-
-table MakeAllianceRequest {
-  target_guild_id: uint;
-}
-
 table JoinGuildResponse {
   success: bool;
   error_code: int;
 }
 
+table LeaveGuildRequest {
+}
+
 table LeaveGuildResponse {
   success: bool;
   error_code: int;
+}
+
+table KickGuildRequest {
+  target_character_id: uint;
+}
+
+table KickGuildResponse {
+  success: bool;
+  error_code: int;
+}
+
+table DeclareWarRequest {
+  target_guild_id: uint;
 }
 
 table DeclareWarResponse {
@@ -92,4 +98,49 @@ table CancelWarRequest {
 table CancelWarResponse {
   success: bool;
   error_code: int;
+}
+
+table MakeAllianceRequest {
+  target_guild_id: uint;
+}
+
+table MakeAllianceResponse {
+  success: bool;
+  error_code: int;
+}
+
+table BreakAllianceRequest {
+  target_guild_id: uint;
+}
+
+table BreakAllianceResponse {
+  success: bool;
+  error_code: int;
+}
+
+table UpdateNoticeRequest {
+  notice_lines: [string];
+}
+
+table UpdateNoticeResponse {
+  success: bool;
+  error_code: int;
+}
+
+table RankUpdateMember {
+  character_id: uint;
+  rank: ubyte;
+}
+
+table UpdateRankRequest {
+  members: [RankUpdateMember];
+}
+
+table UpdateRankResponse {
+  success: bool;
+  error_code: int;
+}
+
+table GuildInfoSync {
+  guild_info: GuildInfo;
 }

@@ -95,6 +95,24 @@ bool MemoryCache::Delete(const std::string& key) {
     return true;
 }
 
+size_t MemoryCache::DeleteByPrefix(const std::string& prefix) {
+    if (prefix.empty()) {
+        return 0;
+    }
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    size_t removed = 0;
+    for (auto it = cache_.begin(); it != cache_.end();) {
+        if (it->first.rfind(prefix, 0) == 0) {
+            lru_list_.erase(it->second.lru_it);
+            it = cache_.erase(it);
+            ++removed;
+            continue;
+        }
+        ++it;
+    }
+    return removed;
+}
+
 void MemoryCache::Clear() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     cache_.clear();

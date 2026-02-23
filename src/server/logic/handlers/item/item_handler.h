@@ -17,6 +17,8 @@ namespace mir2::proto {
 class PickupItemReq;
 class UseItemReq;
 class DropItemReq;
+class EquipReq;
+class UnequipReq;
 }  // namespace mir2::proto
 
 namespace mir2::logic {
@@ -44,6 +46,24 @@ struct ItemDropResult {
 };
 
 /**
+ * @brief Equip item result
+ */
+struct ItemEquipResult {
+  mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
+  uint16_t slot = 0;
+  uint32_t item_id = 0;
+};
+
+/**
+ * @brief Unequip item result
+ */
+struct ItemUnequipResult {
+  mir2::common::ErrorCode code = mir2::common::ErrorCode::kOk;
+  uint16_t slot = 0;
+  uint32_t item_id = 0;
+};
+
+/**
  * @brief Pickup item result
  */
 struct ItemPickupResult {
@@ -63,6 +83,10 @@ class InventoryService {
                                   uint16_t slot,
                                   uint32_t item_id,
                                   uint32_t count) = 0;
+  virtual ItemEquipResult EquipItem(uint64_t character_id,
+                                    uint16_t slot,
+                                    uint32_t item_id) = 0;
+  virtual ItemUnequipResult UnequipItem(uint64_t character_id, uint16_t slot) = 0;
 };
 
 class ItemHandler {
@@ -77,9 +101,13 @@ class ItemHandler {
   Task<void> HandlePickup(HandlerContext ctx, const mir2::proto::PickupItemReq* req);
   Task<void> HandleUse(HandlerContext ctx, const mir2::proto::UseItemReq* req);
   Task<void> HandleDrop(HandlerContext ctx, const mir2::proto::DropItemReq* req);
+  Task<void> HandleEquip(HandlerContext ctx, const mir2::proto::EquipReq* req);
+  Task<void> HandleUnequip(HandlerContext ctx, const mir2::proto::UnequipReq* req);
   Task<void> SendPickupError(HandlerContext ctx, mir2::common::ErrorCode code);
   Task<void> SendUseError(HandlerContext ctx, mir2::common::ErrorCode code);
   Task<void> SendDropError(HandlerContext ctx, mir2::common::ErrorCode code);
+  Task<void> SendEquipError(HandlerContext ctx, mir2::common::ErrorCode code);
+  Task<void> SendUnequipError(HandlerContext ctx, mir2::common::ErrorCode code);
 
   CoroutineExecutor& executor_;
   ResponseSender& response_sender_;

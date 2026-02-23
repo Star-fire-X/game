@@ -78,6 +78,7 @@ public:
     void Set(const std::string& key, const VersionedData& data);
 
     bool Delete(const std::string& key);
+    size_t DeleteByPrefix(const std::string& prefix);
 
     void Clear();
 

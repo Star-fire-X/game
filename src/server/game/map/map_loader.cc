@@ -5,6 +5,7 @@
 
 #include "game/map/map_loader.h"
 
+#include <cstdlib>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -137,9 +138,20 @@ std::optional<std::filesystem::path> ResolveAllowedMapBase() {
     return std::nullopt;
   }
 
+  std::filesystem::path configured_base;
+  if (const char* env_base = std::getenv("LEGEND2_MAP_BASE_PATH");
+      env_base != nullptr && env_base[0] != '\0') {
+    configured_base = std::filesystem::path(env_base);
+    if (!configured_base.is_absolute()) {
+      configured_base = (cwd / configured_base).lexically_normal();
+    }
+  } else {
+    configured_base = cwd / "Map";
+  }
+
   std::error_code canonical_ec;
   const std::filesystem::path canonical_base =
-      std::filesystem::canonical(cwd / "Map", canonical_ec);
+      std::filesystem::canonical(configured_base, canonical_ec);
   if (canonical_ec) {
     return std::nullopt;
   }
@@ -293,6 +305,8 @@ bool ReadTiles(std::ifstream& file, MapTileData& map, int tile_stride) {
       return false;
     }
 
+    // MIR2 map tile stream is column-major (x outer, y inner). We normalize to
+    // row-major storage: index = y * width + x.
     const int32_t tile_x = static_cast<int32_t>(i / map.height);
     const int32_t tile_y = static_cast<int32_t>(i % map.height);
     // Use size_t intermediates to avoid int32 overflow when computing index.

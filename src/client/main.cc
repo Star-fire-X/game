@@ -12,6 +12,7 @@
 //   --server <host>  服务器地址(默认: 127.0.0.1)
 //   --port <port>    服务器端口(默认: 7000)
 //   --connect        自动连接服务器
+//   --v2-protocol    使用 V2 协议发送(默认)
 //   --width <w>      窗口宽度(默认: 800)
 //   --height <h>     窗口高度(默认: 600)
 //   --help, -h       显示帮助信息
@@ -54,6 +55,8 @@ int main(int argc, char* argv[]) {
             config.server_port = static_cast<uint16_t>(std::atoi(argv[++i]));
         } else if (arg == "--connect") {
             config.auto_connect = true;
+        } else if (arg == "--v2-protocol") {
+            config.use_v2_protocol = true;
         } else if (arg == "--width" && i + 1 < argc) {
             config.window_width = std::atoi(argv[++i]);
         } else if (arg == "--height" && i + 1 < argc) {
@@ -68,6 +71,7 @@ int main(int argc, char* argv[]) {
                       << "  --server <host>  Server hostname (default: 127.0.0.1)\n"
                       << "  --port <port>    Server port (default: 7000)\n"
                       << "  --connect        Auto-connect to server\n"
+                      << "  --v2-protocol    Use V2 protocol for outgoing packets (default)\n"
                       << "  --width <w>      Window width (default: 800)\n"
                       << "  --height <h>     Window height (default: 600)\n"
                       << "  --help, -h       Show this help\n";

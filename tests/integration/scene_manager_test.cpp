@@ -47,6 +47,15 @@ TEST_F(SceneManagerTest, CreateMapAppliesConfiguredWalkabilityFixes) {
   EXPECT_FALSE(map->IsWalkable(330, 333));
 }
 
+TEST_F(SceneManagerTest, CreateMapRejectsInvalidDimensionsWhenWalkabilityDisabled) {
+  SceneManager::MapConfig config{7, 0, 128};
+  config.load_walkability = false;
+
+  auto* map = scene_manager_->CreateMap(config);
+  EXPECT_EQ(map, nullptr);
+  EXPECT_EQ(scene_manager_->MapCount(), 0);
+}
+
 // 测试重复创建地图
 TEST_F(SceneManagerTest, CreateMapDuplicate) {
   SceneManager::MapConfig config{1, 100, 100};
@@ -70,6 +79,15 @@ TEST_F(SceneManagerTest, GetOrCreateMap) {
   auto* map2 = scene_manager_->GetOrCreateMap(config);
   EXPECT_EQ(map1, map2);  // 应返回同一个实例
   EXPECT_EQ(scene_manager_->MapCount(), 1);
+}
+
+TEST_F(SceneManagerTest, GetOrCreateMapRejectsInvalidDimensionsWhenWalkabilityDisabled) {
+  SceneManager::MapConfig config{8, -1, 64};
+  config.load_walkability = false;
+
+  auto* map = scene_manager_->GetOrCreateMap(config);
+  EXPECT_EQ(map, nullptr);
+  EXPECT_EQ(scene_manager_->MapCount(), 0);
 }
 
 // 测试获取地图

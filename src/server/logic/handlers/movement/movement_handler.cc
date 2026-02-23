@@ -37,7 +37,7 @@ constexpr const char* kMetricEntityVersionMismatchTotal =
 
 std::vector<uint8_t> BuildMoveRsp(mir2::common::ErrorCode code, int x, int y) {
   mir2::common::MoveResponse response;
-  response.code = static_cast<mir2::proto::ErrorCode>(static_cast<uint16_t>(code));
+  response.code = ToProtoError(code);
   response.x = x;
   response.y = y;
 

@@ -99,10 +99,22 @@ struct MonsterAggroComponent {
     int32_t attack_range = 3;                   ///< 攻击范围
     std::unordered_map<entt::entity, int32_t> hate_list;  ///< 仇恨值表（实体 -> 仇恨值）
     mutable entt::entity cached_top_target_ = entt::null; ///< 缓存最高仇恨目标（只读方法可更新）
+    mutable int32_t cached_top_hatred_ = 0;     ///< 缓存最高仇恨值（与目标同步）
     float hate_decay_rate = 5.0f;               ///< 仇恨衰减速率（每秒）
     float accumulated_decay = 0.0f;            ///< 累积仇恨衰减，用于保留小数部分
     float hate_clear_time = 30.0f;              ///< 仇恨清除超时时间（秒）
     float elapsed_since_hatred_update = 0.0f;   ///< 距离上次仇恨更新的累计时间（秒）
+
+    void RecomputeTopTarget() const {
+        cached_top_target_ = entt::null;
+        cached_top_hatred_ = 0;
+        for (const auto& [entity, hatred] : hate_list) {
+            if (hatred > cached_top_hatred_) {
+                cached_top_hatred_ = hatred;
+                cached_top_target_ = entity;
+            }
+        }
+    }
 
     /**
      * @brief 增加仇恨值
@@ -124,15 +136,20 @@ struct MonsterAggroComponent {
         } else {
             total_hatred += hatred;
         }
-        // 更新最高仇恨缓存以减少后续遍历
+
+        // 更新最高仇恨缓存以减少后续遍历。
         if (cached_top_target_ == entt::null) {
             cached_top_target_ = attacker;
+            cached_top_hatred_ = total_hatred;
             return;
         }
-        auto cached_it = hate_list.find(cached_top_target_);
-        int32_t cached_hatred = (cached_it != hate_list.end()) ? cached_it->second : 0;
-        if (total_hatred > cached_hatred) {
+        if (cached_top_target_ == attacker) {
+            cached_top_hatred_ = total_hatred;
+            return;
+        }
+        if (total_hatred > cached_top_hatred_) {
             cached_top_target_ = attacker;
+            cached_top_hatred_ = total_hatred;
         }
     }
 
@@ -141,26 +158,21 @@ struct MonsterAggroComponent {
      * @return 仇恨值最高的敌人，若为空返回entt::null
      */
     entt::entity GetTargetByHatred() const {
-        if (hate_list.empty()) return entt::null;
+        if (hate_list.empty()) {
+            cached_top_target_ = entt::null;
+            cached_top_hatred_ = 0;
+            return entt::null;
+        }
         // 优先返回缓存目标以提升查询性能
         if (cached_top_target_ != entt::null) {
             auto cached_it = hate_list.find(cached_top_target_);
             if (cached_it != hate_list.end()) {
+                cached_top_hatred_ = cached_it->second;
                 return cached_top_target_;
             }
         }
-
-        entt::entity target = entt::null;
-        int32_t max_hatred = 0;
-        for (const auto& [entity, hatred] : hate_list) {
-            if (hatred > max_hatred) {
-                max_hatred = hatred;
-                target = entity;
-            }
-        }
-        // 重新刷新缓存，避免下次全量遍历
-        cached_top_target_ = target;
-        return target;
+        RecomputeTopTarget();
+        return cached_top_target_;
     }
 
     /**
@@ -170,6 +182,7 @@ struct MonsterAggroComponent {
     void DecayHatred(float dt) {
         if (hate_list.empty()) {
             cached_top_target_ = entt::null;
+            cached_top_hatred_ = 0;
             accumulated_decay = 0.0f;
             return;
         }
@@ -192,26 +205,30 @@ struct MonsterAggroComponent {
         }
         accumulated_decay -= static_cast<float>(decay_amount);
 
-        std::vector<entt::entity> to_remove;
-        for (auto& [entity, hatred] : hate_list) {
-            hatred -= decay_amount;
-            if (hatred <= 0) {
-                to_remove.push_back(entity);
+        entt::entity max_entity = entt::null;
+        int32_t max_hatred = 0;
+        for (auto it = hate_list.begin(); it != hate_list.end();) {
+            it->second -= decay_amount;
+            if (it->second <= 0) {
+                it = hate_list.erase(it);
+                continue;
             }
-        }
-        for (auto entity : to_remove) {
-            hate_list.erase(entity);
+
+            if (it->second > max_hatred) {
+                max_hatred = it->second;
+                max_entity = it->first;
+            }
+            ++it;
         }
         if (hate_list.empty()) {
             cached_top_target_ = entt::null;
+            cached_top_hatred_ = 0;
             accumulated_decay = 0.0f;
             elapsed_since_hatred_update = 0.0f;
             return;
         }
-        // 若缓存目标被清理，重置缓存以便重新计算
-        if (cached_top_target_ != entt::null && hate_list.find(cached_top_target_) == hate_list.end()) {
-            cached_top_target_ = entt::null;
-        }
+        cached_top_target_ = max_entity;
+        cached_top_hatred_ = max_hatred;
     }
 
     /**
@@ -221,6 +238,7 @@ struct MonsterAggroComponent {
         hate_list.clear();
         // 同步清空缓存避免返回过期目标
         cached_top_target_ = entt::null;
+        cached_top_hatred_ = 0;
         accumulated_decay = 0.0f;
         elapsed_since_hatred_update = 0.0f;
     }

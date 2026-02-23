@@ -5,6 +5,7 @@
 #include "common/character_data.h"
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/inventory_snapshot_component.h"
 #include "ecs/dirty_tracker.h"
 #include "ecs/systems/combat_system.h"
 
@@ -18,7 +19,7 @@ namespace {
 mir2::common::CharacterData MakeCharacterData(uint32_t id) {
     mir2::common::CharacterData data;
     data.id = id;
-    data.account_id = "acc";
+    data.account_id = 10001;
     data.name = "Tester";
     data.char_class = mir2::common::CharacterClass::MAGE;
     data.gender = mir2::common::Gender::FEMALE;

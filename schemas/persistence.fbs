@@ -3,7 +3,6 @@ namespace mir2.persist;
 
 table CharacterSnapshot {
   id:uint;
-  account_id:string;
   name:string;
   char_class:ubyte;
   gender:ubyte;
@@ -41,6 +40,7 @@ table CharacterSnapshot {
   max_weight:int = 0;
   max_wear_weight:int = 0;
   max_hand_weight:int = 0;
+  account_id_u64:ulong = 0;
 }
 
 root_type CharacterSnapshot;

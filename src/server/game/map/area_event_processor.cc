@@ -11,6 +11,9 @@
 #include "game/map/aoi_manager.h"
 
 namespace mir2::game::map {
+namespace {
+constexpr float kMinTickInterval = 0.05f;
+}  // namespace
 
 AreaEventProcessor::AreaEventProcessor(AOIManager* aoi_manager,
                                        ecs::EventBus* event_bus)
@@ -27,9 +30,16 @@ void AreaEventProcessor::RemoveTrigger(uint32_t trigger_id) {
 void AreaEventProcessor::AddContinuousEffect(const ContinuousAreaEffect& effect) {
   ActiveEffect state;
   state.effect = effect;
+  if (state.effect.tick_interval < kMinTickInterval) {
+    state.effect.tick_interval = kMinTickInterval;
+  }
   state.elapsed = 0.0f;
   state.tick_accumulator = 0.0f;
   effects_[effect.effect_id] = state;
+}
+
+void AreaEventProcessor::RemoveContinuousEffect(uint32_t effect_id) {
+  effects_.erase(effect_id);
 }
 
 void AreaEventProcessor::Update(float delta_time, entt::registry& registry) {
@@ -43,14 +53,9 @@ void AreaEventProcessor::Update(float delta_time, entt::registry& registry) {
     state.tick_accumulator += delta_time;
 
     int ticks = 0;
-    if (state.effect.tick_interval <= 0.0f) {
-      ticks = state.tick_accumulator > 0.0f ? 1 : 0;
-      state.tick_accumulator = 0.0f;
-    } else {
-      ticks = static_cast<int>(state.tick_accumulator / state.effect.tick_interval);
-      if (ticks > 0) {
-        state.tick_accumulator -= ticks * state.effect.tick_interval;
-      }
+    ticks = static_cast<int>(state.tick_accumulator / state.effect.tick_interval);
+    if (ticks > 0) {
+      state.tick_accumulator -= ticks * state.effect.tick_interval;
     }
 
     if (ticks > 0) {
@@ -69,6 +74,16 @@ void AreaEventProcessor::Update(float delta_time, entt::registry& registry) {
         }
         if (!IsInside(x, y, state.effect.center_x, state.effect.center_y,
                       state.effect.radius)) {
+          continue;
+        }
+        if (state.effect.type == AreaEffectType::kMine) {
+          const uint64_t entity_id = static_cast<uint64_t>(entt::to_integral(entity));
+          if (state.triggered_entities.find(entity_id) !=
+              state.triggered_entities.end()) {
+            continue;
+          }
+          DispatchTick(entity, state.effect);
+          state.triggered_entities.insert(entity_id);
           continue;
         }
         for (int i = 0; i < ticks; ++i) {
@@ -171,12 +186,11 @@ void AreaEventProcessor::DispatchEnter(entt::entity player,
   }
 
   if (event_bus_) {
-    ecs::events::AreaEnterEvent event{
+    EnqueueOrPublish(ecs::events::AreaEnterEvent{
         player,
         trigger.trigger_id,
         trigger.effect_type
-    };
-    event_bus_->Publish(event);
+    });
   }
 }
 
@@ -187,71 +201,100 @@ void AreaEventProcessor::DispatchExit(entt::entity player,
   }
 
   if (event_bus_) {
-    ecs::events::AreaExitEvent event{
+    EnqueueOrPublish(ecs::events::AreaExitEvent{
         player,
         trigger.trigger_id,
         trigger.effect_type
-    };
-    event_bus_->Publish(event);
+    });
   }
 }
 
 void AreaEventProcessor::DispatchTick(entt::entity entity,
-                                      const ContinuousAreaEffect& effect) const {
+                                      const ContinuousAreaEffect& effect) {
   if (!event_bus_) {
     return;
   }
 
   switch (effect.type) {
     case AreaEffectType::kDamage: {
-      ecs::events::AreaDamageTickEvent event{
+      EnqueueOrPublish(ecs::events::AreaDamageTickEvent{
           entity,
           effect.effect_id,
           effect.damage_per_tick
-      };
-      event_bus_->Publish(event);
+      });
       break;
     }
     case AreaEffectType::kHeal: {
-      ecs::events::AreaHealTickEvent event{
+      EnqueueOrPublish(ecs::events::AreaHealTickEvent{
           entity,
           effect.effect_id,
           effect.damage_per_tick
-      };
-      event_bus_->Publish(event);
+      });
       break;
     }
     case AreaEffectType::kFire: {
-      ecs::events::FireBurnTickEvent event{
+      EnqueueOrPublish(ecs::events::FireBurnTickEvent{
           effect.effect_id,
           entity,
           effect.damage_per_tick,
           effect.duration
-      };
-      event_bus_->Publish(event);
+      });
       break;
     }
     case AreaEffectType::kMine: {
-      ecs::events::MineEvent event{
+      EnqueueOrPublish(ecs::events::MineEvent{
           effect.effect_id,
           entity,
           effect.radius
-      };
-      event_bus_->Publish(event);
+      });
       break;
     }
     case AreaEffectType::kHolyCurtain: {
-      ecs::events::HolyCurtainTickEvent event{
+      EnqueueOrPublish(ecs::events::HolyCurtainTickEvent{
           effect.effect_id,
           effect.caster,
           entity,
           effect.damage_per_tick
-      };
-      event_bus_->Publish(event);
+      });
       break;
     }
     default:
       break;
+  }
+}
+
+void AreaEventProcessor::EnqueueOrPublish(const PendingEvent& event) {
+  if (!event_bus_) {
+    return;
+  }
+
+  if (!defer_dispatch_) {
+    std::visit([this](const auto& value) { event_bus_->Publish(value); }, event);
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(pending_events_mutex_);
+  pending_events_.push_back(event);
+}
+
+void AreaEventProcessor::FlushPendingEvents() {
+  if (!event_bus_) {
+    std::lock_guard<std::mutex> lock(pending_events_mutex_);
+    pending_events_.clear();
+    return;
+  }
+
+  std::vector<PendingEvent> pending;
+  {
+    std::lock_guard<std::mutex> lock(pending_events_mutex_);
+    if (pending_events_.empty()) {
+      return;
+    }
+    pending.swap(pending_events_);
+  }
+
+  for (const auto& event : pending) {
+    std::visit([this](const auto& value) { event_bus_->Publish(value); }, event);
   }
 }
 

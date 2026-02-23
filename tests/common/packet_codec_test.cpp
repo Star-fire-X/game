@@ -1,6 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <flatbuffers/flatbuffers.h>
@@ -97,112 +103,133 @@ std::vector<uint8_t> BuildValidPayload(mir2::common::MsgId msg_id,
     return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
-}  // namespace
-
-TEST(packet_codec, EncodeDecodeRoundTrip) {
-    const std::vector<mir2::common::MsgId> msg_ids = {
-        mir2::common::MsgId::kLoginReq,
-        mir2::common::MsgId::kMoveReq,
-        mir2::common::MsgId::kChatReq,
-        mir2::common::MsgId::kHeartbeat,
-        mir2::common::MsgId::kKick
+std::filesystem::path FindRepoRoot() {
+    const auto has_targets = [](const std::filesystem::path& path) {
+        std::error_code ec;
+        return std::filesystem::exists(path / "src/common/enums.h", ec) &&
+               std::filesystem::exists(path / "src/common/protocol/packet_codec.cpp", ec);
     };
 
-    for (const auto msg_id : msg_ids) {
-        const auto payload = BuildValidPayload(msg_id);
-        const auto encoded = mir2::common::EncodePacket(static_cast<uint16_t>(msg_id),
-                                                        payload.data(),
-                                                        payload.size());
-        ASSERT_FALSE(encoded.empty());
+    const auto climb = [&](std::filesystem::path start) -> std::filesystem::path {
+        std::error_code ec;
+        if (start.empty()) {
+            return {};
+        }
+        if (!start.is_absolute()) {
+            start = std::filesystem::current_path(ec) / start;
+        }
+        if (std::filesystem::is_regular_file(start, ec)) {
+            start = start.parent_path();
+        }
+        for (size_t i = 0; i < 24 && !start.empty(); ++i) {
+            if (has_targets(start)) {
+                return start;
+            }
+            if (!start.has_parent_path() || start == start.parent_path()) {
+                break;
+            }
+            start = start.parent_path();
+        }
+        return {};
+    };
 
-        mir2::common::NetworkPacket decoded;
-        const auto status = mir2::common::DecodePacket(encoded.data(), encoded.size(), &decoded);
-        EXPECT_EQ(status, mir2::common::DecodeStatus::kOk);
-        EXPECT_EQ(decoded.msg_id, static_cast<uint16_t>(msg_id));
-        EXPECT_EQ(decoded.payload, payload);
+    if (auto from_cwd = climb(std::filesystem::current_path()); !from_cwd.empty()) {
+        return from_cwd;
     }
-}
-
-TEST(packet_codec, EmptyPayloadRoundTrip) {
-    const auto encoded = mir2::common::EncodePacket(
-        static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat), nullptr, 0);
-    ASSERT_EQ(encoded.size(), mir2::common::PacketHeader::kSize);
-
-    mir2::common::NetworkPacket decoded;
-    const auto status = mir2::common::DecodePacket(encoded.data(), encoded.size(), &decoded);
-    EXPECT_EQ(status, mir2::common::DecodeStatus::kOk);
-    EXPECT_EQ(decoded.msg_id, static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat));
-    EXPECT_TRUE(decoded.payload.empty());
-}
-
-TEST(packet_codec, MaxPayloadRoundTrip) {
-    size_t content_size = mir2::common::kMaxPayloadSize - 256;
-    auto payload = BuildValidPayload(mir2::common::MsgId::kSystemMsg,
-                                     content_size,
-                                     false);
-    while (payload.size() > mir2::common::kMaxPayloadSize && content_size > 256) {
-        content_size -= 128;
-        payload = BuildValidPayload(mir2::common::MsgId::kSystemMsg,
-                                    content_size,
-                                    false);
+    if (auto from_file = climb(std::filesystem::path(__FILE__)); !from_file.empty()) {
+        return from_file;
     }
-    ASSERT_LE(payload.size(), mir2::common::kMaxPayloadSize);
-    const auto encoded = mir2::common::EncodePacket(
-        static_cast<uint16_t>(mir2::common::MsgId::kSystemMsg),
-        payload.data(),
-        payload.size());
-    ASSERT_EQ(encoded.size(), mir2::common::PacketHeader::kSize + payload.size());
-
-    mir2::common::NetworkPacket decoded;
-    const auto status = mir2::common::DecodePacket(encoded.data(), encoded.size(), &decoded);
-    EXPECT_EQ(status, mir2::common::DecodeStatus::kOk);
-    EXPECT_EQ(decoded.msg_id, static_cast<uint16_t>(mir2::common::MsgId::kSystemMsg));
-    EXPECT_EQ(decoded.payload, payload);
+    return {};
 }
 
-TEST(packet_codec, InvalidMagicRejected) {
-    mir2::common::PacketHeader header;
-    header.magic = 0x12345678;
-    header.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kLoginReq);
-    header.payload_size = 0;
-
-    const auto bytes = header.ToBytes();
-    mir2::common::NetworkPacket decoded;
-    const auto status = mir2::common::DecodePacket(bytes.data(), bytes.size(), &decoded);
-    EXPECT_EQ(status, mir2::common::DecodeStatus::kInvalidMagic);
+std::string ReadTextFile(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream output;
+    output << input.rdbuf();
+    return output.str();
 }
 
-TEST(packet_codec, PayloadTooLargeRejected) {
-    mir2::common::PacketHeader header;
-    header.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kLoginReq);
-    header.payload_size = static_cast<uint32_t>(mir2::common::kMaxPayloadSize + 1);
+std::string ExtractBlock(const std::string& source, const std::string& marker) {
+    const size_t start = source.find(marker);
+    if (start == std::string::npos) {
+        return {};
+    }
 
-    const auto bytes = header.ToBytes();
-    mir2::common::NetworkPacket decoded;
-    const auto status = mir2::common::DecodePacket(bytes.data(), bytes.size(), &decoded);
-    EXPECT_EQ(status, mir2::common::DecodeStatus::kPayloadTooLarge);
+    const size_t open_brace = source.find('{', start);
+    if (open_brace == std::string::npos) {
+        return {};
+    }
+
+    int depth = 0;
+    for (size_t i = open_brace; i < source.size(); ++i) {
+        if (source[i] == '{') {
+            ++depth;
+        } else if (source[i] == '}') {
+            --depth;
+            if (depth == 0) {
+                return source.substr(open_brace + 1, i - open_brace - 1);
+            }
+        }
+    }
+
+    return {};
 }
 
-TEST(packet_codec, TruncatedPacketRejected) {
-    mir2::common::PacketHeader header;
-    header.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kLoginReq);
-    header.payload_size = 4;
+std::unordered_set<std::string> ExtractEnumMsgIdNames(const std::string& enums_text) {
+    std::unordered_set<std::string> names;
+    const auto enum_block = ExtractBlock(enums_text, "enum class MsgId");
+    if (enum_block.empty()) {
+        return names;
+    }
 
-    const auto bytes = header.ToBytes();
-    std::vector<uint8_t> truncated(bytes.begin(), bytes.end());
-    truncated.push_back(0xAA);
-
-    mir2::common::NetworkPacket decoded;
-    const auto status = mir2::common::DecodePacket(truncated.data(), truncated.size(), &decoded);
-    EXPECT_EQ(status, mir2::common::DecodeStatus::kTruncated);
+    static const std::regex enum_re(R"(\b(k[A-Za-z0-9_]+)\s*=)");
+    for (std::sregex_iterator it(enum_block.begin(), enum_block.end(), enum_re), end;
+         it != end;
+         ++it) {
+        names.insert((*it)[1].str());
+    }
+    return names;
 }
+
+std::unordered_set<std::string> ExtractMsgIdCaseNames(const std::string& block) {
+    std::unordered_set<std::string> names;
+    if (block.empty()) {
+        return names;
+    }
+
+    static const std::regex case_re(
+        R"(case\s+static_cast<uint16_t>\(MsgId::(k[A-Za-z0-9_]+)\)\s*:)");
+    for (std::sregex_iterator it(block.begin(), block.end(), case_re), end;
+         it != end;
+         ++it) {
+        names.insert((*it)[1].str());
+    }
+    return names;
+}
+
+std::string JoinSorted(const std::unordered_set<std::string>& values) {
+    std::vector<std::string> sorted(values.begin(), values.end());
+    std::sort(sorted.begin(), sorted.end());
+    std::ostringstream out;
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        if (i > 0) {
+            out << ", ";
+        }
+        out << sorted[i];
+    }
+    return out.str();
+}
+
+}  // namespace
 
 TEST(packet_codec, ServerCodecMatchesCommon) {
     const auto payload = BuildValidPayload(mir2::common::MsgId::kChatReq);
-    const auto common_encoded = mir2::common::EncodePacket(
+    const auto common_encoded = mir2::common::EncodePacketV2(
         static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
         payload.data(),
-        payload.size());
+        payload.size(),
+        /*sequence=*/0,
+        /*flags=*/0);
     const auto server_encoded = mir2::network::PacketCodec::Encode(
         static_cast<uint16_t>(mir2::common::MsgId::kChatReq),
         payload.data(),
@@ -402,7 +429,7 @@ TEST(packet_codec, CRC16KnownVector) {
 }
 
 TEST(packet_codec, DetectProtocolVersionTest) {
-    uint32_t v1_magic = mir2::common::PacketHeader::kMagic;
+    uint32_t v1_magic = 0x4D495232;  // Legacy "MIR2"
     uint32_t v2_magic = mir2::common::PacketHeaderV2::kMagic;
     uint32_t unknown_magic = 0x12345678;
 
@@ -479,4 +506,46 @@ TEST(packet_codec, ValidateChannelFlagKcpRequiresFlag) {
         mir2::common::ChannelType::kKcp));
     EXPECT_FALSE(mir2::common::ValidateChannelFlag(
         0, mir2::common::ChannelType::kKcp));
+}
+
+TEST(packet_codec, MsgIdValidationCoverageMatchesEnum) {
+    const auto repo_root = FindRepoRoot();
+    ASSERT_FALSE(repo_root.empty()) << "Failed to locate repository root";
+
+    const auto enums_text = ReadTextFile(repo_root / "src/common/enums.h");
+    const auto codec_text = ReadTextFile(repo_root / "src/common/protocol/packet_codec.cpp");
+    ASSERT_FALSE(enums_text.empty()) << "Failed to read src/common/enums.h";
+    ASSERT_FALSE(codec_text.empty()) << "Failed to read src/common/protocol/packet_codec.cpp";
+
+    auto enum_names = ExtractEnumMsgIdNames(enums_text);
+    ASSERT_FALSE(enum_names.empty()) << "Failed to parse MsgId enum";
+    enum_names.erase("kNone");
+
+    const auto verify_block = ExtractBlock(codec_text, "bool VerifyFlatBufferPayload");
+    const auto npc_block = ExtractBlock(codec_text, "bool IsNpcMessage");
+    ASSERT_FALSE(verify_block.empty()) << "Failed to parse VerifyFlatBufferPayload";
+    ASSERT_FALSE(npc_block.empty()) << "Failed to parse IsNpcMessage";
+
+    auto covered_names = ExtractMsgIdCaseNames(verify_block);
+    const auto npc_names = ExtractMsgIdCaseNames(npc_block);
+    covered_names.insert(npc_names.begin(), npc_names.end());
+
+    std::unordered_set<std::string> missing;
+    for (const auto& name : enum_names) {
+        if (covered_names.count(name) == 0) {
+            missing.insert(name);
+        }
+    }
+
+    std::unordered_set<std::string> stale;
+    for (const auto& name : covered_names) {
+        if (enum_names.count(name) == 0) {
+            stale.insert(name);
+        }
+    }
+
+    EXPECT_TRUE(missing.empty())
+        << "MsgId values missing protocol validation coverage: " << JoinSorted(missing);
+    EXPECT_TRUE(stale.empty())
+        << "Protocol validation references unknown MsgId values: " << JoinSorted(stale);
 }

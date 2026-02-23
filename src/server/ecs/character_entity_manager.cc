@@ -33,7 +33,7 @@ uint32_t g_default_map_id = 0;
 
 mir2::common::CharacterCreateRequest BuildDefaultCreateRequest(uint32_t character_id) {
   mir2::common::CharacterCreateRequest request;
-  request.account_id = "";
+  request.account_id = 0;
   request.name = std::string("Player") + std::to_string(character_id);
   request.char_class = mir2::common::CharacterClass::WARRIOR;
   request.gender = mir2::common::Gender::MALE;

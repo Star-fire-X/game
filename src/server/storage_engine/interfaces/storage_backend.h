@@ -46,6 +46,16 @@ public:
         const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) = 0;
 
     /**
+     * @brief 原子批量保存（同一事务全成全败）
+     *
+     * 默认实现回退到 SaveBatch；若后端支持事务，建议覆写该方法。
+     */
+    virtual StorageResult SaveBatchAtomic(
+        const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items) {
+      return SaveBatch(items);
+    }
+
+    /**
      * @brief 加载数据
      */
     virtual std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(

@@ -15,7 +15,7 @@
 
 #include "common/enums.h"
 #include "common/internal_message_helper.h"
-#include "guild_generated.h"
+#include "common/protocol/universal_forward_msg_ids.h"
 #include "network/message_dispatcher.h"
 #include "network/packet_codec.h"
 #include "network/tcp_connection.h"
@@ -225,35 +225,7 @@ TEST(GatewayUniversalForwardTest, ForwardAllMessagesWithoutAuthCheck) {
   test_manager_ptr->AddSession(bundle.session);
   server.RegisterConnection(1101, bundle.session);
 
-  const std::vector<uint16_t> forward_messages = {
-      static_cast<uint16_t>(common::MsgId::kLoginReq),
-      static_cast<uint16_t>(common::MsgId::kLogout),
-      static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
-      static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
-      static_cast<uint16_t>(common::MsgId::kRoleListReq),
-      static_cast<uint16_t>(common::MsgId::kMoveReq),
-      static_cast<uint16_t>(common::MsgId::kAttackReq),
-      static_cast<uint16_t>(common::MsgId::kSkillReq),
-      static_cast<uint16_t>(common::MsgId::kChatReq),
-      static_cast<uint16_t>(common::MsgId::kUseItemReq),
-      static_cast<uint16_t>(common::MsgId::kDropItemReq),
-      static_cast<uint16_t>(common::MsgId::kPickupItemReq),
-      static_cast<uint16_t>(common::MsgId::kEquipReq),
-      static_cast<uint16_t>(common::MsgId::kUnequipReq),
-      static_cast<uint16_t>(common::MsgId::kNpcInteractReq),
-      static_cast<uint16_t>(common::MsgId::kNpcMenuSelect),
-      static_cast<uint16_t>(common::MsgId::kGuildChat),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::KICK),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::MAKE_ALLY),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::BREAK_ALLY),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_NOTICE),
-      static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
-  };
+  const auto& forward_messages = common::protocol::kUniversalForwardMsgIds;
 
   const std::vector<uint8_t> payload{1, 2, 3};
   for (auto msg_id : forward_messages) {

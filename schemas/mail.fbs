@@ -1,0 +1,93 @@
+// mail.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table MailAttachmentItem {
+  item_id: uint;
+  count: uint;
+}
+
+table MailSummary {
+  mail_id: ulong;
+  from_character_id: ulong;
+  subject: string;
+  has_attachment: bool;
+  is_read: bool;
+  claimed: bool;
+  send_time: ulong;
+  expire_time: ulong;
+  gold: uint;
+  attachment_count: uint;
+}
+
+table MailDetail {
+  mail_id: ulong;
+  from_character_id: ulong;
+  subject: string;
+  content: string;
+  is_read: bool;
+  claimed: bool;
+  send_time: ulong;
+  expire_time: ulong;
+  gold: uint;
+  items: [MailAttachmentItem];
+}
+
+table MailSendReq {
+  target_character_id: ulong;
+  subject: string;
+  content: string;
+  gold: uint;
+  items: [MailAttachmentItem];
+  expire_time: ulong;
+}
+
+table MailSendRsp {
+  success: bool;
+  error_code: int;
+  mail_id: ulong;
+}
+
+table MailListReq {
+}
+
+table MailListRsp {
+  success: bool;
+  error_code: int;
+  mails: [MailSummary];
+}
+
+table MailReadReq {
+  mail_id: ulong;
+}
+
+table MailReadRsp {
+  success: bool;
+  error_code: int;
+  mail: MailDetail;
+}
+
+table MailDeleteReq {
+  mail_id: ulong;
+}
+
+table MailDeleteRsp {
+  success: bool;
+  error_code: int;
+  mail_id: ulong;
+}
+
+table MailClaimReq {
+  mail_id: ulong;
+}
+
+table MailClaimRsp {
+  success: bool;
+  error_code: int;
+  mail_id: ulong;
+}
+
+table MailNotify {
+  mail: MailSummary;
+  unread_count: uint;
+}

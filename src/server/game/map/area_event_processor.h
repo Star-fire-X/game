@@ -9,9 +9,13 @@
 #include <entt/entt.hpp>
 
 #include <cstdint>
+#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
+#include <variant>
 #include <vector>
 
+#include "ecs/events/area_events.h"
 #include "game/map/area_trigger.h"
 
 namespace mir2::ecs {
@@ -42,6 +46,13 @@ class AreaEventProcessor {
   void SetEventBus(ecs::EventBus* event_bus) { event_bus_ = event_bus; }
 
   /**
+   * @brief 设置是否延后事件分发
+   *
+   * 当开启后，事件会先入队，由调用方在安全时机调用 FlushPendingEvents()。
+   */
+  void SetDeferredDispatch(bool defer) { defer_dispatch_ = defer; }
+
+  /**
    * @brief 添加触发器
    */
   void AddTrigger(const AreaTrigger& trigger);
@@ -57,6 +68,11 @@ class AreaEventProcessor {
   void AddContinuousEffect(const ContinuousAreaEffect& effect);
 
   /**
+   * @brief 移除持续效果
+   */
+  void RemoveContinuousEffect(uint32_t effect_id);
+
+  /**
    * @brief 更新持续效果
    */
   void Update(float delta_time, entt::registry& registry);
@@ -67,11 +83,26 @@ class AreaEventProcessor {
   void CheckPlayerEnterExit(entt::entity player, int32_t old_x, int32_t old_y,
                             int32_t new_x, int32_t new_y);
 
+  /**
+   * @brief 刷新并发布延后事件
+   */
+  void FlushPendingEvents();
+
  private:
+  using PendingEvent = std::variant<
+      ecs::events::AreaEnterEvent,
+      ecs::events::AreaExitEvent,
+      ecs::events::AreaDamageTickEvent,
+      ecs::events::AreaHealTickEvent,
+      ecs::events::FireBurnTickEvent,
+      ecs::events::MineEvent,
+      ecs::events::HolyCurtainTickEvent>;
+
   struct ActiveEffect {
     ContinuousAreaEffect effect;
     float elapsed = 0.0f;
     float tick_accumulator = 0.0f;
+    std::unordered_set<uint64_t> triggered_entities;
   };
 
   static bool IsInside(int32_t x, int32_t y, int32_t center_x, int32_t center_y,
@@ -82,12 +113,16 @@ class AreaEventProcessor {
                                               entt::registry& registry) const;
   void DispatchEnter(entt::entity player, const AreaTrigger& trigger);
   void DispatchExit(entt::entity player, const AreaTrigger& trigger);
-  void DispatchTick(entt::entity entity, const ContinuousAreaEffect& effect) const;
+  void DispatchTick(entt::entity entity, const ContinuousAreaEffect& effect);
+  void EnqueueOrPublish(const PendingEvent& event);
 
   std::unordered_map<uint32_t, AreaTrigger> triggers_;
   std::unordered_map<uint32_t, ActiveEffect> effects_;
+  std::vector<PendingEvent> pending_events_;
+  std::mutex pending_events_mutex_;
   AOIManager* aoi_manager_ = nullptr;
   ecs::EventBus* event_bus_ = nullptr;
+  bool defer_dispatch_ = false;
 };
 
 }  // namespace mir2::game::map

@@ -30,7 +30,7 @@ struct NpcData {
   bool enabled = true;                  // Interactable
   std::string script_id;                // Script ID
   uint32_t store_id = 0;                // Store ID
-  uint32_t guild_id = 0;                // Guild ID
+  mir2::ecs::GuildId guild_id = mir2::ecs::kInvalidGuildId;  // Guild ID
   std::optional<NpcTeleportTarget> teleport_target; // Teleport target
 };
 
@@ -73,7 +73,7 @@ class NpcEntity : public std::enable_shared_from_this<NpcEntity> {
   const std::string& GetScriptId() const { return data_.script_id; }
   bool IsEnabled() const { return data_.enabled; }
   uint32_t GetStoreId() const { return data_.store_id; }
-  uint32_t GetGuildId() const { return data_.guild_id; }
+  mir2::ecs::GuildId GetGuildId() const { return data_.guild_id; }
   bool HasTeleportTarget() const { return data_.teleport_target.has_value(); }
   const std::optional<NpcTeleportTarget>& GetTeleportTarget() const {
     return data_.teleport_target;

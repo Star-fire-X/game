@@ -145,6 +145,20 @@ void GameClientInput::ProcessInputPlaying() {
 
     ProcessSkillHotkeys();
 
+    // Z键：拾取附近地面物品
+    if (deps_.input->key_pressed(SDL_SCANCODE_Z) && deps_.entity_manager) {
+        const auto player_pos = player->get_position();
+        const auto nearby = deps_.entity_manager->query_range(player_pos, 1);
+        for (const auto* entity : nearby) {
+            if (entity && entity->type == EntityType::GroundItem) {
+                if (callbacks_.interact_with_ground_item) {
+                    callbacks_.interact_with_ground_item(entity->id);
+                }
+                break;
+            }
+        }
+    }
+
     // NPC对话打开时屏蔽场景点击
     if (deps_.npc_dialog_ui && deps_.npc_dialog_ui->is_visible()) {
         return;
@@ -171,6 +185,13 @@ void GameClientInput::ProcessInputPlaying() {
                     if (entity->type == EntityType::NPC) {
                         target_entity = entity;
                         break;
+                    }
+                    if (entity->type == EntityType::GroundItem) {
+                        // Prioritize ground items for click-to-pickup
+                        if (callbacks_.interact_with_ground_item) {
+                            callbacks_.interact_with_ground_item(entity->id);
+                        }
+                        return;
                     }
                     if (!target_entity) {
                         target_entity = entity;

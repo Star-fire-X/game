@@ -36,6 +36,7 @@ struct ClientConfig {
     std::string server_host  = "127.0.0.1";
     uint16_t    server_port  = 7000;
     bool        auto_connect = false;
+    bool        use_v2_protocol = true;
 
     // -- Window ---------------------------------------------------------------
     int         window_width  = 800;
@@ -110,6 +111,7 @@ inline T read_or_default(const YAML::Node& node,
  *   host: "127.0.0.1"
  *   port: 7000
  *   auto_connect: false
+ *   use_v2_protocol: true
  * window:
  *   width: 800
  *   height: 600
@@ -151,6 +153,8 @@ inline ClientConfig load_client_config(const std::string& path) {
         cfg.server_host  = detail::read_or_default(network, "host",         cfg.server_host);
         cfg.server_port  = detail::read_or_default(network, "port",         cfg.server_port);
         cfg.auto_connect = detail::read_or_default(network, "auto_connect", cfg.auto_connect);
+        cfg.use_v2_protocol =
+            detail::read_or_default(network, "use_v2_protocol", cfg.use_v2_protocol);
 
         // -- Window -----------------------------------------------------------
         const YAML::Node window = root["window"];
@@ -221,6 +225,7 @@ inline void save_client_config(const ClientConfig& config,
         out << YAML::Key << "host"         << YAML::Value << config.server_host;
         out << YAML::Key << "port"         << YAML::Value << config.server_port;
         out << YAML::Key << "auto_connect" << YAML::Value << config.auto_connect;
+        out << YAML::Key << "use_v2_protocol" << YAML::Value << config.use_v2_protocol;
         out << YAML::EndMap;
 
         // -- Window -----------------------------------------------------------

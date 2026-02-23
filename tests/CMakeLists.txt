@@ -2,6 +2,9 @@ set(LEGEND2_TEST_SOURCES
     # common/tcp_session_test.cpp  # disabled: API mismatch
     # common/kick_message_test.cpp  # disabled: API mismatch
     common/packet_codec_test.cpp
+    common/typed_message_codec_test.cc
+    common/typed_message_codec_gate_test.cc
+    protocol/v1_v2_compat_test.cc
     common/compression_test.cpp
     common/message_codec_test.cpp
     common/channel_router_test.cc
@@ -13,6 +16,8 @@ set(LEGEND2_TEST_SOURCES
     server/gateway/connection_holder_test.cc
     server/gateway/ring_buffer_test.cc
     server/network/kcp_session_test.cc
+    server/network/tcp_client_test.cc
+    server/network/tcp_session_protocol_gate_test.cc
     server/conv_blacklist_test.cc
     server/network/kcp_server_test.cc
     server/network/kcp_upgrade_handler_test.cc
@@ -28,6 +33,13 @@ set(LEGEND2_TEST_SOURCES
     server/logic/login_handler_test.cc
     server/logic/storage_login_service_test.cc
     server/logic/chat_handler_test.cc
+    server/logic/item_handler_test.cc
+    server/logic/trade_handler_test.cc
+    server/logic/party_handler_test.cc
+    server/logic/mail_handler_test.cc
+    server/logic/ranking_handler_test.cc
+    server/logic/achievement_handler_test.cc
+    server/logic/auction_handler_test.cc
     server/logic/combat_handlers_auth_test.cc
     server/logic/ecs_services_character_resolution_test.cc
     server/logic/session_role_store_test.cc
@@ -41,6 +53,18 @@ set(LEGEND2_TEST_SOURCES
     server/logic/player_mailbox_causal_test.cc
     server/logic/thread_affinity_test.cc
     server/logic/handler_context_test.cc
+    server/logic/handler_msg_id_matrix_test.cc
+    server/logic/logic_server_test.cc  # P0 Ultra-Critical: Main server orchestrator
+    server/logic/handlers/attack_handler_test.cc  # P0 Ultra-Critical: Attack processing
+    server/logic/handlers/bonus_point_handler_test.cc
+    server/logic/handlers/handler_error_utils_test.cc
+    server/logic/handlers/effect_broadcast_service_test.cc
+    server/logic/services/client_registry_test.cc  # P0 High-Critical: Client tracking
+    server/logic/services/merchant_service_test.cc
+    server/logic/services/player_presence_service_test.cc
+    server/logic/services/ecs_inventory_service_test.cc
+    server/logic/services/world_sync_broadcast_service_test.cc
+    server/logic/entity_lane_scheduler_test.cc  # P0 High-Critical: Coroutine lane scheduler
     common/snowflake_id_test.cpp
     # client/message_dispatcher_test.cpp  # disabled
     # client/network_manager_test.cpp  # disabled
@@ -49,10 +73,17 @@ set(LEGEND2_TEST_SOURCES
     # client/scene_integration_test.cpp  # disabled
     # client/login_handler_test.cpp  # disabled
     # client/character_handler_test.cpp  # disabled
-    # client/movement_handler_test.cpp  # disabled
+    client/movement_handler_test.cpp
     # client/combat_handler_test.cpp  # disabled
     # client/system_handler_test.cpp  # disabled
     client/handlers/chat_handler_test.cc
+    client/handlers/guild_handler_test.cc
+    client/handlers/trade_handler_test.cc
+    client/handlers/party_handler_test.cc
+    client/handlers/mail_handler_test.cc
+    client/handlers/ranking_handler_test.cc
+    client/handlers/achievement_handler_test.cc
+    client/handlers/auction_handler_test.cc
     client/network/kcp_channel_test.cc
     client/network/kcp_upgrade_handler_test.cc
     client/network/dual_channel_client_test.cc
@@ -107,8 +138,11 @@ set(LEGEND2_TEST_SOURCES
     server/logger_idempotency_test.cc
     server/gateway_universal_forward_test.cc
     server/ecs/character_codec_test.cc
+    server/ecs/character_snapshot_codec_test.cc
+    server/ecs/trade_system_test.cc
     server/character_entity_manager_test.cc
     server/config/map_config_loader_test.cpp
+    server/config/config_manager_storage_engine_test.cc
     server/data/item_template_test.cc
     server/event/timed_event_scheduler_test.cpp
     server/event/global_event_manager_test.cpp
@@ -134,11 +168,17 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/growth_formulas_test.cpp
     server/ecs/attribute_recalc_system_test.cpp
     server/ecs/bonus_point_system_test.cpp
+    server/ecs/systems/damage_calculator_test.cc  # P0 Ultra-Critical: Damage formulas
+    server/ecs/systems/spatial_query_test.cc  # P0 Ultra-Critical: Spatial queries for skill targeting
+    server/ecs/systems/equipment_bonus_system_test.cc  # P0 Critical: Equipment bonus aggregation
+    server/ecs/systems/effect_broadcaster_test.cc  # P0 Critical: Effect broadcast system
+    server/ecs/systems/passive_skill_system_test.cc  # P0 High-Critical: Passive skill bonuses
     server/ecs/inventory_system_test.cpp
     server/ecs/ground_item_system_test.cc
     server/ecs/amulet_consumer_test.cc
     server/ecs/npc_ai_system_test.cpp
     server/ecs/monster_ai_system_test.cc
+    server/ecs/p3_pressure_observability_test.cc
     server/guild/guild_system_test.cc
     server/chat_handler_test.cc
     server/game/item/item_effect_processor_test.cc
@@ -161,11 +201,18 @@ set(LEGEND2_TEST_SOURCES
     server/map/scene_manager_reload_test.cpp
     server/map/map_instance_concurrency_test.cpp
     server/map/scene_manager_concurrency_test.cpp
+    server/game/map/aoi_manager_test.cc  # P0 Critical: AOI 9-grid algorithm
     server/movement_validator_test.cpp
     integration/scene_manager_test.cpp
     integration/cross_map_test.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/chat_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/trade_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/party_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/mail_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/ranking_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/achievement_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/auction_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/message_dispatcher.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/network_manager.cpp
     ${CMAKE_SOURCE_DIR}/src/client/network/network_client.cc
@@ -190,16 +237,26 @@ set(LEGEND2_TEST_SOURCES
 set(LEGEND2_PQXX_TEST_SOURCES
     server/db/postgres_database_test.cpp
     server/db/account_storage_backend_test.cpp
+    server/logic/auction_handler_persistence_test.cc
+    server/logic/mail_handler_persistence_test.cc
+    server/logic/ranking_service_persistence_test.cc
 )
 
 set(LEGEND2_CLIENT_HANDLER_SOURCES
     ${CMAKE_SOURCE_DIR}/src/client/handlers/character_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/guild_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/npc_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/handler_registry.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/login_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/movement_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/combat_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/client/handlers/system_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/trade_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/party_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/mail_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/ranking_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/achievement_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/auction_handler.cpp
 )
 
 set(LEGEND2_SDL_TEST_SOURCES
@@ -288,6 +345,39 @@ target_include_directories(legend2_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/tests/server
 )
 
+target_compile_definitions(legend2_tests PRIVATE
+    MIR2_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
+)
+
+add_executable(storage_engine_focus_tests
+    server/storage_engine_test.cc
+    server/storage_engine/async_test.cc
+    server/storage_engine/rocksdb_cache_test.cc
+    server/config/config_manager_storage_engine_test.cc
+)
+
+target_link_libraries(storage_engine_focus_tests PRIVATE
+    mir2_storage_engine
+    mir2_server_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
+if(LEGEND2_BUILD_DB AND TARGET mir2_db_optional)
+    target_link_libraries(storage_engine_focus_tests PRIVATE mir2_db_optional)
+endif()
+
+if(LEGEND2_BUILD_DB AND TARGET libpqxx::pqxx)
+    target_link_libraries(storage_engine_focus_tests PRIVATE libpqxx::pqxx)
+endif()
+
+target_include_directories(storage_engine_focus_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server
+    ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/server
+)
+
 add_executable(character_handler_test
     server/logic/character_handler_test.cc
     server/logic/mock_response_sender.cc
@@ -360,9 +450,35 @@ set_target_properties(client_item_handler_test PROPERTIES
 
 include(GoogleTest)
 gtest_discover_tests(legend2_tests)
+gtest_discover_tests(storage_engine_focus_tests)
 gtest_discover_tests(routing_table_tests)
 gtest_discover_tests(client_skill_tests)
 gtest_discover_tests(client_item_handler_test)
+
+# Ground item feature tests (no SDL dependency)
+add_executable(ground_item_test
+    client/game/ground_item_test.cc
+    ${CMAKE_SOURCE_DIR}/src/client/handlers/item_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/client/game/entity_manager.cc
+)
+
+target_link_libraries(ground_item_test PRIVATE
+    legend2_common
+    asio
+    GTest::gtest_main
+)
+
+target_include_directories(ground_item_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/client
+    ${CMAKE_SOURCE_DIR}/tests
+)
+
+set_target_properties(ground_item_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/client/game
+)
+
+gtest_discover_tests(ground_item_test)
 
 # Standalone client config test target (no SDL dependency)
 add_executable(client_config_test
@@ -628,6 +744,38 @@ else()
     message(STATUS "Skipping client_minimap_tests: SDL2::SDL2 target not available")
 endif()
 
+add_custom_target(all_cpp_tests)
+set(LEGEND2_ALL_CPP_TEST_TARGETS
+    legend2_tests
+    storage_engine_focus_tests
+    routing_table_tests
+    client_skill_tests
+    client_item_handler_test
+    ground_item_test
+    client_config_test
+    client_logger_test
+    combat_core_test
+    ecs_improvements_test
+    inventory_serialization_test
+)
+
+if(TARGET client_skill_ui_tests)
+    list(APPEND LEGEND2_ALL_CPP_TEST_TARGETS
+        client_skill_ui_tests
+        client_hud_tests
+        client_inventory_tests
+        client_equipment_tests
+        client_chat_panel_tests
+        client_minimap_tests
+    )
+endif()
+
+foreach(test_target IN LISTS LEGEND2_ALL_CPP_TEST_TARGETS)
+    if(TARGET ${test_target})
+        add_dependencies(all_cpp_tests ${test_target})
+    endif()
+endforeach()
+
 find_program(LEGEND2_BASH_PROGRAM bash)
 if(LEGEND2_BASH_PROGRAM)
     add_custom_target(core_regression_tests
@@ -648,3 +796,12 @@ if(LEGEND2_BASH_PROGRAM)
 else()
     message(STATUS "Skipping core_regression_tests/kcp_regression_tests: bash not found")
 endif()
+
+# Keep ctest stable when optional/standalone test binaries are not built in the
+# current build invocation (e.g. building only `legend2_tests`).
+set_property(
+    DIRECTORY
+    APPEND
+    PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_LIST_DIR}/cmake/disable_not_built_tests.cmake"
+)

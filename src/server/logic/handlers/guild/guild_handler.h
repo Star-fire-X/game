@@ -8,12 +8,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include <entt/entt.hpp>
 
 #include "logic/services/client_registry.h"
 #include "logic/handler_context.h"
 #include "logic/task.h"
+#include "ecs/id_types.h"
 #include "server/common/error_codes.h"
 
 namespace mir2::ecs {
@@ -49,29 +51,72 @@ class GuildHandler {
   Task<void> HandleLeaveGuild(HandlerContext ctx,
                               const uint8_t* payload,
                               size_t payload_size);
+  Task<void> HandleKickGuild(HandlerContext ctx,
+                             const uint8_t* payload,
+                             size_t payload_size);
   Task<void> HandleDeclareWar(HandlerContext ctx,
                               const uint8_t* payload,
                               size_t payload_size);
   Task<void> HandleCancelWar(HandlerContext ctx,
                              const uint8_t* payload,
                              size_t payload_size);
+  Task<void> HandleMakeAlliance(HandlerContext ctx,
+                                const uint8_t* payload,
+                                size_t payload_size);
+  Task<void> HandleBreakAlliance(HandlerContext ctx,
+                                 const uint8_t* payload,
+                                 size_t payload_size);
+  Task<void> HandleUpdateNotice(HandlerContext ctx,
+                                const uint8_t* payload,
+                                size_t payload_size);
+  Task<void> HandleUpdateRank(HandlerContext ctx,
+                              const uint8_t* payload,
+                              size_t payload_size);
 
   Task<void> SendCreateGuildResponse(HandlerContext ctx,
+                                     uint16_t request_msg_id,
                                      bool success,
                                      int error_code,
-                                     uint32_t guild_id = 0);
+                                     mir2::ecs::GuildId guild_id = mir2::ecs::kInvalidGuildId);
   Task<void> SendJoinGuildResponse(HandlerContext ctx,
+                                   uint16_t request_msg_id,
                                    bool success,
                                    int error_code);
   Task<void> SendLeaveGuildResponse(HandlerContext ctx,
+                                    uint16_t request_msg_id,
                                     bool success,
                                     int error_code);
+  Task<void> SendKickGuildResponse(HandlerContext ctx,
+                                   uint16_t request_msg_id,
+                                   bool success,
+                                   int error_code);
   Task<void> SendDeclareWarResponse(HandlerContext ctx,
+                                    uint16_t request_msg_id,
                                     bool success,
                                     int error_code);
   Task<void> SendCancelWarResponse(HandlerContext ctx,
+                                   uint16_t request_msg_id,
                                    bool success,
                                    int error_code);
+  Task<void> SendMakeAllianceResponse(HandlerContext ctx,
+                                      uint16_t request_msg_id,
+                                      bool success,
+                                      int error_code);
+  Task<void> SendBreakAllianceResponse(HandlerContext ctx,
+                                       uint16_t request_msg_id,
+                                       bool success,
+                                       int error_code);
+  Task<void> SendUpdateNoticeResponse(HandlerContext ctx,
+                                      uint16_t request_msg_id,
+                                      bool success,
+                                      int error_code);
+  Task<void> SendUpdateRankResponse(HandlerContext ctx,
+                                    uint16_t request_msg_id,
+                                    bool success,
+                                    int error_code);
+  Task<void> SendGuildInfoSync(uint64_t client_id,
+                               mir2::ecs::GuildId guild_id);
+  std::optional<mir2::ecs::GuildId> GetGuildIdByPlayer(entt::entity player) const;
 
   ResponseSender& response_sender_;
   PlayerPresenceService& player_presence_service_;

@@ -27,7 +27,7 @@ public:
     mir2::common::DbResult<mir2::common::CharacterData> load_character(uint32_t character_id) override;
     mir2::common::DbResult<mir2::common::CharacterData> load_character_by_name(const std::string& name) override;
     mir2::common::DbResult<std::vector<mir2::common::CharacterData>> load_characters_by_account(
-        const std::string& account_id) override;
+        uint64_t account_id) override;
     mir2::common::DbResult<void> delete_character(uint32_t character_id) override;
     mir2::common::DbResult<bool> character_name_exists(const std::string& name) override;
     mir2::common::DbResult<uint32_t> get_next_character_id() override;

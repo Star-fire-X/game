@@ -56,7 +56,7 @@ table ContextRestore {
 table ConnectionContext {
   client_id: ulong;           // 客户端连接ID
   player_id: uint;            // 玩家ID (0表示未登录)
-  account_id: uint;           // 账号ID
+  account_id: ulong;          // 账号ID
   ip_address: string;         // 客户端IP
   connected_at_ms: ulong;     // 连接建立时间
   last_active_ms: ulong;      // 最后活跃时间

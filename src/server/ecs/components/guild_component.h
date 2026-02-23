@@ -8,8 +8,10 @@
 
 #include "ecs/id_types.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -44,7 +46,6 @@ struct GuildRank {
     uint8_t rank = GUILD_RANK_MEMBER;
     std::string rank_name;
     std::vector<CharacterId> member_ids;  // stable rank mapping
-    std::vector<std::string> member_names;  // compatibility mirror for legacy APIs
 };
 
 /**
@@ -64,6 +65,7 @@ struct GuildComponent {
     std::string guild_name;
     entt::entity leader = entt::null;
     std::vector<entt::entity> members;
+    mutable std::unordered_set<entt::entity> member_index;
     uint8_t max_members = 100;
 
     // 职位系统
@@ -86,15 +88,105 @@ struct GuildComponent {
     bool in_team_fight = false;
     int32_t match_point = 0;
     std::vector<entt::entity> fight_members;
+    mutable std::unordered_set<entt::entity> fight_member_index;
 
     bool IsFull() const { return members.size() >= max_members; }
     bool IsLeader(entt::entity e) const { return e == leader; }
 
-    bool IsMember(entt::entity e) const {
-        for (const auto& m : members) {
-            if (m == e) return true;
+    void RebuildMemberIndex() const {
+        member_index.clear();
+        member_index.reserve(members.size());
+        for (entt::entity member : members) {
+            if (member != entt::null) {
+                member_index.insert(member);
+            }
         }
-        return false;
+    }
+
+    bool IsMember(entt::entity e) const {
+        if (e == entt::null) {
+            return false;
+        }
+        if (member_index.size() != members.size()) {
+            RebuildMemberIndex();
+        }
+        return member_index.contains(e);
+    }
+
+    bool AddMember(entt::entity e) {
+        if (e == entt::null) {
+            return false;
+        }
+        if (member_index.size() != members.size()) {
+            RebuildMemberIndex();
+        }
+        if (!member_index.insert(e).second) {
+            return false;
+        }
+        members.push_back(e);
+        return true;
+    }
+
+    bool RemoveMember(entt::entity e) {
+        if (e == entt::null) {
+            return false;
+        }
+        if (member_index.size() != members.size()) {
+            RebuildMemberIndex();
+        }
+        if (member_index.erase(e) == 0) {
+            return false;
+        }
+        const auto it = std::remove(members.begin(), members.end(), e);
+        if (it == members.end()) {
+            return false;
+        }
+        members.erase(it, members.end());
+        return true;
+    }
+
+    void ClearMembers() {
+        members.clear();
+        member_index.clear();
+    }
+
+    void RebuildFightMemberIndex() const {
+        fight_member_index.clear();
+        fight_member_index.reserve(fight_members.size());
+        for (entt::entity member : fight_members) {
+            if (member != entt::null) {
+                fight_member_index.insert(member);
+            }
+        }
+    }
+
+    bool IsFightMember(entt::entity e) const {
+        if (e == entt::null) {
+            return false;
+        }
+        if (fight_member_index.size() != fight_members.size()) {
+            RebuildFightMemberIndex();
+        }
+        return fight_member_index.contains(e);
+    }
+
+    bool AddFightMember(entt::entity e) {
+        if (e == entt::null) {
+            return false;
+        }
+        if (fight_member_index.size() != fight_members.size()) {
+            RebuildFightMemberIndex();
+        }
+        if (!fight_member_index.insert(e).second) {
+            return false;
+        }
+        fight_members.push_back(e);
+        return true;
+    }
+
+    void ClearFightMembers() {
+        fight_members.clear();
+        fight_member_index.clear();
     }
 
     bool IsAtWarWith(GuildId guild_id) const {

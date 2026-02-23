@@ -27,8 +27,8 @@ void LoadInventoryFromJson(entt::registry& registry,
                            entt::entity character,
                            const std::string& inventory_json,
                            uint32_t /*character_id*/) {
-  mir2::ecs::inventory::LoadInventoryFromJson(registry, character, inventory_json, "[]",
-                                              "[]");
+  mir2::ecs::inventory::compat::LoadInventoryFromJson(
+      registry, character, inventory_json, "[]", "[]");
 }
 
 void LoadEquipmentFromJson(entt::registry& registry,
@@ -37,8 +37,8 @@ void LoadEquipmentFromJson(entt::registry& registry,
                            uint32_t /*character_id*/) {
   const json parsed = json::parse(equipment_json, nullptr, false);
   if (!parsed.is_object() || !parsed.contains("slots") || !parsed["slots"].is_array()) {
-    mir2::ecs::inventory::LoadInventoryFromJson(registry, character, "[]",
-                                                equipment_json, "[]");
+    mir2::ecs::inventory::compat::LoadInventoryFromJson(
+        registry, character, "[]", equipment_json, "[]");
     return;
   }
 
@@ -55,16 +55,16 @@ void LoadEquipmentFromJson(entt::registry& registry,
     adapted.push_back(std::move(entry));
   }
 
-  mir2::ecs::inventory::LoadInventoryFromJson(registry, character, "[]",
-                                              adapted.dump(), "[]");
+  mir2::ecs::inventory::compat::LoadInventoryFromJson(
+      registry, character, "[]", adapted.dump(), "[]");
 }
 
 void LoadSkillsFromJson(entt::registry& registry,
                         entt::entity character,
                         const std::string& skills_json,
                         uint32_t /*character_id*/) {
-  mir2::ecs::inventory::LoadInventoryFromJson(registry, character, "[]", "[]",
-                                              skills_json);
+  mir2::ecs::inventory::compat::LoadInventoryFromJson(
+      registry, character, "[]", "[]", skills_json);
 }
 
 std::string SaveInventoryToJson(entt::registry& registry, entt::entity character) {

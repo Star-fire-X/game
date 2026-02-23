@@ -70,13 +70,17 @@ uint32_t MapEventManager::AddMineEvent(int32_t x, int32_t y, int32_t radius) {
   return event_id;
 }
 
-void MapEventManager::RemoveEvent(uint32_t event_id) {
+void MapEventManager::RemoveEvent(uint32_t event_id, MapInstance* map) {
   auto it = std::find_if(active_events_.begin(), active_events_.end(),
                          [event_id](const EventRecord& record) {
                            return record.event_id == event_id;
                          });
   if (it == active_events_.end()) {
     return;
+  }
+
+  if (map && it->registered) {
+    map->RemoveContinuousAreaEffect(it->effect.effect_id);
   }
 
   EventRecord closed = *it;
@@ -111,6 +115,9 @@ void MapEventManager::Update(float delta_time, entt::registry& registry,
 
     if (record.effect.duration > 0.0f &&
         record.elapsed_time >= record.effect.duration) {
+      if (map && record.registered) {
+        map->RemoveContinuousAreaEffect(record.effect.effect_id);
+      }
       EventRecord closed = record;
       closed.closed = true;
       closed.registered = false;

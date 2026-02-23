@@ -29,7 +29,7 @@ mir2::ecs::GuildComponent* TryGetGuildComponent(entt::registry* registry,
   return registry->try_get<mir2::ecs::GuildComponent>(entity);
 }
 
-bool RemoveWar(mir2::ecs::GuildComponent& guild, uint32_t enemy_id) {
+bool RemoveWar(mir2::ecs::GuildComponent& guild, mir2::ecs::GuildId enemy_id) {
   auto& wars = guild.war_guilds;
   auto it = std::remove_if(
       wars.begin(), wars.end(),
@@ -43,7 +43,8 @@ bool RemoveWar(mir2::ecs::GuildComponent& guild, uint32_t enemy_id) {
   return true;
 }
 
-bool RemoveAlliance(mir2::ecs::GuildComponent& guild, uint32_t ally_id) {
+bool RemoveAlliance(mir2::ecs::GuildComponent& guild,
+                    mir2::ecs::GuildId ally_id) {
   auto& allies = guild.ally_guild_ids;
   auto it = std::remove(allies.begin(), allies.end(), ally_id);
   if (it == allies.end()) {
@@ -57,14 +58,14 @@ bool RemoveAlliance(mir2::ecs::GuildComponent& guild, uint32_t ally_id) {
 
 namespace mir2::game::guild {
 
-entt::entity GuildManager::CreateGuild(uint32_t guild_id,
+entt::entity GuildManager::CreateGuild(ecs::GuildId guild_id,
                                        const std::string& name,
                                        entt::entity leader,
                                        entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
 
-  if (guild_id == 0 || name.empty()) {
+  if (guild_id == ecs::kInvalidGuildId || name.empty()) {
     return entt::null;
   }
 
@@ -82,7 +83,8 @@ entt::entity GuildManager::CreateGuild(uint32_t guild_id,
 
   auto* existing_member =
       registry.try_get<ecs::GuildMemberComponent>(leader);
-  if (existing_member && existing_member->guild_id != 0) {
+  if (existing_member &&
+      existing_member->guild_id != ecs::kInvalidGuildId) {
     return entt::null;
   }
 
@@ -91,7 +93,7 @@ entt::entity GuildManager::CreateGuild(uint32_t guild_id,
   guild.guild_id = guild_id;
   guild.guild_name = name;
   guild.leader = leader;
-  guild.members.push_back(leader);
+  guild.AddMember(leader);
 
   ecs::GuildMemberComponent leader_member;
   leader_member.guild_id = guild_id;
@@ -111,7 +113,7 @@ entt::entity GuildManager::CreateGuild(uint32_t guild_id,
   return entity;
 }
 
-bool GuildManager::DeleteGuild(uint32_t guild_id, entt::registry& registry) {
+bool GuildManager::DeleteGuild(ecs::GuildId guild_id, entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
 
@@ -153,7 +155,7 @@ bool GuildManager::DeleteGuild(uint32_t guild_id, entt::registry& registry) {
   return true;
 }
 
-entt::entity GuildManager::GetGuildEntity(uint32_t guild_id) const {
+entt::entity GuildManager::GetGuildEntity(ecs::GuildId guild_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = guilds_.find(guild_id);
@@ -179,7 +181,7 @@ entt::entity GuildManager::GetGuildByName(const std::string& name) const {
   return guild_it->second;
 }
 
-ecs::GuildComponent* GuildManager::GetGuild(uint32_t guild_id,
+ecs::GuildComponent* GuildManager::GetGuild(ecs::GuildId guild_id,
                                             entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
@@ -192,7 +194,7 @@ ecs::GuildComponent* GuildManager::GetGuild(uint32_t guild_id,
   return TryGetGuildComponent(&registry, it->second);
 }
 
-bool GuildManager::AddMember(uint32_t guild_id, entt::entity member,
+bool GuildManager::AddMember(ecs::GuildId guild_id, entt::entity member,
                              entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
@@ -216,12 +218,14 @@ bool GuildManager::AddMember(uint32_t guild_id, entt::entity member,
   }
 
   auto* member_comp = registry.try_get<ecs::GuildMemberComponent>(member);
-  if (member_comp && member_comp->guild_id != 0 &&
+  if (member_comp && member_comp->guild_id != ecs::kInvalidGuildId &&
       member_comp->guild_id != guild_id) {
     return false;
   }
 
-  guild->members.push_back(member);
+  if (!guild->AddMember(member)) {
+    return false;
+  }
 
   ecs::GuildMemberComponent new_member;
   new_member.guild_id = guild_id;
@@ -235,7 +239,7 @@ bool GuildManager::AddMember(uint32_t guild_id, entt::entity member,
   return true;
 }
 
-bool GuildManager::RemoveMember(uint32_t guild_id, entt::entity member,
+bool GuildManager::RemoveMember(ecs::GuildId guild_id, entt::entity member,
                                 entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
@@ -250,12 +254,9 @@ bool GuildManager::RemoveMember(uint32_t guild_id, entt::entity member,
     return false;
   }
 
-  auto& members = guild->members;
-  auto member_it = std::remove(members.begin(), members.end(), member);
-  if (member_it == members.end()) {
+  if (!guild->RemoveMember(member)) {
     return false;
   }
-  members.erase(member_it, members.end());
 
   if (guild->leader == member) {
     guild->leader = entt::null;
@@ -271,7 +272,7 @@ bool GuildManager::RemoveMember(uint32_t guild_id, entt::entity member,
   return true;
 }
 
-bool GuildManager::DeclareWar(uint32_t attacker_id, uint32_t target_id,
+bool GuildManager::DeclareWar(ecs::GuildId attacker_id, ecs::GuildId target_id,
                               entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
@@ -315,7 +316,7 @@ bool GuildManager::DeclareWar(uint32_t attacker_id, uint32_t target_id,
   return true;
 }
 
-bool GuildManager::CancelWar(uint32_t guild1_id, uint32_t guild2_id,
+bool GuildManager::CancelWar(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                              entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
@@ -343,7 +344,7 @@ bool GuildManager::CancelWar(uint32_t guild1_id, uint32_t guild2_id,
   return removed1 || removed2;
 }
 
-bool GuildManager::IsAtWar(uint32_t guild1_id, uint32_t guild2_id) const {
+bool GuildManager::IsAtWar(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (guild1_id == guild2_id) {
@@ -371,7 +372,7 @@ bool GuildManager::IsAtWar(uint32_t guild1_id, uint32_t guild2_id) const {
   return guild1->IsAtWarWith(guild2_id) || guild2->IsAtWarWith(guild1_id);
 }
 
-bool GuildManager::MakeAlliance(uint32_t guild1_id, uint32_t guild2_id,
+bool GuildManager::MakeAlliance(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                                 entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
@@ -408,7 +409,7 @@ bool GuildManager::MakeAlliance(uint32_t guild1_id, uint32_t guild2_id,
   return true;
 }
 
-bool GuildManager::BreakAlliance(uint32_t guild1_id, uint32_t guild2_id,
+bool GuildManager::BreakAlliance(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                                  entt::registry& registry) {
   std::lock_guard<std::mutex> lock(mutex_);
   CacheRegistry(registry);
@@ -436,7 +437,7 @@ bool GuildManager::BreakAlliance(uint32_t guild1_id, uint32_t guild2_id,
   return removed1 || removed2;
 }
 
-bool GuildManager::IsAllied(uint32_t guild1_id, uint32_t guild2_id) const {
+bool GuildManager::IsAllied(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (guild1_id == guild2_id) {
@@ -464,8 +465,8 @@ bool GuildManager::IsAllied(uint32_t guild1_id, uint32_t guild2_id) const {
   return guild1->IsAlliedWith(guild2_id) || guild2->IsAlliedWith(guild1_id);
 }
 
-int GuildManager::GetGuildRelation(uint32_t guild1_id,
-                                   uint32_t guild2_id) const {
+int GuildManager::GetGuildRelation(ecs::GuildId guild1_id,
+                                   ecs::GuildId guild2_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (guild1_id == guild2_id) {
@@ -501,9 +502,10 @@ int GuildManager::GetGuildRelation(uint32_t guild1_id,
   return ecs::GUILD_RELATION_NONE;
 }
 
-uint8_t GuildManager::GetMemberColor(uint32_t viewer_guild_id,
-                                     uint32_t target_guild_id) const {
-  if (viewer_guild_id == 0 || target_guild_id == 0) {
+uint8_t GuildManager::GetMemberColor(ecs::GuildId viewer_guild_id,
+                                     ecs::GuildId target_guild_id) const {
+  if (viewer_guild_id == ecs::kInvalidGuildId ||
+      target_guild_id == ecs::kInvalidGuildId) {
     return ecs::GUILD_COLOR_NONE;
   }
 
@@ -519,7 +521,7 @@ uint8_t GuildManager::GetMemberColor(uint32_t viewer_guild_id,
   }
 }
 
-uint32_t GuildManager::GenerateGuildId() {
+ecs::GuildId GuildManager::GenerateGuildId() {
   std::lock_guard<std::mutex> lock(mutex_);
 
   while (guilds_.find(next_guild_id_) != guilds_.end()) {
@@ -559,7 +561,7 @@ void GuildManager::Clear(entt::registry& registry) {
 
   guilds_.clear();
   name_to_id_.clear();
-  next_guild_id_ = 1;
+  next_guild_id_ = ecs::kInvalidGuildId + 1;
 }
 
 }  // namespace mir2::game::guild

@@ -46,6 +46,13 @@ using mir2::game::map::MapAttributes;
 using mir2::game::map::MapInstance;
 
 std::filesystem::path GetItemEffectItemsPath() {
+#ifdef MIR2_TEST_DATA_DIR
+    const auto configured = std::filesystem::path(MIR2_TEST_DATA_DIR) / "item_effect_items.json";
+    if (std::filesystem::exists(configured)) {
+        return configured;
+    }
+#endif
+
     std::filesystem::path root = std::filesystem::current_path();
     for (int i = 0; i < 6; ++i) {
         auto candidate = root / "tests" / "data" / "item_effect_items.json";

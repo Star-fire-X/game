@@ -63,6 +63,17 @@ public:
         uint32_t auto_sync_interval_ms = 5000;
         uint32_t batch_size = 100;
         uint32_t sync_timeout_ms = 30000;
+        size_t queue_capacity = 10000;
+        size_t queue_worker_threads = 2;
+        uint32_t queue_retry_count = 3;
+        uint32_t queue_retry_delay_ms = 100;
+        size_t dead_letter_max_items = 10000;
+        bool enable_strict_write_guarantee = true;
+        std::vector<std::string> critical_key_prefixes;
+        bool critical_data_no_ttl = true;
+        bool enable_outbox = false;
+        size_t outbox_replay_limit = 0;  // 0 means replay all.
+        size_t outbox_max_items = 200000;  // 0 means unlimited.
 
         // 熔断器配置
         uint32_t circuit_breaker_threshold = 5;
@@ -71,6 +82,83 @@ public:
         // 监控
         bool enable_metrics = true;
         bool enable_audit_log = true;
+        size_t audit_log_max_entries = 5000;
+
+        // 存储接口鉴权
+        bool enable_access_control = false;
+        bool require_auth_for_reads = false;
+        std::string access_control_token;
+    };
+
+    struct RuntimeTunableConfig {
+        std::optional<uint32_t> l1_ttl_seconds;
+        std::optional<uint32_t> auto_sync_interval_ms;
+        std::optional<uint32_t> batch_size;
+        std::optional<uint32_t> queue_retry_count;
+        std::optional<uint32_t> queue_retry_delay_ms;
+        std::optional<uint32_t> circuit_breaker_threshold;
+        std::optional<uint32_t> circuit_breaker_timeout_ms;
+        std::optional<bool> enable_metrics;
+        std::optional<bool> enable_strict_write_guarantee;
+        std::optional<bool> enable_access_control;
+        std::optional<bool> require_auth_for_reads;
+        std::optional<std::string> access_control_token;
+    };
+
+    enum class AccessOperation : uint8_t {
+        kGet = 0,
+        kSet = 1,
+        kSetSync = 2,
+        kLoadFromDB = 3,
+        kInvalidate = 4,
+        kInvalidateByPrefix = 5,
+        kBatchGet = 6,
+        kBatchSet = 7,
+    };
+
+    struct AccessContext {
+        std::string principal;
+        std::string access_token;
+        bool trusted = false;
+    };
+
+    struct AuditEntry {
+        uint64_t timestamp_ms = 0;
+        std::string principal;
+        std::string operation;
+        std::string key;
+        bool success = false;
+        std::string reason;
+    };
+
+    enum class InvalidationEventType : uint8_t {
+        kKey = 0,
+        kPrefix = 1,
+    };
+
+    struct InvalidationEvent {
+        InvalidationEventType type = InvalidationEventType::kKey;
+        std::string key_or_prefix;
+        uint64_t timestamp_ms = 0;
+        bool from_broadcast = false;
+    };
+
+    using InvalidationCallback = std::function<void(const InvalidationEvent&)>;
+    using InvalidationInboundHandler =
+        std::function<void(const InvalidationEvent&)>;
+
+    // Cross-process invalidation adapter (e.g. Redis/MQ/DB notify).
+    // Local in-process invalidation bus remains enabled by default.
+    class IInvalidationAdapter {
+    public:
+        virtual ~IInvalidationAdapter() = default;
+
+        // Register inbound handler and start adapter runtime.
+        virtual bool Start(InvalidationInboundHandler inbound_handler) = 0;
+        virtual void Stop() = 0;
+
+        // Publish local invalidation to external channel.
+        virtual bool Publish(const InvalidationEvent& event) = 0;
     };
 
     /**
@@ -138,6 +226,11 @@ public:
                  const std::vector<uint8_t>& data,
                  Priority priority = Priority::CRITICAL);
 
+    bool CompareAndSet(const std::string& key,
+                       uint64_t expected_version,
+                       const std::vector<uint8_t>& data,
+                       Priority priority = Priority::HIGH);
+
     /**
      * @brief API 3: 条件更新 (基于当前值计算)
      *
@@ -199,6 +292,63 @@ public:
         const std::string& key,
         mir2::logic::CoroutineExecutor& executor);
 
+    std::vector<std::optional<VersionedData>> BatchGet(
+        const std::vector<std::string>& keys);
+
+    bool BatchSet(
+        const std::vector<std::pair<std::string, std::vector<uint8_t>>>& kvs,
+        Priority priority = Priority::NORMAL);
+
+    bool BatchLoadFromDB(
+        const std::vector<std::string>& keys,
+        std::vector<std::optional<VersionedData>>* out);
+
+    std::optional<VersionedData> GetWithAccess(
+        const std::string& key,
+        const AccessContext& access);
+    bool SetWithAccess(
+        const std::string& key,
+        const std::vector<uint8_t>& data,
+        const AccessContext& access,
+        Priority priority = Priority::NORMAL);
+    bool SetSyncWithAccess(
+        const std::string& key,
+        const std::vector<uint8_t>& data,
+        const AccessContext& access,
+        Priority priority = Priority::CRITICAL);
+    std::optional<VersionedData> LoadFromDBWithAccess(
+        const std::string& key,
+        const AccessContext& access);
+    std::vector<std::optional<VersionedData>> BatchGetWithAccess(
+        const std::vector<std::string>& keys,
+        const AccessContext& access);
+    bool BatchSetWithAccess(
+        const std::vector<std::pair<std::string, std::vector<uint8_t>>>& kvs,
+        const AccessContext& access,
+        Priority priority = Priority::NORMAL);
+
+    bool Invalidate(const std::string& key);
+    size_t InvalidateByPrefix(const std::string& prefix);
+    bool InvalidateWithAccess(
+        const std::string& key,
+        const AccessContext& access);
+    size_t InvalidateByPrefixWithAccess(
+        const std::string& prefix,
+        const AccessContext& access);
+    bool InvalidateFromBroadcast(const std::string& key);
+    size_t InvalidateByPrefixFromBroadcast(const std::string& prefix);
+
+    bool CheckAccess(AccessOperation op,
+                     const std::string& key,
+                     const AccessContext& access,
+                     std::string* deny_reason = nullptr) const;
+    std::vector<AuditEntry> GetRecentAuditEntries(size_t limit = 100) const;
+    uint64_t SubscribeInvalidation(InvalidationCallback callback);
+    bool UnsubscribeInvalidation(uint64_t subscription_id);
+    bool SetInvalidationAdapter(std::shared_ptr<IInvalidationAdapter> adapter);
+    void ClearInvalidationAdapter();
+    bool ApplyRuntimeConfig(const RuntimeTunableConfig& cfg);
+
     // ============= 生命周期API =============
 
     /**
@@ -226,6 +376,12 @@ public:
         size_t l2_size;
         int64_t pending_syncs;
         uint32_t circuit_breaker_failures;
+        uint8_t l2_circuit_breaker_state;
+        uint8_t backend_circuit_breaker_state;
+        size_t high_priority_queue_depth;
+        size_t normal_priority_queue_depth;
+        size_t outbox_depth;
+        size_t dead_letter_depth;
 
         // Update操作统计
         uint64_t total_updates;

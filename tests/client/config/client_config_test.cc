@@ -69,6 +69,7 @@ TEST_F(ClientConfigTest, DefaultValues) {
     EXPECT_EQ(cfg.server_host, "127.0.0.1");
     EXPECT_EQ(cfg.server_port, 7000);
     EXPECT_EQ(cfg.auto_connect, false);
+    EXPECT_EQ(cfg.use_v2_protocol, true);
 
     EXPECT_EQ(cfg.window_width, 800);
     EXPECT_EQ(cfg.window_height, 600);
@@ -103,6 +104,7 @@ TEST_F(ClientConfigTest, LoadMissingFile) {
 
     EXPECT_EQ(cfg.server_host, "127.0.0.1");
     EXPECT_EQ(cfg.server_port, 7000);
+    EXPECT_EQ(cfg.use_v2_protocol, true);
     EXPECT_EQ(cfg.window_width, 800);
     EXPECT_EQ(cfg.window_height, 600);
     EXPECT_FLOAT_EQ(cfg.music_volume, 0.8f);
@@ -119,6 +121,7 @@ TEST_F(ClientConfigTest, RoundTrip) {
     original.server_host  = "192.168.1.100";
     original.server_port  = 9999;
     original.auto_connect = true;
+    original.use_v2_protocol = false;
     original.window_width  = 1920;
     original.window_height = 1080;
     original.fullscreen    = true;
@@ -148,6 +151,7 @@ TEST_F(ClientConfigTest, RoundTrip) {
     EXPECT_EQ(loaded.server_host, "192.168.1.100");
     EXPECT_EQ(loaded.server_port, 9999);
     EXPECT_EQ(loaded.auto_connect, true);
+    EXPECT_EQ(loaded.use_v2_protocol, false);
     EXPECT_EQ(loaded.window_width, 1920);
     EXPECT_EQ(loaded.window_height, 1080);
     EXPECT_EQ(loaded.fullscreen, true);
@@ -177,13 +181,15 @@ TEST_F(ClientConfigTest, PartialYAML) {
         "network:\n"
         "  host: \"10.0.0.1\"\n"
         "  port: 8080\n"
-        "  auto_connect: true\n");
+        "  auto_connect: true\n"
+        "  use_v2_protocol: false\n");
 
     const ClientConfig cfg = load_client_config(TmpFile("partial.yaml"));
 
     EXPECT_EQ(cfg.server_host, "10.0.0.1");
     EXPECT_EQ(cfg.server_port, 8080);
     EXPECT_EQ(cfg.auto_connect, true);
+    EXPECT_EQ(cfg.use_v2_protocol, false);
 
     EXPECT_EQ(cfg.window_width, 800);
     EXPECT_EQ(cfg.window_height, 600);
@@ -219,6 +225,7 @@ TEST_F(ClientConfigTest, MalformedValues) {
     EXPECT_EQ(cfg.server_host, "good_host");
     EXPECT_EQ(cfg.server_port, 7000);
     EXPECT_EQ(cfg.auto_connect, false);
+    EXPECT_EQ(cfg.use_v2_protocol, true);
     EXPECT_EQ(cfg.window_width, 800);
     EXPECT_EQ(cfg.window_height, 600);
     EXPECT_FLOAT_EQ(cfg.music_volume, 0.8f);
@@ -235,6 +242,7 @@ TEST_F(ClientConfigTest, EmptyFile) {
 
     EXPECT_EQ(cfg.server_host, "127.0.0.1");
     EXPECT_EQ(cfg.server_port, 7000);
+    EXPECT_EQ(cfg.use_v2_protocol, true);
     EXPECT_EQ(cfg.window_width, 800);
     EXPECT_EQ(cfg.window_title, "Legend2");
     EXPECT_FLOAT_EQ(cfg.music_volume, 0.8f);
@@ -271,6 +279,7 @@ TEST_F(ClientConfigTest, AllSections) {
         "  host: \"203.0.113.50\"\n"
         "  port: 12345\n"
         "  auto_connect: true\n"
+        "  use_v2_protocol: false\n"
         "window:\n"
         "  width: 1280\n"
         "  height: 720\n"
@@ -301,6 +310,7 @@ TEST_F(ClientConfigTest, AllSections) {
     EXPECT_EQ(cfg.server_host, "203.0.113.50");
     EXPECT_EQ(cfg.server_port, 12345);
     EXPECT_EQ(cfg.auto_connect, true);
+    EXPECT_EQ(cfg.use_v2_protocol, false);
     EXPECT_EQ(cfg.window_width, 1280);
     EXPECT_EQ(cfg.window_height, 720);
     EXPECT_EQ(cfg.fullscreen, true);

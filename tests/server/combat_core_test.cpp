@@ -5,7 +5,7 @@
 
 namespace {
 
-TEST(DamageCalculatorTest, MissRollReturnsMiss) {
+TEST(CombatCoreDamageCalculatorTest, MissRollReturnsMiss) {
     legend2::CombatConfig config;
     legend2::combat::DamageInput input{10, 0, 0.0f, 1.0f};
     legend2::combat::DamageRolls rolls;
@@ -17,7 +17,7 @@ TEST(DamageCalculatorTest, MissRollReturnsMiss) {
     EXPECT_EQ(result.final_damage, 0);
 }
 
-TEST(DamageCalculatorTest, CriticalHitAppliesMultiplier) {
+TEST(CombatCoreDamageCalculatorTest, CriticalHitAppliesMultiplier) {
     legend2::CombatConfig config;
     config.critical_multiplier = 2.0f;
 
@@ -33,7 +33,7 @@ TEST(DamageCalculatorTest, CriticalHitAppliesMultiplier) {
     EXPECT_EQ(result.final_damage, 16);
 }
 
-TEST(DamageCalculatorTest, VarianceIsAppliedWithinRange) {
+TEST(CombatCoreDamageCalculatorTest, VarianceIsAppliedWithinRange) {
     legend2::CombatConfig config;
     config.min_variance_percent = -10;
     config.max_variance_percent = 10;
@@ -50,7 +50,7 @@ TEST(DamageCalculatorTest, VarianceIsAppliedWithinRange) {
     EXPECT_EQ(result.final_damage, 95);
 }
 
-TEST(DamageCalculatorTest, MinimumDamageApplied) {
+TEST(CombatCoreDamageCalculatorTest, MinimumDamageApplied) {
     legend2::CombatConfig config;
     config.minimum_damage = 1;
 
@@ -65,7 +65,7 @@ TEST(DamageCalculatorTest, MinimumDamageApplied) {
     EXPECT_EQ(result.final_damage, 1);
 }
 
-TEST(DamageCalculatorTest, ChanceValuesAreClamped) {
+TEST(CombatCoreDamageCalculatorTest, ChanceValuesAreClamped) {
     legend2::CombatConfig config;
 
     legend2::combat::DamageInput input{10, 0, 2.0f, -1.0f};

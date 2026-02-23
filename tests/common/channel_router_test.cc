@@ -21,8 +21,12 @@ TEST(ChannelRouterTest, DefaultRoutes) {
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kEntityMove)), ChannelType::kKcp);
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kEntityUpdate)), ChannelType::kKcp);
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kStateSync)), ChannelType::kKcp);
+  EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kPartyUpdate)), ChannelType::kKcp);
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kAttackRsp)), ChannelType::kKcp);
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kDeath)), ChannelType::kKcp);
+  EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kRespawn)), ChannelType::kKcp);
+  EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kBuffAdd)), ChannelType::kKcp);
+  EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kBuffRemove)), ChannelType::kKcp);
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kSkillEffect)), ChannelType::kKcp);
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kPlayEffect)), ChannelType::kKcp);
   EXPECT_EQ(router.GetChannel(static_cast<uint16_t>(MsgId::kPlaySound)), ChannelType::kKcp);

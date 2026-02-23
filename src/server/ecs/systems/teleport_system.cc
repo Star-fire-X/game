@@ -65,6 +65,11 @@ void TeleportSystem::Update(entt::registry& registry, float /*delta_time*/) {
       }
       state->position.x = cmd.target_x;
       state->position.y = cmd.target_y;
+      if (event_bus_) {
+        events::MapChangeEvent event{cmd.entity, old_map_id, old_map_id,
+                                     cmd.target_x, cmd.target_y};
+        event_bus_->Publish(event);
+      }
       continue;
     }
 

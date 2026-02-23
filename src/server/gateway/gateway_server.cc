@@ -13,8 +13,8 @@
 #include "server/common/error_codes.h"
 #include "common/internal_message_helper.h"
 #include "common/protocol/message_codec.h"
+#include "common/protocol/universal_forward_msg_ids.h"
 #include "game_generated.h"
-#include "guild_generated.h"
 #include "login_generated.h"
 #include "network/tcp_session.h"
 #include "config/config_manager.h"
@@ -46,7 +46,7 @@ int64_t ComputeDisconnectBackoffMs(uint32_t retry_count) {
 struct ConnectionSnapshot {
   uint64_t client_id = 0;
   uint32_t player_id = 0;
-  uint32_t account_id = 0;
+  uint64_t account_id = 0;
   std::string ip_address;
   uint64_t connected_at_ms = 0;
   uint64_t last_active_ms = 0;
@@ -408,38 +408,8 @@ void GatewayServer::RegisterHandlers() {
     HandleForwardMessage(session, msg_id, channel, payload);
   };
 
-  // 批量注册需要转发的消息类型
-  const std::vector<uint16_t> forward_messages = {
-    static_cast<uint16_t>(common::MsgId::kLoginReq),
-    static_cast<uint16_t>(common::MsgId::kLogout),
-    static_cast<uint16_t>(common::MsgId::kCreateRoleReq),
-    static_cast<uint16_t>(common::MsgId::kSelectRoleReq),
-    static_cast<uint16_t>(common::MsgId::kRoleListReq),
-    static_cast<uint16_t>(common::MsgId::kMoveReq),
-    static_cast<uint16_t>(common::MsgId::kAttackReq),
-    static_cast<uint16_t>(common::MsgId::kSkillReq),
-    static_cast<uint16_t>(common::MsgId::kChatReq),
-    static_cast<uint16_t>(common::MsgId::kUseItemReq),
-    static_cast<uint16_t>(common::MsgId::kDropItemReq),
-    static_cast<uint16_t>(common::MsgId::kPickupItemReq),
-    static_cast<uint16_t>(common::MsgId::kEquipReq),
-    static_cast<uint16_t>(common::MsgId::kUnequipReq),
-    static_cast<uint16_t>(common::MsgId::kNpcInteractReq),
-    static_cast<uint16_t>(common::MsgId::kNpcMenuSelect),
-    static_cast<uint16_t>(common::MsgId::kGuildChat),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::CREATE),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::JOIN),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::LEAVE),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::KICK),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::DECLARE_WAR),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::MAKE_ALLY),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::BREAK_ALLY),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_NOTICE),
-    static_cast<uint16_t>(mir2::proto::GuildMessageType::UPDATE_RANK),
-  };
-
-  for (auto msg_id : forward_messages) {
+  // 批量注册需要转发的消息类型（共享矩阵，避免生产/测试漂移）
+  for (auto msg_id : common::protocol::kUniversalForwardMsgIds) {
     network_->RegisterChannelAwareHandler(
         msg_id,
         [universal_forward_handler, msg_id](const std::shared_ptr<network::TcpSession>& session,
@@ -450,7 +420,7 @@ void GatewayServer::RegisterHandlers() {
   }
 
   SYSLOG_INFO("Gateway registered {} message handlers (universal forward mode)",
-              forward_messages.size() + 1);
+              common::protocol::kUniversalForwardMsgIds.size() + 1);
 }
 
 bool GatewayServer::ConnectLogicService() {
@@ -956,7 +926,7 @@ std::vector<uint8_t> GatewayServer::BuildContextRestoreResponse(uint32_t request
       ConnectionSnapshot entry;
       entry.client_id = client_id;
       entry.player_id = static_cast<uint32_t>(session->GetUserId());
-      entry.account_id = static_cast<uint32_t>(session->GetAccountId());
+      entry.account_id = session->GetAccountId();
       entry.ip_address = session->GetRemoteAddress();
       auto it = connection_connected_at_ms_.find(client_id);
       entry.connected_at_ms = it != connection_connected_at_ms_.end()

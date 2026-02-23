@@ -19,6 +19,7 @@
 #include "ui/hud/player_info_panel.h"
 #include "common/types.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -49,6 +50,15 @@ public:
     /// @param width  New screen width in pixels
     /// @param height New screen height in pixels
     void set_screen_size(int width, int height);
+
+    /// Apply/update one buff on the player info panel.
+    void apply_buff(uint32_t buff_id, uint16_t stack_count);
+
+    /// Remove one buff from the player info panel.
+    void remove_buff(uint32_t buff_id);
+
+    /// Clear all buffs from the player info panel.
+    void clear_buffs();
 
     /// Direct access to individual HUD elements for fine-grained control.
     StatusBar* get_hp_bar() const { return hp_bar_; }

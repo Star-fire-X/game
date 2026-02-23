@@ -16,6 +16,7 @@
 #include "logic/services/client_registry.h"
 #include "log/logger.h"
 #include "logic/coroutine_executor.h"
+#include "logic/handlers/handler_error_utils.h"
 #include "logic/response_sender.h"
 #include "logic/services/session_role_store.h"
 #include "login_generated.h"
@@ -101,24 +102,6 @@ std::vector<uint8_t> BuildDuplicateLoginKick() {
   return std::vector<uint8_t>(data, data + builder.GetSize());
 }
 
-mir2::proto::ErrorCode ToProtoError(mir2::common::ErrorCode code) {
-  switch (code) {
-    case mir2::common::ErrorCode::kOk:
-      return mir2::proto::ErrorCode::ERR_OK;
-    case mir2::common::ErrorCode::kAccountNotFound:
-      return mir2::proto::ErrorCode::ERR_ACCOUNT_NOT_FOUND;
-    case mir2::common::ErrorCode::kNameExists:
-      return mir2::proto::ErrorCode::ERR_NAME_EXISTS;
-    case mir2::common::ErrorCode::kInvalidAction:
-    case mir2::common::ErrorCode::INVALID_CHARACTER_NAME:
-    case mir2::common::ErrorCode::INVALID_CHARACTER_CLASS:
-    case mir2::common::ErrorCode::INVALID_CREDENTIALS:
-      return mir2::proto::ErrorCode::ERR_INVALID_ACTION;
-    default:
-      return mir2::proto::ErrorCode::ERR_UNKNOWN;
-  }
-}
-
 bool TryToCharacterClass(mir2::proto::Profession profession,
                          mir2::common::CharacterClass* out) {
   if (!out) {
@@ -160,11 +143,13 @@ bool TryToCharacterGender(mir2::proto::Gender gender, mir2::common::Gender* out)
 CharacterHandler::CharacterHandler(ResponseSender& response_sender,
                                    mir2::ecs::CharacterEntityManager& entity_manager,
                                    RoleStore& role_store,
-                                   ClientRegistry& client_registry)
+                                   ClientRegistry& client_registry,
+                                   OnLoginComplete on_login_complete)
     : response_sender_(response_sender),
       entity_manager_(entity_manager),
       role_store_(role_store),
-      client_registry_(client_registry) {}
+      client_registry_(client_registry),
+      on_login_complete_(std::move(on_login_complete)) {}
 
 Task<void> CharacterHandler::HandleMessage(HandlerContext ctx,
                                            const uint8_t* payload,
@@ -317,7 +302,7 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
   }
 
   mir2::common::CharacterCreateRequest create_request;
-  create_request.account_id = std::to_string(account_id);
+  create_request.account_id = account_id;
   create_request.name = name;
   create_request.char_class = character_class;
   create_request.gender = character_gender;
@@ -473,6 +458,10 @@ Task<void> CharacterHandler::HandleSelectRole(HandlerContext ctx,
       ctx.client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kEnterGameRsp),
       std::move(enter_payload));
+
+  if (can_login && on_login_complete_) {
+    on_login_complete_(player_id);
+  }
 
   if (can_login) {
     SYSLOG_INFO("CharacterHandler SelectRole success player_id={} account_id={} hp={}/{} mp={}/{}",

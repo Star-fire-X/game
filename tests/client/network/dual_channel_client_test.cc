@@ -242,6 +242,23 @@ TEST(dual_channel_client, KcpUpgradeStateMachineProgresses) {
     EXPECT_EQ(client.get_kcp_state(), DualChannelClient::KcpUpgradeState::kConfirmed);
 }
 
+TEST(dual_channel_client, ProtocolTogglePassesThroughToTcpClient) {
+    auto tcp_client = std::make_unique<::testing::NiceMock<MockNetworkClient>>();
+    auto* tcp_ptr = tcp_client.get();
+    PrepareTcpMock(tcp_ptr);
+
+    asio::io_context io_context;
+    auto kcp_channel = std::make_unique<::testing::NiceMock<MockKcpChannel>>(io_context);
+
+    DualChannelClient client(std::move(tcp_client), std::move(kcp_channel));
+
+    EXPECT_TRUE(client.use_v2_protocol());
+    client.set_use_v2_protocol(false);
+    EXPECT_TRUE(client.use_v2_protocol());
+    client.set_use_v2_protocol(true);
+    EXPECT_TRUE(client.use_v2_protocol());
+}
+
 TEST(dual_channel_client, RecoveryRequestsUpgradeAfterFallbackBackoff) {
     KcpConfig config;
     config.timeout_ms = 1000;

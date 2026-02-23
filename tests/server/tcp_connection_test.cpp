@@ -3,6 +3,8 @@
 #include <asio/error.hpp>
 #include <asio/io_context.hpp>
 
+#include <cstring>
+
 #include "common/enums.h"
 #include "mocks/mock_socket.h"
 #include "network/packet_codec.h"
@@ -12,6 +14,18 @@
 namespace mir2::network {
 
 namespace {
+
+std::vector<uint8_t> BuildLegacyV1Packet(uint16_t msg_id) {
+  std::vector<uint8_t> bytes(10, 0);
+  constexpr uint32_t kLegacyV1Magic = 0x4D495232;  // "MIR2"
+  constexpr uint32_t kPayloadSize = 0;
+  std::memcpy(bytes.data(), &kLegacyV1Magic, sizeof(kLegacyV1Magic));
+  std::memcpy(bytes.data() + sizeof(kLegacyV1Magic), &msg_id, sizeof(msg_id));
+  std::memcpy(bytes.data() + sizeof(kLegacyV1Magic) + sizeof(msg_id),
+              &kPayloadSize,
+              sizeof(kPayloadSize));
+  return bytes;
+}
 
 std::shared_ptr<TcpConnection> CreateConnection(asio::io_context& io_context,
                                                 MockSocket** out_socket) {
@@ -24,7 +38,7 @@ std::shared_ptr<TcpConnection> CreateConnection(asio::io_context& io_context,
 
 }  // namespace
 
-TEST(TcpConnectionTest, ReadV1PacketTriggersHandler) {
+TEST(TcpConnectionTest, ReadV1PacketIsRejected) {
   asio::io_context io_context;
   MockSocket* mock_socket = nullptr;
   auto connection = CreateConnection(io_context, &mock_socket);
@@ -50,14 +64,15 @@ TEST(TcpConnectionTest, ReadV1PacketTriggersHandler) {
   session->Start();
 
   const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
-  auto encoded = PacketCodec::Encode(msg_id, nullptr, 0);
+  auto encoded = BuildLegacyV1Packet(msg_id);
   mock_socket->PushReadData(std::move(encoded));
 
   io_context.run();
 
-  EXPECT_TRUE(called);
-  EXPECT_EQ(received.msg_id, msg_id);
-  EXPECT_TRUE(received.payload.empty());
+  EXPECT_FALSE(called);
+  EXPECT_EQ(received.msg_id, 0u);
+  EXPECT_NE(session->GetState(), TcpSession::SessionState::kActive);
+  EXPECT_TRUE(mock_socket->IsClosed());
 }
 
 TEST(TcpConnectionTest, ReadV2PacketTriggersHandler) {

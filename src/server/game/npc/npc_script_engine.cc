@@ -241,7 +241,8 @@ NpcScriptCommand NpcScriptEngine::ParseCommand(const nlohmann::json& command_jso
     case NpcScriptOp::kRepair:
       break;
     case NpcScriptOp::kOpenGuild:
-      command.guild_id = command_json.value("guild_id", 0u);
+      command.guild_id =
+          command_json.value("guild_id", mir2::ecs::kInvalidGuildId);
       break;
     case NpcScriptOp::kGuardAlert:
       command.guard_level = command_json.value("level", 1);

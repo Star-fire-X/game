@@ -49,6 +49,12 @@ set(SCHEMA_FILES
     ${SCHEMA_DIR}/combat.fbs
     ${SCHEMA_DIR}/item.fbs
     ${SCHEMA_DIR}/guild.fbs
+    ${SCHEMA_DIR}/party.fbs
+    ${SCHEMA_DIR}/trade.fbs
+    ${SCHEMA_DIR}/ranking.fbs
+    ${SCHEMA_DIR}/mail.fbs
+    ${SCHEMA_DIR}/achievement.fbs
+    ${SCHEMA_DIR}/auction.fbs
     ${SCHEMA_DIR}/chat.fbs
     ${SCHEMA_DIR}/system.fbs
 )
@@ -61,6 +67,12 @@ set(GENERATED_SCHEMA_HEADERS
     ${GENERATED_SCHEMA_DIR}/combat_generated.h
     ${GENERATED_SCHEMA_DIR}/item_generated.h
     ${GENERATED_SCHEMA_DIR}/guild_generated.h
+    ${GENERATED_SCHEMA_DIR}/party_generated.h
+    ${GENERATED_SCHEMA_DIR}/trade_generated.h
+    ${GENERATED_SCHEMA_DIR}/ranking_generated.h
+    ${GENERATED_SCHEMA_DIR}/mail_generated.h
+    ${GENERATED_SCHEMA_DIR}/achievement_generated.h
+    ${GENERATED_SCHEMA_DIR}/auction_generated.h
     ${GENERATED_SCHEMA_DIR}/chat_generated.h
     ${GENERATED_SCHEMA_DIR}/system_generated.h
 )

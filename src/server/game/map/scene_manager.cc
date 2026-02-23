@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "log/logger.h"
+
 namespace mir2::game::map {
 namespace {
 
@@ -48,6 +50,13 @@ std::optional<MapTileData> SceneManager::LoadMapDataUnlocked(
   out_height = config.height;
   out_walkability.clear();
 
+  if (!config.load_walkability && (out_width <= 0 || out_height <= 0)) {
+    SYSLOG_ERROR("SceneManager: invalid map dimensions map_id={} width={} height={} "
+                 "with load_walkability=false",
+                 config.map_id, out_width, out_height);
+    return std::nullopt;
+  }
+
   if (config.load_walkability) {
     for (const auto& path : BuildMapPathCandidates(config)) {
       auto tile_data = map_loader_.LoadFull(path);
@@ -65,6 +74,12 @@ std::optional<MapTileData> SceneManager::LoadMapDataUnlocked(
         return std::nullopt;
       }
     }
+  }
+
+  if (out_width <= 0 || out_height <= 0) {
+    SYSLOG_ERROR("SceneManager: invalid map dimensions map_id={} width={} height={}",
+                 config.map_id, out_width, out_height);
+    return std::nullopt;
   }
 
   return std::nullopt;
@@ -92,6 +107,10 @@ MapInstance* SceneManager::CreateMap(const MapConfig& config) {
     loading_map_ids_.erase(config.map_id);
     map_load_cv_.notify_all();
     throw;
+  }
+
+  if (map_width <= 0 || map_height <= 0) {
+    return nullptr;
   }
 
   auto map = std::make_shared<MapInstance>(
@@ -159,6 +178,13 @@ MapInstance* SceneManager::GetOrCreateMap(const MapConfig& config) {
     loading_map_ids_.erase(config.map_id);
     map_load_cv_.notify_all();
     throw;
+  }
+
+  if (map_width <= 0 || map_height <= 0) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    loading_map_ids_.erase(config.map_id);
+    map_load_cv_.notify_all();
+    return nullptr;
   }
 
   auto map = std::make_shared<MapInstance>(
@@ -390,12 +416,46 @@ bool SceneManager::TeleportEntity(entt::entity entity,
     return target_map->UpdateEntityPosition(entity, target_x, target_y);
   }
 
-  if (!target_map->AddEntity(entity, target_x, target_y)) {
+  if (!target_map->IsValidPosition(target_x, target_y)) {
     return false;
   }
 
-  if (current_map && current_map.get() != target_map.get()) {
-    (void)current_map->RemoveEntity(entity);
+  int32_t source_x = 0;
+  int32_t source_y = 0;
+  const bool has_source = current_map && current_map.get() != target_map.get();
+
+  if (has_source) {
+    if (!current_map->GetEntityPosition(entity, source_x, source_y)) {
+      return false;
+    }
+    if (!current_map->RemoveEntity(entity)) {
+      return false;
+    }
+  }
+
+  auto rollback_to_source = [&]() -> bool {
+    if (!has_source) {
+      return true;
+    }
+    if (current_map->AddEntity(entity, source_x, source_y)) {
+      return true;
+    }
+    SYSLOG_ERROR("SceneManager: teleport rollback failed entity={} source_map={} "
+                 "target_map={} source=({}, {}) target=({}, {})",
+                 static_cast<uint64_t>(entt::to_integral(entity)),
+                 current_map->GetMapId(),
+                 target_map_id,
+                 source_x,
+                 source_y,
+                 target_x,
+                 target_y);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    UnindexEntity(entity);
+    return false;
+  };
+
+  if (!target_map->AddEntity(entity, target_x, target_y)) {
+    return rollback_to_source();
   }
 
   {
@@ -404,7 +464,7 @@ bool SceneManager::TeleportEntity(entt::entity entity,
     if (target_it == maps_.end() || target_it->second.get() != target_map.get()) {
       lock.unlock();
       (void)target_map->RemoveEntity(entity);
-      return false;
+      return rollback_to_source();
     }
     IndexEntity(entity, target_map_id);
   }
@@ -493,6 +553,9 @@ bool SceneManager::ReloadMap(int32_t map_id) {
   std::vector<uint8_t> walkability;
   auto tile_data =
       LoadMapDataUnlocked(config, map_width, map_height, walkability);
+  if (map_width <= 0 || map_height <= 0) {
+    return false;
+  }
 
   auto new_map = std::make_shared<MapInstance>(
       config.map_id,

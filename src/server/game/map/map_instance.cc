@@ -263,18 +263,40 @@ size_t MapInstance::DispatchPendingAOIEvents(size_t max_events) {
   std::vector<PendingAOIEvent> events;
   const size_t reserve_hint = std::min(max_events, kDefaultAoiDispatchReserve);
   events.reserve(reserve_hint);
+  size_t pending_after_dispatch = 0;
 
   {
     std::lock_guard<std::mutex> dispatch_lock(aoi_dispatch_mutex_);
     PendingAOIEvent event;
+
+    // Drain ring events that were already queued when dispatch starts.
+    const size_t initial_ring_size = pending_aoi_events_.ApproxSize();
+    size_t ring_drained = 0;
+    while (events.size() < max_events &&
+           ring_drained < initial_ring_size &&
+           pending_aoi_events_.TryDequeue(&event)) {
+      events.push_back(event);
+      ++ring_drained;
+    }
+
+    // Drain overflow events next to preserve deltas that could not fit ring queue.
+    while (events.size() < max_events && !overflow_aoi_events_.empty()) {
+      events.push_back(overflow_aoi_events_.front());
+      overflow_aoi_events_.pop_front();
+    }
+
+    // Drain additional ring events if dispatch budget remains.
     while (events.size() < max_events && pending_aoi_events_.TryDequeue(&event)) {
       events.push_back(event);
     }
+
+    pending_after_dispatch =
+        pending_aoi_events_.ApproxSize() + overflow_aoi_events_.size();
   }
 
   monitor::Metrics::Instance().SetGauge(
       kMetricAoiPendingEvents,
-      static_cast<double>(pending_aoi_events_.ApproxSize()));
+      static_cast<double>(pending_after_dispatch));
   monitor::Metrics::Instance().SetGauge(
       kMetricAoiDispatchBatch,
       static_cast<double>(events.size()));
@@ -302,7 +324,8 @@ size_t MapInstance::DispatchPendingAOIEvents(size_t max_events) {
 }
 
 size_t MapInstance::PendingAOIEventCount() const {
-  return pending_aoi_events_.ApproxSize();
+  std::lock_guard<std::mutex> dispatch_lock(aoi_dispatch_mutex_);
+  return pending_aoi_events_.ApproxSize() + overflow_aoi_events_.size();
 }
 
 void MapInstance::SetEventBus(ecs::EventBus* event_bus) {
@@ -522,6 +545,7 @@ void MapInstance::Clear() {
     PendingAOIEvent event;
     while (pending_aoi_events_.TryDequeue(&event)) {
     }
+    overflow_aoi_events_.clear();
   }
   monitor::Metrics::Instance().SetGauge(kMetricAoiPendingEvents, 0.0);
   monitor::Metrics::Instance().SetGauge(kMetricAoiDispatchBatch, 0.0);
@@ -581,14 +605,29 @@ void MapInstance::OnAOIEvent(AOIEventType event_type, uint64_t watcher_id,
   event.x = x;
   event.y = y;
 
-  if (!pending_aoi_events_.TryEnqueue(event)) {
-    monitor::Metrics::Instance().IncrementCounter(kMetricAoiQueueOverflowTotal);
+  if (pending_aoi_events_.TryEnqueue(event)) {
+    monitor::Metrics::Instance().SetGauge(
+        kMetricAoiPendingEvents,
+        static_cast<double>(pending_aoi_events_.ApproxSize()));
     return;
   }
 
+  // Preserve AOI deltas under burst: spill to guarded overflow queue instead of drop.
+  size_t pending_after_enqueue = 0;
+  {
+    std::lock_guard<std::mutex> dispatch_lock(aoi_dispatch_mutex_);
+    if (!pending_aoi_events_.TryEnqueue(event)) {
+      overflow_aoi_events_.push_back(event);
+    }
+    pending_after_enqueue =
+        pending_aoi_events_.ApproxSize() + overflow_aoi_events_.size();
+  }
+  if (pending_after_enqueue > kAOIEventQueueCapacity) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricAoiQueueOverflowTotal);
+  }
   monitor::Metrics::Instance().SetGauge(
       kMetricAoiPendingEvents,
-      static_cast<double>(pending_aoi_events_.ApproxSize()));
+      static_cast<double>(pending_after_enqueue));
 }
 
 bool MapInstance::CanRecall() const {

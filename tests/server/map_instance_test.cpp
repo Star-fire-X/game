@@ -193,6 +193,44 @@ TEST_F(MapInstanceTest, AOIEventsAreDeferredUntilDispatch) {
   EXPECT_EQ(map_->PendingAOIEventCount(), 0u);
 }
 
+TEST_F(MapInstanceTest, AOIQueueOverflowDoesNotDropDeltas) {
+  constexpr int32_t kBurstEntities = 100;
+
+  size_t delivered_events = 0;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    (void)event_type;
+    (void)watcher_entity;
+    (void)target_entity;
+    (void)x;
+    (void)y;
+    ++delivered_events;
+  });
+
+  const entt::entity watcher = entt::entity{1};
+  ASSERT_TRUE(map_->AddEntity(watcher, 10, 10));
+
+  for (int32_t i = 0; i < kBurstEntities; ++i) {
+    const entt::entity target = static_cast<entt::entity>(100 + i);
+    const int32_t x = 10 + (i % 10);
+    const int32_t y = 10 + (i / 10);
+    ASSERT_TRUE(map_->AddEntity(target, x, y));
+  }
+
+  const size_t expected_events =
+      static_cast<size_t>(kBurstEntities) *
+      static_cast<size_t>(kBurstEntities + 1);
+  EXPECT_GT(map_->PendingAOIEventCount(), 8192u);
+
+  const size_t dispatched_events = map_->DispatchPendingAOIEvents();
+  EXPECT_EQ(dispatched_events, expected_events);
+  EXPECT_EQ(delivered_events, expected_events);
+  EXPECT_EQ(map_->PendingAOIEventCount(), 0u);
+}
+
 TEST_F(MapInstanceTest, AOILeaveEventUsesLeaverLatestCoordinates) {
   entt::entity watcher = entt::entity{1};
   entt::entity leaver = entt::entity{2};

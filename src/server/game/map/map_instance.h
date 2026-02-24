@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -440,6 +441,7 @@ class MapInstance {
   static constexpr size_t kAOIEventQueueCapacity = 8192;
   core::concurrency::MpscRingQueue<PendingAOIEvent, kAOIEventQueueCapacity>
       pending_aoi_events_;
+  std::deque<PendingAOIEvent> overflow_aoi_events_;
   mutable std::mutex aoi_dispatch_mutex_;
   mutable std::shared_mutex entity_ops_barrier_mutex_;
   static constexpr size_t kEntityOpsLockStripeCount = 64;

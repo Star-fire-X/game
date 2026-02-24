@@ -19,6 +19,24 @@ bool PgConnectionPool::Initialize(const config::DatabaseConfig& config) {
     return true;
   }
 
+  auto cleanup_failed_init_locked = [this]() {
+    while (!pool_.empty()) {
+      auto conn = pool_.front();
+      pool_.pop();
+      if (conn && conn->is_open()) {
+        try {
+          conn->close();
+        } catch (const std::exception&) {
+          // Best-effort cleanup path.
+        }
+      }
+    }
+    configured_pool_size_ = 0;
+    in_use_count_ = 0;
+    initialized_ = false;
+    UpdateMetricsLocked();
+  };
+
   configured_pool_size_ = static_cast<size_t>(std::max(0, config.pool_size));
   in_use_count_ = 0;
 
@@ -31,11 +49,13 @@ bool PgConnectionPool::Initialize(const config::DatabaseConfig& config) {
       auto conn = std::make_shared<pqxx::connection>(conn_str);
       if (!conn->is_open()) {
         std::cerr << "PostgreSQL connection failed" << std::endl;
+        cleanup_failed_init_locked();
         return false;
       }
       pool_.push(conn);
     } catch (const std::exception& ex) {
       std::cerr << "PostgreSQL init error: " << ex.what() << std::endl;
+      cleanup_failed_init_locked();
       return false;
     }
   }

@@ -19,6 +19,7 @@ constexpr const char* kUpsertSQL =
     "VALUES ($1, $2, $3, NOW()) "
     "ON CONFLICT (key) DO UPDATE "
     "SET version = EXCLUDED.version, data = EXCLUDED.data, updated_at = NOW() "
+    // Keep newest write only; callers must supply monotonic-increasing version.
     "WHERE kv_store.version < EXCLUDED.version";
 }  // namespace
 
@@ -147,11 +148,8 @@ std::optional<std::pair<uint64_t, std::vector<uint8_t>>> StorageEngineBackend::L
     const auto& row = result[0];
     uint64_t version = static_cast<uint64_t>(row[0].as<int64_t>());
     const pqxx::bytes blob = row[1].as<pqxx::bytes>();
-    std::vector<uint8_t> data;
-    data.reserve(blob.size());
-    for (std::byte value : blob) {
-      data.push_back(std::to_integer<uint8_t>(value));
-    }
+    const auto* blob_ptr = reinterpret_cast<const uint8_t*>(blob.data());
+    std::vector<uint8_t> data(blob_ptr, blob_ptr + blob.size());
 
     return std::make_pair(version, std::move(data));
   } catch (const pqxx::broken_connection& ex) {
@@ -201,11 +199,8 @@ StorageEngineBackend::LoadAll() {
       std::string key = row[0].as<std::string>();
       uint64_t version = static_cast<uint64_t>(row[1].as<int64_t>());
       const pqxx::bytes blob = row[2].as<pqxx::bytes>();
-      std::vector<uint8_t> data;
-      data.reserve(blob.size());
-      for (std::byte value : blob) {
-        data.push_back(std::to_integer<uint8_t>(value));
-      }
+      const auto* blob_ptr = reinterpret_cast<const uint8_t*>(blob.data());
+      std::vector<uint8_t> data(blob_ptr, blob_ptr + blob.size());
       all.emplace(std::move(key), std::make_pair(version, std::move(data)));
     }
 

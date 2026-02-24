@@ -154,5 +154,13 @@ TEST_F(AccountStorageBackendCacheTest, SaveRefreshesCachedAccountValue) {
   EXPECT_EQ(third->password_hash, "$2b$12$cache.write.db_mutated");
 }
 
+TEST_F(AccountStorageBackendCacheTest, LoadAccountVersionIsNotDefaultOne) {
+  UpsertRawAccount("$2b$12$cache.version.raw");
+
+  auto loaded = backend_->Load(account_key_);
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_GT(loaded->first, 1u);
+}
+
 }  // namespace
 }  // namespace mir2::db

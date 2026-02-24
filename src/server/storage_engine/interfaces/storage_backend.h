@@ -36,6 +36,9 @@ public:
 
     /**
      * @brief 保存单个实体
+     *
+     * 版本号必须由调用方提供且保持单调递增，否则后端可拒绝写入
+     * 或保留旧值（例如带版本比较的 UPSERT 语义）。
      */
     virtual StorageResult Save(
         const std::string& key,

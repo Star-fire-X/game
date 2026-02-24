@@ -1,4 +1,7 @@
 #include "storage_engine/backends/postgres/postgres_database.h"
+
+#include <limits>
+
 #include <pqxx/pqxx>
 
 namespace mir2::db {
@@ -28,22 +31,24 @@ bool PostgresDatabase::is_open() const {
 
 // 事务操作
 mir2::common::DbResult<void> PostgresDatabase::begin_transaction() {
-    if (!is_open()) {
-        return mir2::common::DbResult<void>::error(
-            mir2::common::ErrorCode::DATABASE_ERROR, "Database not open");
-    }
-    // pqxx使用work对象自动管理事务，此方法用于兼容
-    return mir2::common::DbResult<void>::ok();
+  if (!is_open()) {
+    return mir2::common::DbResult<void>::error(
+        mir2::common::ErrorCode::DATABASE_ERROR, "Database not open");
+  }
+  // Compatibility shim: current implementation scopes transaction lifetime to
+  // each API call via pqxx::work and does not maintain cross-call state.
+  return mir2::common::DbResult<void>::ok();
 }
 
 mir2::common::DbResult<void> PostgresDatabase::commit() {
-    // pqxx的work对象在commit时自动提交
-    return mir2::common::DbResult<void>::ok();
+  // Compatibility shim: commits happen inside each method when pqxx::work
+  // commit() is called.
+  return mir2::common::DbResult<void>::ok();
 }
 
 mir2::common::DbResult<void> PostgresDatabase::rollback() {
-    // pqxx的work对象在abort时回滚
-    return mir2::common::DbResult<void>::ok();
+  // Compatibility shim: rollback is scoped to pqxx::work object lifetime.
+  return mir2::common::DbResult<void>::ok();
 }
 
 // ID生成
@@ -70,6 +75,7 @@ mir2::common::DbResult<AccountData> PostgresDatabase::load_account(const std::st
             return mir2::common::DbResult<AccountData>::error(
                 mir2::common::ErrorCode::DATABASE_ERROR, "Failed to acquire connection");
         }
+        PgConnectionGuard guard(*pool_, conn);
 
         pqxx::work txn(*conn);
         pqxx::result result = txn.exec(
@@ -94,7 +100,6 @@ mir2::common::DbResult<AccountData> PostgresDatabase::load_account(const std::st
         account.last_login = row[5].as<int64_t>(0);
         account.banned = row[6].as<bool>(false);
 
-        pool_->Release(conn);
         return mir2::common::DbResult<AccountData>::ok(account);
     } catch (const std::exception& ex) {
         return mir2::common::DbResult<AccountData>::error(
@@ -114,6 +119,7 @@ mir2::common::DbResult<void> PostgresDatabase::create_account(const AccountData&
             return mir2::common::DbResult<void>::error(
                 mir2::common::ErrorCode::DATABASE_ERROR, "Failed to acquire connection");
         }
+        PgConnectionGuard guard(*pool_, conn);
 
         pqxx::work txn(*conn);
         txn.exec(
@@ -122,7 +128,6 @@ mir2::common::DbResult<void> PostgresDatabase::create_account(const AccountData&
             pqxx::params{account.username, account.password_hash, account.email});
         txn.commit();
 
-        pool_->Release(conn);
         return mir2::common::DbResult<void>::ok();
     } catch (const pqxx::unique_violation&) {
         return mir2::common::DbResult<void>::error(
@@ -147,6 +152,7 @@ mir2::common::DbResult<void> PostgresDatabase::save_equipment(uint32_t char_id,
             return mir2::common::DbResult<void>::error(
                 mir2::common::ErrorCode::DATABASE_ERROR, "Failed to acquire connection");
         }
+        PgConnectionGuard guard(*pool_, conn);
 
         pqxx::work txn(*conn);
 
@@ -167,7 +173,6 @@ mir2::common::DbResult<void> PostgresDatabase::save_equipment(uint32_t char_id,
         }
 
         txn.commit();
-        pool_->Release(conn);
         return mir2::common::DbResult<void>::ok();
     } catch (const std::exception& ex) {
         return mir2::common::DbResult<void>::error(
@@ -188,6 +193,7 @@ mir2::common::DbResult<void> PostgresDatabase::save_inventory(uint32_t char_id,
             return mir2::common::DbResult<void>::error(
                 mir2::common::ErrorCode::DATABASE_ERROR, "Failed to acquire connection");
         }
+        PgConnectionGuard guard(*pool_, conn);
 
         pqxx::work txn(*conn);
 
@@ -208,7 +214,6 @@ mir2::common::DbResult<void> PostgresDatabase::save_inventory(uint32_t char_id,
         }
 
         txn.commit();
-        pool_->Release(conn);
         return mir2::common::DbResult<void>::ok();
     } catch (const std::exception& ex) {
         return mir2::common::DbResult<void>::error(
@@ -229,6 +234,7 @@ mir2::common::DbResult<void> PostgresDatabase::save_skills(uint32_t char_id,
             return mir2::common::DbResult<void>::error(
                 mir2::common::ErrorCode::DATABASE_ERROR, "Failed to acquire connection");
         }
+        PgConnectionGuard guard(*pool_, conn);
 
         pqxx::work txn(*conn);
 
@@ -246,7 +252,6 @@ mir2::common::DbResult<void> PostgresDatabase::save_skills(uint32_t char_id,
         }
 
         txn.commit();
-        pool_->Release(conn);
         return mir2::common::DbResult<void>::ok();
     } catch (const std::exception& ex) {
         return mir2::common::DbResult<void>::error(
@@ -298,6 +303,11 @@ mir2::common::DbResult<uint32_t> PostgresDatabase::get_next_character_id() {
     auto result = generate_id("character");
     if (!result) {
         return mir2::common::DbResult<uint32_t>::error(result.error_code, result.error_message);
+    }
+    if (result.value > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        return mir2::common::DbResult<uint32_t>::error(
+            mir2::common::ErrorCode::DATABASE_ERROR,
+            "generated character id exceeds uint32_t range");
     }
     return mir2::common::DbResult<uint32_t>::ok(static_cast<uint32_t>(result.value));
 }

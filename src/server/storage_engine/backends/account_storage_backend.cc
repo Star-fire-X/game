@@ -475,7 +475,7 @@ AccountStorageBackend::LoadAccountByUsername(const std::string& username) {
     account.last_login = row[5].as<int64_t>(0);
     account.banned = row[6].as<bool>(false);
 
-    const uint64_t version = ResolveAccountVersion(account, kDefaultVersion);
+    const uint64_t version = ResolveAccountVersion(account, 0);
     const auto payload = EncodeAccountData(account);
     PutCachedAccount(username, version, payload);
     return std::make_pair(version, payload);

@@ -18,7 +18,9 @@
 #include "ecs/systems/summon_system.h"
 #include "ecs/systems/spatial_query.h"
 #include "game/map/area_trigger.h"
+#include "game/map/map_context_service.h"
 #include "game/map/map_instance.h"
+#include "log/logger.h"
 
 #include <algorithm>
 #include <atomic>
@@ -204,11 +206,32 @@ mir2::common::AmuletType resolve_amulet_type(const ItemComponent& item) {
     return mir2::common::AmuletType::NONE;
 }
 
-mir2::game::map::MapInstance* resolve_map_instance(entt::registry& registry) {
-    if (auto* map_ptr = registry.ctx().find<mir2::game::map::MapInstance*>()) {
-        return *map_ptr;
+mir2::game::map::MapInstance* resolve_map_instance(
+    entt::registry& registry,
+    ::mir2::game::map::MapContextService* map_context_service,
+    bool allow_registry_ctx_fallback) {
+    if (map_context_service) {
+        if (auto* map = map_context_service->GetMap(registry)) {
+            return map;
+        }
     }
-    return nullptr;
+
+    auto* map_ptr = registry.ctx().find<mir2::game::map::MapInstance*>();
+    if (!map_ptr) {
+        return nullptr;
+    }
+
+    if (!allow_registry_ctx_fallback) {
+        static std::atomic<bool> warned{false};
+        const bool should_warn = !warned.exchange(true, std::memory_order_relaxed);
+        if (should_warn) {
+            SYSLOG_WARN(
+                "SkillSystem registry.ctx<MapInstance*> fallback is disabled in production");
+        }
+        return nullptr;
+    }
+
+    return *map_ptr;
 }
 
 bool resolve_entity_position(entt::registry& registry,
@@ -238,8 +261,12 @@ uint32_t next_trap_effect_id() {
 
 }  // namespace
 
-SkillSystem::SkillSystem(entt::registry& registry)
-    : registry_(registry) {}
+SkillSystem::SkillSystem(entt::registry& registry,
+                         ::mir2::game::map::MapContextService* map_context_service,
+                         bool allow_registry_ctx_fallback)
+    : registry_(registry),
+      map_context_service_(map_context_service),
+      allow_registry_ctx_fallback_(allow_registry_ctx_fallback) {}
 
 void SkillSystem::set_event_bus(EventBus* event_bus) {
     event_bus_ = event_bus;
@@ -247,6 +274,11 @@ void SkillSystem::set_event_bus(EventBus* event_bus) {
 
 void SkillSystem::set_effect_broadcaster(EffectBroadcaster* broadcaster) {
     effect_broadcaster_ = broadcaster;
+}
+
+void SkillSystem::set_map_context_service(
+    ::mir2::game::map::MapContextService* map_context_service) {
+    map_context_service_ = map_context_service;
 }
 
 mir2::common::ErrorCode SkillSystem::learn_skill(entt::entity entity, uint32_t skill_id) {
@@ -881,7 +913,8 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
             apply_trap_stun(entity);
         }
 
-        if (auto* map = resolve_map_instance(registry_)) {
+        if (auto* map = resolve_map_instance(
+                registry_, map_context_service_, allow_registry_ctx_fallback_)) {
             const uint32_t effect_id = next_trap_effect_id();
 
             mir2::game::map::ContinuousAreaEffect area_effect;
@@ -928,7 +961,8 @@ void SkillSystem::apply_skill_effect(entt::entity caster,
         const float duration_seconds = static_cast<float>(duration_ms) / 1000.0f;
         const int32_t damage_per_tick = skill.min_power + safe_level * 5;
 
-        if (auto* map = resolve_map_instance(registry_)) {
+        if (auto* map = resolve_map_instance(
+                registry_, map_context_service_, allow_registry_ctx_fallback_)) {
             const uint32_t effect_id = next_trap_effect_id();
 
             mir2::game::map::ContinuousAreaEffect area_effect;

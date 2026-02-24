@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <random>
 #include <string>
 #include <utility>
@@ -24,21 +25,13 @@
 #include "ecs/systems/combat_system.h"
 #include "ecs/systems/inventory_system.h"
 #include "game/guild/guild_manager.h"
-#include "game/map/scroll_teleport.h"
+#include "game/map/map_context_service.h"
 #include "game/map/map_instance.h"
+#include "game/map/scroll_teleport.h"
+#include "log/logger.h"
 
 namespace mir2::game::item {
 namespace {
-
-const map::MapInstance* ResolveMapInstance(entt::registry& registry) {
-  if (auto* map_ptr = registry.ctx().find<map::MapInstance*>()) {
-    return *map_ptr;
-  }
-  if (auto* map_ptr = registry.ctx().find<const map::MapInstance*>()) {
-    return *map_ptr;
-  }
-  return nullptr;
-}
 
 bool HasLearnedSkill(entt::registry& registry,
                      entt::entity character,
@@ -123,9 +116,53 @@ entt::entity FindItemEntity(entt::registry& registry,
 }  // namespace
 
 ItemEffectProcessor::ItemEffectProcessor(entt::registry& registry,
-                                         ecs::EventBus& event_bus)
+                                         ecs::EventBus& event_bus,
+                                         map::MapContextService* map_context_service,
+                                         bool allow_registry_ctx_fallback)
     : registry_(registry),
-      event_bus_(event_bus) {}
+      event_bus_(event_bus),
+      map_context_service_(map_context_service),
+      allow_registry_ctx_fallback_(allow_registry_ctx_fallback) {}
+
+const map::MapInstance* ItemEffectProcessor::ResolveMapInstance(
+    entt::entity character) const {
+  if (map_context_service_) {
+    if (registry_.valid(character)) {
+      if (const auto* state =
+              registry_.try_get<ecs::CharacterStateComponent>(character)) {
+        if (auto* map = map_context_service_->GetMap(state->map_id)) {
+          return map;
+        }
+      }
+    }
+    if (auto* map = map_context_service_->GetMap(registry_)) {
+      return map;
+    }
+  }
+
+  const bool has_ctx_map =
+      registry_.ctx().find<map::MapInstance*>() != nullptr ||
+      registry_.ctx().find<const map::MapInstance*>() != nullptr;
+  if (!allow_registry_ctx_fallback_) {
+    if (has_ctx_map) {
+      static std::atomic<bool> warned{false};
+      const bool should_warn = !warned.exchange(true, std::memory_order_relaxed);
+      if (should_warn) {
+        SYSLOG_WARN("ItemEffectProcessor registry.ctx<MapInstance*> fallback is "
+                    "disabled in production");
+      }
+    }
+    return nullptr;
+  }
+
+  if (auto* map_ptr = registry_.ctx().find<map::MapInstance*>()) {
+    return *map_ptr;
+  }
+  if (auto* map_ptr = registry_.ctx().find<const map::MapInstance*>()) {
+    return *map_ptr;
+  }
+  return nullptr;
+}
 
 bool ItemEffectProcessor::ProcessItemUse(entt::entity character, entt::entity item) {
   if (!registry_.valid(character) || !registry_.valid(item)) {
@@ -163,7 +200,7 @@ bool ItemEffectProcessor::ProcessDrug(entt::entity character,
     return false;
   }
 
-  if (const map::MapInstance* map = ResolveMapInstance(registry_)) {
+  if (const map::MapInstance* map = ResolveMapInstance(character)) {
     if (map->GetAttributes().no_drug) {
       return false;
     }
@@ -464,7 +501,7 @@ bool ItemEffectProcessor::ProcessRandomScroll(entt::entity character) {
     return false;
   }
 
-  const map::MapInstance* map = ResolveMapInstance(registry_);
+  const map::MapInstance* map = ResolveMapInstance(character);
   if (!map) {
     return false;
   }
@@ -516,7 +553,7 @@ bool ItemEffectProcessor::ProcessHomeScroll(entt::entity character) {
     return false;
   }
 
-  const map::MapInstance* map = ResolveMapInstance(registry_);
+  const map::MapInstance* map = ResolveMapInstance(character);
   if (!map) {
     return false;
   }
@@ -550,7 +587,7 @@ bool ItemEffectProcessor::ProcessCastleScroll(entt::entity character) {
     return false;
   }
 
-  const map::MapInstance* map = ResolveMapInstance(registry_);
+  const map::MapInstance* map = ResolveMapInstance(character);
   if (!map) {
     return false;
   }

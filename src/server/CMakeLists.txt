@@ -129,9 +129,11 @@ set(MIR2_SERVER_SOURCES
     ecs/systems/movement_system.cc
     ecs/systems/monster_ai_system.cc
     ecs/systems/monster_drop_system.cc
+    ecs/systems/monster_spawn_system.cc
     ecs/systems/npc_ai_system.cc
     ecs/systems/passive_skill_system.cc
     ecs/systems/pathfinding_helper.cc
+    ecs/systems/pk_system.cc
     ecs/systems/spatial_query.cc
     ecs/systems/skill_system.cc
     ecs/systems/summon_system.cc
@@ -153,6 +155,7 @@ set(MIR2_SERVER_SOURCES
     game/map/area_event_processor.cc
     game/map/door_manager.cc
     game/map/gate_manager.cc
+    game/map/map_context_service.cc
     game/map/map_event_manager.cc
     game/map/map_loader.cc
     game/map/map_instance.cc
@@ -276,7 +279,6 @@ if(LEGEND2_ENABLE_PROMETHEUS)
 endif()
 
 add_executable(mir2_gateway apps/gateway_main.cc)
-target_link_libraries(mir2_gateway PRIVATE mir2_server_lib)
 
 set(LEGEND2_BUILD_DB ${LEGEND2_BUILD_DB} PARENT_SCOPE)
 
@@ -293,10 +295,28 @@ target_link_libraries(mir2_server_lib PUBLIC mir2_storage_engine)
 # target_link_libraries(mir2_server_lib PUBLIC mir2_cache)
 
 add_executable(mir2_logic apps/logic_main.cc)
-target_link_libraries(mir2_logic PRIVATE mir2_server_lib)
 
 add_executable(mir2_dead_letter_replay apps/dead_letter_replay_main.cc)
-target_link_libraries(mir2_dead_letter_replay PRIVATE mir2_storage_engine)
+target_link_libraries(mir2_dead_letter_replay PRIVATE yaml-cpp::yaml-cpp)
+
+# NOTE:
+# mir2_server_lib and mir2_storage_engine have circular static-archive references
+# (storage engine async path depends on coroutine executor symbols from server lib).
+# Repeat mir2_server_lib after mir2_storage_engine to force a second archive scan.
+target_link_libraries(mir2_gateway PRIVATE
+    mir2_server_lib
+    mir2_storage_engine
+    mir2_server_lib
+)
+target_link_libraries(mir2_logic PRIVATE
+    mir2_server_lib
+    mir2_storage_engine
+    mir2_server_lib
+)
+target_link_libraries(mir2_dead_letter_replay PRIVATE
+    mir2_storage_engine
+    mir2_server_lib
+)
 
 if(WIN32)
     target_link_libraries(mir2_server_lib PUBLIC ws2_32 wsock32)

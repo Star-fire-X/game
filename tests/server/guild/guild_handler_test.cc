@@ -492,12 +492,12 @@ TEST_F(GuildHandlerTest, HandleDeclareAndCancelWarSuccess) {
 
   ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(ctx, war_payload.data(), war_payload.size())));
   RunIoContext();
-  EXPECT_TRUE(guild_mgr_->IsAtWar(guild_a, guild_b));
+  EXPECT_TRUE(guild_mgr_->IsAtWar(guild_a, guild_b, registry_));
 
   ctx.msg_id = static_cast<uint16_t>(mir2::proto::GuildMessageType::CANCEL_WAR);
   ASSERT_TRUE(executor_->Spawn(handler_->HandleMessage(ctx, war_payload.data(), war_payload.size())));
   RunIoContext();
-  EXPECT_FALSE(guild_mgr_->IsAtWar(guild_a, guild_b));
+  EXPECT_FALSE(guild_mgr_->IsAtWar(guild_a, guild_b, registry_));
 }
 
 }  // namespace

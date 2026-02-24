@@ -207,12 +207,15 @@ class LogicServerTest : public ::testing::Test {
     ASSERT_TRUE(config_file.good())
         << "Failed to write test config file: " << config_path_;
 
-    const std::filesystem::path combat_config_path =
-        test_artifacts_dir_ / "combat_config.yaml";
+    WriteCombatConfig(/*respawn_map_id=*/0);
+  }
+
+  void WriteCombatConfig(int respawn_map_id) {
+    combat_config_path_ = test_artifacts_dir_ / "combat_config.yaml";
     std::ofstream combat_config_file(
-        combat_config_path.string(), std::ios::out | std::ios::trunc);
+        combat_config_path_.string(), std::ios::out | std::ios::trunc);
     ASSERT_TRUE(combat_config_file.is_open())
-        << "Failed to open combat config file: " << combat_config_path;
+        << "Failed to open combat config file: " << combat_config_path_;
     combat_config_file
         << "combat:\n"
         << "  min_variance_percent: 90\n"
@@ -221,13 +224,13 @@ class LogicServerTest : public ::testing::Test {
         << "  respawn:\n"
         << "    hp_percent: 100\n"
         << "    mp_percent: 100\n"
-        << "    map_id: 0\n"
+        << "    map_id: " << respawn_map_id << "\n"
         << "    position:\n"
         << "      x: 0\n"
         << "      y: 0\n";
     combat_config_file.flush();
     ASSERT_TRUE(combat_config_file.good())
-        << "Failed to write combat config file: " << combat_config_path;
+        << "Failed to write combat config file: " << combat_config_path_;
   }
 
   void CleanupTestConfig() {
@@ -238,6 +241,7 @@ class LogicServerTest : public ::testing::Test {
     std::filesystem::remove_all(test_artifacts_dir_, ec);
     test_artifacts_dir_.clear();
     config_path_.clear();
+    combat_config_path_.clear();
   }
 
   /**
@@ -275,6 +279,7 @@ class LogicServerTest : public ::testing::Test {
   std::unique_ptr<LogicServer> server_;
   std::unique_ptr<MockStorageBackend> mock_storage_;
   std::string config_path_;
+  std::filesystem::path combat_config_path_;
   std::filesystem::path test_artifacts_dir_;
   std::thread server_thread_;
 };
@@ -292,6 +297,11 @@ TEST_F(LogicServerTest, InitializeSucceedsWithValidConfig) {
 TEST_F(LogicServerTest, InitializeFailsWithInvalidConfig) {
   server_ = std::make_unique<LogicServer>();
   EXPECT_FALSE(server_->Initialize("nonexistent_config.yaml"));
+}
+
+TEST_F(LogicServerTest, InitializeFailsWhenDefaultMapBootstrapFails) {
+  WriteCombatConfig(/*respawn_map_id=*/65535);
+  EXPECT_FALSE(InitializeServer());
 }
 
 /**

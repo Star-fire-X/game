@@ -500,7 +500,7 @@ TEST_F(GuildSystemTest, DeclareWar_Success) {
   const int result = guild_system_->DeclareWar(*registry_, leader1, guild2);
   EXPECT_EQ(result, 0);
 
-  EXPECT_TRUE(guild_mgr_->IsAtWar(guild1, guild2));
+  EXPECT_TRUE(guild_mgr_->IsAtWar(guild1, guild2, *registry_));
   const auto& attributes = registry_->get<CharacterAttributesComponent>(leader1);
   EXPECT_EQ(attributes.gold,
             initial_gold - static_cast<int>(GUILD_CREATE_FEE) -
@@ -522,7 +522,7 @@ TEST_F(GuildSystemTest, DeclareWar_NotLeader) {
 
   const int result = guild_system_->DeclareWar(*registry_, member, enemy_guild_id);
   EXPECT_EQ(result, -1);
-  EXPECT_FALSE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id));
+  EXPECT_FALSE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id, *registry_));
 }
 
 TEST_F(GuildSystemTest, DeclareWar_InsufficientGold) {
@@ -541,7 +541,7 @@ TEST_F(GuildSystemTest, DeclareWar_InsufficientGold) {
   const int result =
       guild_system_->DeclareWar(*registry_, leader, enemy_guild_id);
   EXPECT_EQ(result, -2);
-  EXPECT_FALSE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id));
+  EXPECT_FALSE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id, *registry_));
 
   const auto& attributes = registry_->get<CharacterAttributesComponent>(leader);
   EXPECT_EQ(attributes.gold,
@@ -559,11 +559,11 @@ TEST_F(GuildSystemTest, DeclareWar_AllyBlocked) {
   ASSERT_NE(guild2, 0u);
 
   ASSERT_EQ(guild_system_->MakeAlliance(*registry_, leader1, guild2), 0);
-  EXPECT_TRUE(guild_mgr_->IsAllied(guild1, guild2));
+  EXPECT_TRUE(guild_mgr_->IsAllied(guild1, guild2, *registry_));
 
   const int result = guild_system_->DeclareWar(*registry_, leader1, guild2);
   EXPECT_EQ(result, -4);
-  EXPECT_FALSE(guild_mgr_->IsAtWar(guild1, guild2));
+  EXPECT_FALSE(guild_mgr_->IsAtWar(guild1, guild2, *registry_));
 }
 
 TEST_F(GuildSystemTest, CancelWar_Success) {
@@ -577,10 +577,10 @@ TEST_F(GuildSystemTest, CancelWar_Success) {
   ASSERT_NE(guild2, 0u);
 
   ASSERT_EQ(guild_system_->DeclareWar(*registry_, leader1, guild2), 0);
-  EXPECT_TRUE(guild_mgr_->IsAtWar(guild1, guild2));
+  EXPECT_TRUE(guild_mgr_->IsAtWar(guild1, guild2, *registry_));
 
   EXPECT_TRUE(guild_system_->CancelWar(*registry_, leader1, guild2));
-  EXPECT_FALSE(guild_mgr_->IsAtWar(guild1, guild2));
+  EXPECT_FALSE(guild_mgr_->IsAtWar(guild1, guild2, *registry_));
 }
 
 TEST_F(GuildSystemTest, CancelWar_NotLeader) {
@@ -596,10 +596,10 @@ TEST_F(GuildSystemTest, CancelWar_NotLeader) {
   ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member, guild_id));
 
   ASSERT_EQ(guild_system_->DeclareWar(*registry_, leader, enemy_guild_id), 0);
-  EXPECT_TRUE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id));
+  EXPECT_TRUE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id, *registry_));
 
   EXPECT_FALSE(guild_system_->CancelWar(*registry_, member, enemy_guild_id));
-  EXPECT_TRUE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id));
+  EXPECT_TRUE(guild_mgr_->IsAtWar(guild_id, enemy_guild_id, *registry_));
 }
 
 TEST_F(GuildSystemTest, MakeAlliance_Success) {
@@ -614,7 +614,7 @@ TEST_F(GuildSystemTest, MakeAlliance_Success) {
 
   const int result = guild_system_->MakeAlliance(*registry_, leader1, guild2);
   EXPECT_EQ(result, 0);
-  EXPECT_TRUE(guild_mgr_->IsAllied(guild1, guild2));
+  EXPECT_TRUE(guild_mgr_->IsAllied(guild1, guild2, *registry_));
 
   auto* guild = GetGuild(guild1);
   ASSERT_NE(guild, nullptr);
@@ -632,10 +632,10 @@ TEST_F(GuildSystemTest, BreakAlliance_Success) {
   ASSERT_NE(guild2, 0u);
 
   ASSERT_EQ(guild_system_->MakeAlliance(*registry_, leader1, guild2), 0);
-  EXPECT_TRUE(guild_mgr_->IsAllied(guild1, guild2));
+  EXPECT_TRUE(guild_mgr_->IsAllied(guild1, guild2, *registry_));
 
   EXPECT_TRUE(guild_system_->BreakAlliance(*registry_, leader1, guild2));
-  EXPECT_FALSE(guild_mgr_->IsAllied(guild1, guild2));
+  EXPECT_FALSE(guild_mgr_->IsAllied(guild1, guild2, *registry_));
 }
 
 TEST_F(GuildSystemTest, BreakAlliance_NotLeader) {
@@ -651,10 +651,10 @@ TEST_F(GuildSystemTest, BreakAlliance_NotLeader) {
   ASSERT_TRUE(guild_system_->JoinGuild(*registry_, member, guild_id));
 
   ASSERT_EQ(guild_system_->MakeAlliance(*registry_, leader, ally_guild_id), 0);
-  EXPECT_TRUE(guild_mgr_->IsAllied(guild_id, ally_guild_id));
+  EXPECT_TRUE(guild_mgr_->IsAllied(guild_id, ally_guild_id, *registry_));
 
   EXPECT_FALSE(guild_system_->BreakAlliance(*registry_, member, ally_guild_id));
-  EXPECT_TRUE(guild_mgr_->IsAllied(guild_id, ally_guild_id));
+  EXPECT_TRUE(guild_mgr_->IsAllied(guild_id, ally_guild_id, *registry_));
 }
 
 TEST_F(GuildSystemTest, MakeAlliance_AtWar) {
@@ -668,11 +668,11 @@ TEST_F(GuildSystemTest, MakeAlliance_AtWar) {
   ASSERT_NE(guild2, 0u);
 
   ASSERT_TRUE(guild_mgr_->DeclareWar(guild1, guild2, *registry_));
-  EXPECT_TRUE(guild_mgr_->IsAtWar(guild1, guild2));
+  EXPECT_TRUE(guild_mgr_->IsAtWar(guild1, guild2, *registry_));
 
   const int result = guild_system_->MakeAlliance(*registry_, leader1, guild2);
   EXPECT_EQ(result, -3);
-  EXPECT_FALSE(guild_mgr_->IsAllied(guild1, guild2));
+  EXPECT_FALSE(guild_mgr_->IsAllied(guild1, guild2, *registry_));
 }
 
 TEST_F(GuildSystemTest, TransferLeadership_Success) {

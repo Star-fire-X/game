@@ -22,7 +22,9 @@
 #include "ecs/events/map_events.h"
 #include "game/guild/guild_manager.h"
 #include "game/item/item_effect_processor.h"
+#include "game/map/map_context_service.h"
 #include "game/map/map_instance.h"
+#include "game/map/scene_manager.h"
 
 namespace {
 
@@ -43,7 +45,9 @@ using mir2::ecs::events::SkillLearnedEvent;
 using mir2::ecs::events::TeleportRequestEvent;
 using mir2::game::item::ItemEffectProcessor;
 using mir2::game::map::MapAttributes;
+using mir2::game::map::MapContextService;
 using mir2::game::map::MapInstance;
+using mir2::game::map::SceneManager;
 
 std::filesystem::path GetItemEffectItemsPath() {
 #ifdef MIR2_TEST_DATA_DIR
@@ -236,6 +240,85 @@ TEST_F(ItemEffectProcessorTest, ProcessScrollHomeScrollPublishesTeleportEvent) {
     EXPECT_EQ(captured.target_map_id, 0);
     EXPECT_EQ(captured.target_x, 10);
     EXPECT_EQ(captured.target_y, 15);
+}
+
+TEST_F(ItemEffectProcessorTest, ProcessScrollHomeScrollUsesInjectedMapContextService) {
+    entt::registry registry;
+    mir2::ecs::EventBus event_bus(registry);
+
+    SceneManager scene_manager;
+    SceneManager::MapConfig map_config;
+    map_config.map_id = 0;
+    map_config.width = 10;
+    map_config.height = 10;
+    map_config.load_walkability = false;
+    auto* map_instance = scene_manager.GetOrCreateMap(map_config);
+    ASSERT_NE(map_instance, nullptr);
+
+    MapAttributes attrs;
+    attrs.home_map = "0";
+    attrs.home_x = 10;
+    attrs.home_y = 15;
+    map_instance->SetAttributes(attrs);
+
+    MapContextService map_context_service(scene_manager);
+    map_context_service.BindRegistry(registry, /*map_id=*/0);
+
+    const auto character = CreateCharacter(registry);
+    auto& state = registry.get<CharacterStateComponent>(character);
+    state.map_id = 0;
+    state.is_in_activity = false;
+    auto& attributes = registry.get<CharacterAttributesComponent>(character);
+    attributes.pk_level = 0;
+
+    TeleportRequestEvent captured{};
+    int event_count = 0;
+    event_bus.Subscribe<TeleportRequestEvent>([&](TeleportRequestEvent& event) {
+        captured = event;
+        ++event_count;
+    });
+
+    const auto item = CreateItem(registry, character, 2101u, 1,
+                                 mir2::common::item_std_mode::kScroll);
+
+    ItemEffectProcessor processor(registry,
+                                  event_bus,
+                                  &map_context_service,
+                                  /*allow_registry_ctx_fallback=*/false);
+    EXPECT_TRUE(processor.ProcessItemUse(character, item));
+    EXPECT_EQ(event_count, 1);
+    EXPECT_EQ(captured.target_map_id, 0);
+    EXPECT_EQ(captured.target_x, 10);
+    EXPECT_EQ(captured.target_y, 15);
+}
+
+TEST_F(ItemEffectProcessorTest, ProcessScrollRejectsRegistryCtxFallbackWhenDisabled) {
+    entt::registry registry;
+    mir2::ecs::EventBus event_bus(registry);
+
+    MapInstance map_instance(0, 10, 10);
+    MapAttributes attrs;
+    attrs.home_map = "0";
+    attrs.home_x = 10;
+    attrs.home_y = 15;
+    map_instance.SetAttributes(attrs);
+    registry.ctx().emplace<MapInstance*>(&map_instance);
+
+    const auto character = CreateCharacter(registry);
+    auto& state = registry.get<CharacterStateComponent>(character);
+    state.map_id = 0;
+    state.is_in_activity = false;
+    auto& attributes = registry.get<CharacterAttributesComponent>(character);
+    attributes.pk_level = 0;
+
+    const auto item = CreateItem(registry, character, 2101u, 1,
+                                 mir2::common::item_std_mode::kScroll);
+
+    ItemEffectProcessor processor(registry,
+                                  event_bus,
+                                  /*map_context_service=*/nullptr,
+                                  /*allow_registry_ctx_fallback=*/false);
+    EXPECT_FALSE(processor.ProcessItemUse(character, item));
 }
 
 TEST_F(ItemEffectProcessorTest, ProcessScrollRandomScrollPublishesTeleportEvent) {

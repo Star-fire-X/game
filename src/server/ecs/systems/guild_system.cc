@@ -665,11 +665,11 @@ int GuildSystem::DeclareWar(entt::registry& registry, entt::entity player,
         return -3;
     }
 
-    if (guild_mgr_.IsAllied(member->guild_id, target_guild_id)) {
+    if (guild_mgr_.IsAllied(member->guild_id, target_guild_id, registry)) {
         return -4;
     }
 
-    if (guild_mgr_.IsAtWar(member->guild_id, target_guild_id)) {
+    if (guild_mgr_.IsAtWar(member->guild_id, target_guild_id, registry)) {
         return 0;
     }
 
@@ -739,7 +739,7 @@ int GuildSystem::MakeAlliance(entt::registry& registry, entt::entity player,
         return -2;
     }
 
-    if (guild_mgr_.IsAtWar(member->guild_id, target_guild_id)) {
+    if (guild_mgr_.IsAtWar(member->guild_id, target_guild_id, registry)) {
         return -3;
     }
 

@@ -59,6 +59,7 @@ class PgConnectionPool;
 namespace mir2::game::map {
 class AOIManager;
 class SceneManager;
+class MapContextService;
 }  // namespace mir2::game::map
 
 namespace mir2::logic {
@@ -147,6 +148,9 @@ class LogicServer {
   void OnSignal(const asio::error_code& ec, int signal);
   void RequestStop();
   void Tick(float delta_time);
+  uint32_t ResolveDefaultMapId() const;
+  bool BootstrapMapRuntime(uint32_t default_map_id);
+  bool BindWorldMapContext(uint32_t map_id, ecs::World& world, bool require_map);
   WorldSystemBundle& EnsureWorldSystems(uint32_t map_id, ecs::World& world);
   void TickWorldSystems(ecs::World& world,
                         WorldSystemBundle& bundle,
@@ -237,6 +241,7 @@ class LogicServer {
   game::map::GateManager gate_manager_;
   ecs::RegistryManager* registry_manager_ = nullptr;
   std::unique_ptr<game::map::SceneManager> scene_manager_;
+  std::unique_ptr<game::map::MapContextService> map_context_service_;
   std::unordered_map<uint32_t, std::unique_ptr<WorldSystemBundle>> world_systems_;
   std::string config_path_;
   std::unique_ptr<asio::steady_timer> tick_timer_;
@@ -282,6 +287,7 @@ class LogicServer {
   bool legacy_fallback_allow_auth_whitelist_ = true;
   bool legacy_fallback_allow_critical_msgs_ = true;
   bool legacy_fallback_allow_normal_msgs_ = false;
+  bool queue_full_fallback_non_best_effort_enabled_ = true;
   bool chat_batch_send_enabled_ = true;
   uint32_t backpressure_pause_ms_ = 100;
   int64_t backpressure_signal_cooldown_ms_ = 100;

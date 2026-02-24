@@ -46,15 +46,19 @@ class GuildManager : public core::Singleton<GuildManager> {
                   entt::registry& registry);
   bool CancelWar(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                  entt::registry& registry);
-  bool IsAtWar(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const;
+  bool IsAtWar(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
+               entt::registry& registry) const;
   bool MakeAlliance(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                     entt::registry& registry);
   bool BreakAlliance(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
                      entt::registry& registry);
-  bool IsAllied(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const;
-  int GetGuildRelation(ecs::GuildId guild1_id, ecs::GuildId guild2_id) const;
+  bool IsAllied(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
+                entt::registry& registry) const;
+  int GetGuildRelation(ecs::GuildId guild1_id, ecs::GuildId guild2_id,
+                       entt::registry& registry) const;
   uint8_t GetMemberColor(ecs::GuildId viewer_guild_id,
-                         ecs::GuildId target_guild_id) const;
+                         ecs::GuildId target_guild_id,
+                         entt::registry& registry) const;
   ecs::GuildId GenerateGuildId();
   size_t GuildCount() const;
 

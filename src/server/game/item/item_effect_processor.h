@@ -15,11 +15,20 @@ class EventBus;
 struct ItemComponent;
 }  // namespace mir2::ecs
 
+namespace mir2::game::map {
+class MapContextService;
+class MapInstance;
+}  // namespace mir2::game::map
+
 namespace mir2::game::item {
 
 class ItemEffectProcessor {
  public:
-  explicit ItemEffectProcessor(entt::registry& registry, ecs::EventBus& event_bus);
+  explicit ItemEffectProcessor(
+      entt::registry& registry,
+      ecs::EventBus& event_bus,
+      map::MapContextService* map_context_service = nullptr,
+      bool allow_registry_ctx_fallback = true);
 
   // 处理物品使用效果，返回是否消耗物品
  bool ProcessItemUse(entt::entity character, entt::entity item);
@@ -37,9 +46,12 @@ class ItemEffectProcessor {
   bool ProcessLottery(entt::entity character, const ecs::ItemComponent& item);
   bool ProcessBlessOil(entt::entity character);
   bool ProcessRepairOil(entt::entity character, bool perfect);
+  const map::MapInstance* ResolveMapInstance(entt::entity character) const;
 
   entt::registry& registry_;
   ecs::EventBus& event_bus_;
+  map::MapContextService* map_context_service_ = nullptr;
+  bool allow_registry_ctx_fallback_ = true;
   uint32_t active_scroll_item_id_ = 0;
 };
 

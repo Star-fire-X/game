@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cctype>
 #include <csignal>
+#include <exception>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <optional>
@@ -19,6 +21,7 @@
 #include "common/internal_message_helper.h"
 #include "common/protocol/message_codec.h"
 #include "config/config_manager.h"
+#include "config/map_config_loader.h"
 #include "core/utils.h"
 #include "storage_engine/backends/account_storage_backend.h"
 #include "storage_engine/backends/storage_engine_backend.h"
@@ -77,6 +80,8 @@
 #include "ecs/systems/guild_system.h"
 #include "game/guild/guild_manager.h"
 #include "game/map/aoi_manager.h"
+#include "game/map/map_context_service.h"
+#include "game/map/map_instance.h"
 #include "guild_generated.h"
 #include "chat_generated.h"
 #include "game/map/scene_manager.h"
@@ -91,8 +96,6 @@ WorldSystemBundle& WorldSystemBundle::operator=(WorldSystemBundle&&) noexcept = 
 
 namespace {
 constexpr uint16_t kMetricsPort = 9091;
-constexpr uint32_t kDefaultChatAoiWidth = 1024;
-constexpr uint32_t kDefaultChatAoiHeight = 1024;
 constexpr const char* kMonsterDropTablePath = "config/tables/monsters.yaml";
 constexpr size_t kBackpressureStateMaxEntries = 8192;
 constexpr size_t kBackpressurePruneBatchSize = 256;
@@ -138,6 +141,18 @@ constexpr const char* kMetricTickDurationMs = "logic.tick.duration_ms";
 constexpr const char* kMetricTickIntervalConfiguredMs =
     "logic.tick.interval_ms.configured";
 constexpr const char* kMetricTickOverrunTotal = "logic.tick.overrun_total";
+constexpr const char* kMetricTickPhaseHotEventMs = "logic.tick.phase.hot_event_ms";
+constexpr const char* kMetricTickPhaseZombieScanMs =
+    "logic.tick.phase.zombie_scan_ms";
+constexpr const char* kMetricTickPhaseEcsWorldSystemsMs =
+    "logic.tick.phase.ecs_world_systems_ms";
+constexpr const char* kMetricTickPhaseEcsRegistryUpdateMs =
+    "logic.tick.phase.ecs_registry_update_ms";
+constexpr const char* kMetricTickPhaseCharacterUpdateMs =
+    "logic.tick.phase.character_update_ms";
+constexpr const char* kMetricTickPhaseNetworkTickMs =
+    "logic.tick.phase.network_tick_ms";
+constexpr const char* kMetricTickPhaseHungScanMs = "logic.tick.phase.hung_scan_ms";
 constexpr const char* kMetricHotDrainBudgetHitTotal =
     "logic.hot_event.drain_budget_hit_total";
 constexpr const char* kMetricPrewarmSpawnRejectedNotAcceptingTotal =
@@ -189,6 +204,12 @@ std::string ToLowerAscii(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
   return value;
+}
+
+double DurationMs(std::chrono::steady_clock::duration duration) {
+  return static_cast<double>(
+             std::chrono::duration_cast<std::chrono::microseconds>(duration).count()) /
+         1000.0;
 }
 
 bool IsAuthWhitelistedMsgId(uint16_t msg_id) {
@@ -416,6 +437,127 @@ LogicServer::~LogicServer() {
   Shutdown();
 }
 
+uint32_t LogicServer::ResolveDefaultMapId() const {
+  uint32_t default_map_id = 1;
+  const auto& combat_config = config::ConfigManager::Instance().GetCombatConfig();
+  if (combat_config.default_respawn_map_id != 0) {
+    default_map_id = combat_config.default_respawn_map_id;
+  }
+  return default_map_id;
+}
+
+bool LogicServer::BindWorldMapContext(uint32_t map_id,
+                                      ecs::World& world,
+                                      bool require_map) {
+  if (!scene_manager_) {
+    SYSLOG_ERROR("LogicServer BindWorldMapContext failed: scene manager missing");
+    return false;
+  }
+
+  auto* map = scene_manager_->GetMap(static_cast<int32_t>(map_id));
+  if (!map) {
+    if (require_map) {
+      SYSLOG_ERROR("LogicServer BindWorldMapContext failed: map {} not loaded", map_id);
+      return false;
+    }
+    return false;
+  }
+
+  map->SetEventBus(&world.GetEventBus());
+  world.Registry().ctx().insert_or_assign<game::map::MapInstance*>(std::move(map));
+  if (map_context_service_) {
+    map_context_service_->BindRegistry(world.Registry(), map_id);
+  }
+  return true;
+}
+
+bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
+  if (!registry_manager_ || !scene_manager_) {
+    SYSLOG_ERROR("LogicServer map runtime bootstrap failed: managers not ready");
+    return false;
+  }
+  if (!map_context_service_) {
+    map_context_service_ =
+        std::make_unique<game::map::MapContextService>(*scene_manager_);
+  }
+
+  std::filesystem::path map_table_dir = std::filesystem::path("config") / "tables";
+  const std::filesystem::path config_dir =
+      std::filesystem::path(config_path_).parent_path();
+  if (!config_dir.empty()) {
+    map_table_dir = config_dir / "tables";
+  }
+
+  const auto map_configs =
+      config::MapConfigLoader::LoadAllMapConfigs(map_table_dir.string());
+  std::unordered_set<uint32_t> prepared_maps;
+  prepared_maps.reserve(map_configs.size() + 1);
+
+  for (const auto& map_config : map_configs) {
+    if (map_config.map_id < 0) {
+      continue;
+    }
+
+    const uint32_t map_id = static_cast<uint32_t>(map_config.map_id);
+    if (!prepared_maps.insert(map_id).second) {
+      continue;
+    }
+
+    ecs::World* world = registry_manager_->CreateWorld(map_id);
+    if (!world) {
+      SYSLOG_WARN("LogicServer map runtime bootstrap skipped map {}: world init failed",
+                  map_id);
+      continue;
+    }
+
+    game::map::SceneManager::MapConfig scene_config;
+    scene_config.map_id = map_config.map_id;
+    scene_config.fixes = map_config.fixes;
+    if (!scene_manager_->GetOrCreateMap(scene_config)) {
+      SYSLOG_WARN("LogicServer map runtime bootstrap skipped map {}: scene init failed",
+                  map_id);
+      continue;
+    }
+
+    (void)BindWorldMapContext(map_id, *world, false);
+  }
+
+  ecs::World* default_world = registry_manager_->CreateWorld(default_map_id);
+  if (!default_world) {
+    SYSLOG_ERROR("LogicServer map runtime bootstrap failed: default world {} init failed",
+                 default_map_id);
+    return false;
+  }
+
+  if (prepared_maps.find(default_map_id) == prepared_maps.end()) {
+    game::map::SceneManager::MapConfig default_scene_config;
+    default_scene_config.map_id = static_cast<int32_t>(default_map_id);
+    if (!scene_manager_->GetOrCreateMap(default_scene_config)) {
+      SYSLOG_ERROR(
+          "LogicServer map runtime bootstrap failed: default map {} init failed",
+          default_map_id);
+      return false;
+    }
+  }
+
+  if (!BindWorldMapContext(default_map_id, *default_world, true)) {
+    return false;
+  }
+
+  gate_manager_.LoadFromConfig("config/gates.yaml");
+
+  size_t world_count = 0;
+  registry_manager_->ForEachWorld([&world_count](uint32_t /*map_id*/, ecs::World& /*world*/) {
+    ++world_count;
+  });
+
+  SYSLOG_INFO("LogicServer map runtime bootstrapped default_map_id={} maps={} worlds={}",
+              default_map_id,
+              scene_manager_->MapCount(),
+              world_count);
+  return true;
+}
+
 bool LogicServer::Initialize(const std::string& config_path) {
   if (shutdown_called_.load(std::memory_order_acquire)) {
     SYSLOG_ERROR("LogicServer Initialize rejected: server instance already shutdown");
@@ -530,14 +672,17 @@ bool LogicServer::Initialize(const std::string& config_path) {
       server_config.legacy_fallback_allow_critical_msgs;
   legacy_fallback_allow_normal_msgs_ =
       server_config.legacy_fallback_allow_normal_msgs;
+  queue_full_fallback_non_best_effort_enabled_ =
+      server_config.queue_full_fallback_non_best_effort_enabled;
   chat_batch_send_enabled_ = server_config.chat_batch_send_enabled;
   SYSLOG_INFO(
       "LogicServer legacy fallback policy enabled={} allow_auth_whitelist={} "
-      "allow_critical={} allow_normal={}",
+      "allow_critical={} allow_normal={} queue_full_non_best_effort_enabled={}",
       legacy_fallback_enabled_,
       legacy_fallback_allow_auth_whitelist_,
       legacy_fallback_allow_critical_msgs_,
-      legacy_fallback_allow_normal_msgs_);
+      legacy_fallback_allow_normal_msgs_,
+      queue_full_fallback_non_best_effort_enabled_);
   SYSLOG_INFO("LogicServer chat batch send enabled={}", chat_batch_send_enabled_);
 
   if (!app_.Initialize(server_config)) {
@@ -545,11 +690,25 @@ bool LogicServer::Initialize(const std::string& config_path) {
     return false;
   }
 
-  if (server_config.metrics_port != 0 && server_config.metrics_port != kMetricsPort) {
-    SYSLOG_WARN("LogicServer metrics port overridden to {} (config={})",
-                kMetricsPort, server_config.metrics_port);
+  if (server_config.metrics_port == 0) {
+    SYSLOG_INFO("LogicServer metrics disabled by config (metrics_port=0)");
+  } else {
+    if (server_config.metrics_port != kMetricsPort) {
+      SYSLOG_WARN("LogicServer metrics port overridden to {} (config={})",
+                  kMetricsPort,
+                  server_config.metrics_port);
+    }
+    try {
+      monitor::Metrics::Instance().Init(kMetricsPort);
+    } catch (const std::exception& ex) {
+      SYSLOG_WARN("LogicServer metrics init failed on port {}: {}",
+                  kMetricsPort,
+                  ex.what());
+    } catch (...) {
+      SYSLOG_WARN("LogicServer metrics init failed on port {}: unknown exception",
+                  kMetricsPort);
+    }
   }
-  monitor::Metrics::Instance().Init(kMetricsPort);
   monitor::Metrics::Instance().SetGauge(monitor::Metrics::kMailboxPendingEvents, 0);
   monitor::Metrics::Instance().SetGauge(monitor::Metrics::kMailboxActiveRunners, 0);
   monitor::Metrics::Instance().SetGauge(
@@ -577,6 +736,16 @@ bool LogicServer::Initialize(const std::string& config_path) {
   registry_manager_ = &ecs::RegistryManager::Instance();
   if (!scene_manager_) {
     scene_manager_ = std::make_unique<game::map::SceneManager>();
+  }
+  if (!map_context_service_) {
+    map_context_service_ =
+        std::make_unique<game::map::MapContextService>(*scene_manager_);
+  }
+
+  const uint32_t default_map_id = ResolveDefaultMapId();
+  if (!BootstrapMapRuntime(default_map_id)) {
+    SYSLOG_ERROR("LogicServer map runtime bootstrap failed");
+    return false;
   }
 
   network_ = std::make_unique<network::NetworkManager>(app_.GetIoContext());
@@ -901,6 +1070,7 @@ void LogicServer::Shutdown() {
 
   world_systems_.clear();
   scene_manager_.reset();
+  map_context_service_.reset();
   registry_manager_ = nullptr;
 
   app_.ReleaseWorkGuard();
@@ -983,7 +1153,11 @@ void LogicServer::OnTick(const asio::error_code& ec) {
     monitor::Metrics::Instance().IncrementCounter(kMetricTickOverrunTotal);
   }
 
+  const auto hung_scan_start = std::chrono::steady_clock::now();
   MaybeScanHungCoroutines(now);
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseHungScanMs,
+      DurationMs(std::chrono::steady_clock::now() - hung_scan_start));
 
   next_tick_time_ += tick_interval_;
   if (next_tick_time_ < now) {
@@ -1108,11 +1282,35 @@ void LogicServer::RegisterHandlers() {
     login_service_ = std::make_unique<StorageLoginService>(*executor_, nullptr);
   }
   if (executor_ && response_sender_ && login_service_ && role_store_ && !login_handler_) {
+    const auto& server_config = config::ConfigManager::Instance().GetServerConfig();
+    const int configured_capacity = server_config.login_username_rate_limit_capacity;
+    const int configured_refill_rate = server_config.login_username_rate_limit_refill_rate;
+    const int configured_refill_interval =
+        server_config.login_username_rate_limit_refill_interval_seconds;
+    const mir2::security::RateLimiter::Config login_rate_limit_config{
+        .capacity = std::max(1, configured_capacity),
+        .refill_rate = std::max(1, configured_refill_rate),
+        .refill_interval_seconds = std::max(1, configured_refill_interval)};
+    if (configured_capacity <= 0 ||
+        configured_refill_rate <= 0 ||
+        configured_refill_interval <= 0) {
+      SYSLOG_WARN(
+          "LogicServer invalid login username rate limit config "
+          "(capacity={}, refill_rate={}, refill_interval_seconds={}), "
+          "clamped to (capacity={}, refill_rate={}, refill_interval_seconds={})",
+          configured_capacity,
+          configured_refill_rate,
+          configured_refill_interval,
+          login_rate_limit_config.capacity,
+          login_rate_limit_config.refill_rate,
+          login_rate_limit_config.refill_interval_seconds);
+    }
     login_handler_ = std::make_unique<LoginHandler>(*executor_,
                                                     *response_sender_,
                                                     *login_service_,
                                                     client_registry_,
-                                                    *role_store_);
+                                                    *role_store_,
+                                                    login_rate_limit_config);
   }
   if (response_sender_ && registry_manager_ && role_store_ && !character_handler_) {
     auto& character_manager = registry_manager_->GetCharacterManager();
@@ -1124,18 +1322,19 @@ void LogicServer::RegisterHandlers() {
                                                               TriggerImmediateStateSync(player_id);
                                                             });
   }
-  uint32_t default_map_id = 1;
-  const auto& combat_config = config::ConfigManager::Instance().GetCombatConfig();
-  if (combat_config.default_respawn_map_id != 0) {
-    default_map_id = combat_config.default_respawn_map_id;
-  }
+  const uint32_t default_map_id = ResolveDefaultMapId();
 
   ecs::World* default_world = nullptr;
   entt::registry* default_registry = nullptr;
   ecs::TeleportSystem* teleport_system = nullptr;
   if (registry_manager_) {
-    default_world = registry_manager_->CreateWorld(default_map_id);
+    default_world = registry_manager_->GetWorld(default_map_id);
     if (default_world) {
+      if (!BindWorldMapContext(default_map_id, *default_world, true)) {
+        SYSLOG_ERROR("LogicServer failed to bind world runtime for default_map_id={}",
+                     default_map_id);
+        return;
+      }
       default_registry = &default_world->Registry();
       if (!guild_system_) {
         guild_system_ = default_world->CreateSystem<ecs::GuildSystem>(
@@ -1144,6 +1343,9 @@ void LogicServer::RegisterHandlers() {
       }
       auto& bundle = EnsureWorldSystems(default_map_id, *default_world);
       teleport_system = bundle.teleport_system;
+    } else {
+      SYSLOG_ERROR("LogicServer missing default world map_id={}", default_map_id);
+      return;
     }
   }
 
@@ -1154,14 +1356,8 @@ void LogicServer::RegisterHandlers() {
     }
   }
   if (!chat_aoi) {
-    if (!chat_aoi_manager_) {
-      chat_aoi_manager_ = std::make_unique<game::map::AOIManager>(
-          static_cast<int32_t>(kDefaultChatAoiWidth),
-          static_cast<int32_t>(kDefaultChatAoiHeight),
-          game::map::AOIManager::kDefaultGridSize);
-    }
-    chat_aoi = chat_aoi_manager_.get();
-    SYSLOG_WARN("LogicServer using fallback AOI manager for chat");
+    SYSLOG_ERROR("LogicServer missing default map AOI manager map_id={}", default_map_id);
+    return;
   }
 
   if (executor_ && response_sender_ && ecs_inventory_service_ && !item_handler_) {
@@ -2451,6 +2647,15 @@ void LogicServer::ScanZombieSessions(int64_t now_ms) {
     if (it == client_last_activity_ms_.end()) {
       continue;
     }
+    if (now_ms < it->second) {
+      SYSLOG_WARN(
+          "LogicServer zombie scan skipped client due to non-monotonic activity time "
+          "(client_id={}, now_ms={}, last_activity_ms={})",
+          client_id,
+          now_ms,
+          it->second);
+      continue;
+    }
     if (now_ms - it->second < zombie_idle_timeout_ms_) {
       continue;
     }
@@ -2523,7 +2728,8 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
     SYSLOG_ERROR("LogicServer failed to parse routed message");
     return;
   }
-  MarkClientActivity(routed.client_id, network::TcpSession::NowMs());
+  // Keep activity timestamps in the same clock domain as zombie detection.
+  MarkClientActivity(routed.client_id, mir2::core::GetCurrentTimestampMs());
 
   if (routed.msg_id == static_cast<uint16_t>(common::MsgId::kLoginReq)) {
     common::LoginRequest login_request;
@@ -2594,7 +2800,10 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
   }
 
   if (enqueue_result == events::HotEventPipeline::EnqueueResult::kQueueFull) {
-    if (ShouldFallbackOnQueueFull(routed.msg_id)) {
+    const bool should_fallback =
+        queue_full_fallback_non_best_effort_enabled_ &&
+        ShouldFallbackOnQueueFull(routed.msg_id);
+    if (should_fallback) {
       monitor::Metrics::Instance().IncrementCounter(kMetricQueueFullFallbackTotal);
       SYSLOG_WARN("LogicServer hot queue full, fallback to legacy dispatch "
                   "msg_id={} client_id={}",
@@ -3145,6 +3354,8 @@ void LogicServer::RequestStop() {
 
 WorldSystemBundle& LogicServer::EnsureWorldSystems(uint32_t map_id,
                                                    ecs::World& world) {
+  (void)BindWorldMapContext(map_id, world, false);
+
   auto& bundle = world_systems_[map_id];
   if (!bundle) {
     bundle = std::make_unique<WorldSystemBundle>();
@@ -3172,7 +3383,10 @@ WorldSystemBundle& LogicServer::EnsureWorldSystems(uint32_t map_id,
   }
 
   if (!bundle->skill_system) {
-    auto skill_system = std::make_unique<ecs::SkillSystem>(world.Registry());
+    auto skill_system = std::make_unique<ecs::SkillSystem>(
+        world.Registry(),
+        map_context_service_.get(),
+        false);
     skill_system->set_event_bus(&world.GetEventBus());
     bundle->skill_system = std::move(skill_system);
   }
@@ -3230,6 +3444,7 @@ void LogicServer::Tick(float delta_time) {
         static_cast<double>(entity_lane_scheduler_->PendingWaiters()));
   }
 
+  const auto hot_event_start = std::chrono::steady_clock::now();
   if (hot_event_pipeline_) {
     std::size_t drained = 0;
     std::vector<events::HotEvent> drained_events;
@@ -3257,23 +3472,57 @@ void LogicServer::Tick(float delta_time) {
     DispatchHotEventsBatch(std::move(drained_events));
     hot_event_pipeline_->ObserveDrain(drained);
   }
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseHotEventMs,
+      DurationMs(std::chrono::steady_clock::now() - hot_event_start));
 
+  const auto zombie_scan_start = std::chrono::steady_clock::now();
   const int64_t now_ms = mir2::core::GetCurrentTimestampMs();
   ScanZombieSessions(now_ms);
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseZombieScanMs,
+      DurationMs(std::chrono::steady_clock::now() - zombie_scan_start));
 
+  std::chrono::steady_clock::duration ecs_world_systems_duration =
+      std::chrono::steady_clock::duration::zero();
+  std::chrono::steady_clock::duration ecs_registry_update_duration =
+      std::chrono::steady_clock::duration::zero();
+  std::chrono::steady_clock::duration character_update_duration =
+      std::chrono::steady_clock::duration::zero();
   if (registry_manager_) {
+    const auto ecs_world_systems_start = std::chrono::steady_clock::now();
     registry_manager_->ForEachWorld([this, delta_time, now_ms](uint32_t map_id,
                                                               ecs::World& world) {
       auto& bundle = EnsureWorldSystems(map_id, world);
       TickWorldSystems(world, bundle, delta_time, now_ms);
     });
-    registry_manager_->UpdateAll(delta_time);
-    registry_manager_->GetCharacterManager().Update(delta_time);
-  }
+    ecs_world_systems_duration = std::chrono::steady_clock::now() -
+                                 ecs_world_systems_start;
 
+    const auto ecs_registry_update_start = std::chrono::steady_clock::now();
+    registry_manager_->UpdateAll(delta_time);
+    ecs_registry_update_duration = std::chrono::steady_clock::now() -
+                                   ecs_registry_update_start;
+
+    const auto character_update_start = std::chrono::steady_clock::now();
+    registry_manager_->GetCharacterManager().Update(delta_time);
+    character_update_duration = std::chrono::steady_clock::now() -
+                                character_update_start;
+  }
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseEcsWorldSystemsMs, DurationMs(ecs_world_systems_duration));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseEcsRegistryUpdateMs, DurationMs(ecs_registry_update_duration));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseCharacterUpdateMs, DurationMs(character_update_duration));
+
+  const auto network_tick_start = std::chrono::steady_clock::now();
   if (network_) {
     network_->Tick();
   }
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseNetworkTickMs,
+      DurationMs(std::chrono::steady_clock::now() - network_tick_start));
 }
 
 }  // namespace mir2::logic

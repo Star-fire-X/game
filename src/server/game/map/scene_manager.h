@@ -10,6 +10,7 @@
 
 #include <entt/entt.hpp>
 
+#include <array>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -191,6 +192,21 @@ class SceneManager {
    */
   void Clear();
 
+  /**
+   * @brief 派发所有地图的待处理 AOI 事件
+   *
+   * @return 本次派发事件总数
+   */
+  size_t DispatchPendingAOIEvents();
+
+  /**
+   * @brief 派发所有地图的待处理 AOI 事件（限制每图批量）
+   *
+   * @param max_events_per_map 每张地图最多派发事件数
+   * @return 本次派发事件总数
+   */
+  size_t DispatchPendingAOIEvents(size_t max_events_per_map);
+
  private:
   /**
    * @brief 更新实体到地图的反向索引
@@ -206,6 +222,11 @@ class SceneManager {
    * @brief 应用地图修正
    */
   void ApplyMapFixes(MapInstance* map, const MapConfig& config);
+
+  /**
+   * @brief 获取实体操作分片锁
+   */
+  std::mutex& GetEntityOpsMutex(entt::entity entity) const;
 
   /**
    * @brief 加载地图数据（不持锁，供内部使用）
@@ -228,7 +249,9 @@ class SceneManager {
   std::unordered_set<int32_t> loading_map_ids_;
   MapLoader map_loader_;
   std::condition_variable_any map_load_cv_;
-  mutable std::mutex entity_ops_mutex_;
+  mutable std::shared_mutex map_entity_ops_mutex_;
+  static constexpr size_t kEntityOpsLockStripeCount = 256;
+  mutable std::array<std::mutex, kEntityOpsLockStripeCount> entity_ops_mutexes_;
   mutable std::shared_mutex mutex_;
 };
 

@@ -154,9 +154,13 @@ constexpr const char* kMetricTickPhaseCharacterUpdateMs =
     "logic.tick.phase.character_update_ms";
 constexpr const char* kMetricTickPhaseNetworkTickMs =
     "logic.tick.phase.network_tick_ms";
+constexpr const char* kMetricTickPhaseAoiDispatchMs =
+    "logic.tick.phase.aoi_dispatch_ms";
 constexpr const char* kMetricTickPhaseHungScanMs = "logic.tick.phase.hung_scan_ms";
+constexpr const char* kMetricAoiDispatchedPerTick = "logic.aoi.dispatched_per_tick";
 constexpr const char* kMetricHotDrainBudgetHitTotal =
     "logic.hot_event.drain_budget_hit_total";
+constexpr size_t kAoiDispatchMaxEventsPerMapPerTick = 4096;
 constexpr const char* kMetricPrewarmSpawnRejectedNotAcceptingTotal =
     "logic.prewarm.spawn_rejected_not_accepting_total";
 constexpr const char* kMetricPrewarmSpawnRejectedOverLimitTotal =
@@ -3497,6 +3501,19 @@ void LogicServer::Tick(float delta_time) {
   monitor::Metrics::Instance().SetGauge(
       kMetricTickPhaseHotEventMs,
       DurationMs(std::chrono::steady_clock::now() - hot_event_start));
+
+  const auto aoi_dispatch_start = std::chrono::steady_clock::now();
+  size_t dispatched_aoi_events = 0;
+  if (scene_manager_) {
+    dispatched_aoi_events = scene_manager_->DispatchPendingAOIEvents(
+        kAoiDispatchMaxEventsPerMapPerTick);
+  }
+  monitor::Metrics::Instance().SetGauge(
+      kMetricAoiDispatchedPerTick,
+      static_cast<double>(dispatched_aoi_events));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricTickPhaseAoiDispatchMs,
+      DurationMs(std::chrono::steady_clock::now() - aoi_dispatch_start));
 
   const auto zombie_scan_start = std::chrono::steady_clock::now();
   const int64_t now_ms = mir2::core::GetCurrentTimestampMs();

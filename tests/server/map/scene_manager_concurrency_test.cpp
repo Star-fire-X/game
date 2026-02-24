@@ -9,6 +9,7 @@
 namespace {
 
 using mir2::game::map::SceneManager;
+using mir2::game::map::MapInstance;
 
 void WaitForStart(const std::atomic<bool>& start) {
   while (!start.load(std::memory_order_acquire)) {
@@ -135,6 +136,40 @@ TEST(SceneManagerConcurrencyTest, ConcurrentDestroyRecreateAndMovementNoCrash) {
 
   EXPECT_TRUE(mapping_ok.load(std::memory_order_acquire));
   EXPECT_NE(scene_manager.GetMap(kMapId), nullptr);
+}
+
+TEST(SceneManagerConcurrencyTest, ConcurrentGetOrCreateMapCreatesSingleInstance) {
+  constexpr int32_t kMapId = 303;
+  constexpr int32_t kMapSize = 128;
+  constexpr int32_t kThreadCount = 24;
+
+  SceneManager scene_manager;
+  SceneManager::MapConfig config{kMapId, kMapSize, kMapSize};
+  config.load_walkability = false;
+
+  std::atomic<bool> start{false};
+  std::vector<MapInstance*> results(static_cast<size_t>(kThreadCount), nullptr);
+  std::vector<std::thread> workers;
+  workers.reserve(kThreadCount);
+
+  for (int32_t i = 0; i < kThreadCount; ++i) {
+    workers.emplace_back([&, i]() {
+      WaitForStart(start);
+      results[static_cast<size_t>(i)] = scene_manager.GetOrCreateMap(config);
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto& worker : workers) {
+    worker.join();
+  }
+
+  MapInstance* first = results.front();
+  ASSERT_NE(first, nullptr);
+  for (MapInstance* map : results) {
+    EXPECT_EQ(map, first);
+  }
+  EXPECT_EQ(scene_manager.MapCount(), 1u);
 }
 
 }  // namespace

@@ -10,6 +10,7 @@
 #define MIR2_GAME_MAP_AOI_MANAGER_H_
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -60,9 +61,9 @@ class AOIManager {
    * @param y 目标Y坐标
    */
   using AOICallback = std::function<void(AOIEventType event_type,
-                                          uint64_t watcher_id,
-                                          uint64_t target_id,
-                                          int32_t x, int32_t y)>;
+                                         uint64_t watcher_id,
+                                         uint64_t target_id,
+                                         int32_t x, int32_t y)>;
 
   /**
    * @brief 构造 AOI 管理器
@@ -85,10 +86,7 @@ class AOIManager {
    *
    * @param callback 回调函数
    */
-  void SetCallback(AOICallback callback) {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    callback_ = std::move(callback);
-  }
+  void SetCallback(AOICallback callback);
 
   /**
    * @brief 实体进入地图
@@ -188,15 +186,27 @@ class AOIManager {
   };
 
   static constexpr size_t kMaxSurroundingGridCount = 9;
+  static constexpr size_t kEntityShardCount = 64;
+  static constexpr size_t kGridShardCount = 64;
   using GridArray = std::array<GridId, kMaxSurroundingGridCount>;
 
   /**
    * @brief 实体位置信息
    */
   struct EntityPosition {
-    int32_t x;
-    int32_t y;
-    GridId grid;
+    int32_t x = 0;
+    int32_t y = 0;
+    GridId grid{0, 0};
+  };
+
+  struct EntityShard {
+    mutable std::shared_mutex mutex;
+    std::unordered_map<uint64_t, EntityPosition> entities;
+  };
+
+  struct GridShard {
+    mutable std::shared_mutex mutex;
+    std::unordered_map<GridId, std::unordered_set<uint64_t>, GridIdHash> grids;
   };
 
   /**
@@ -214,25 +224,73 @@ class AOIManager {
   size_t FillSurroundingGrids(const GridId& center, GridArray& out) const;
 
   /**
-   * @brief 获取格子内的所有实体
-   */
-  const std::unordered_set<uint64_t>* GetEntitiesInGrid(const GridId& grid) const;
-
-  /**
    * @brief 检查目标格子是否在列表中
    */
   static bool ContainsGrid(const GridArray& grids, size_t count,
                            const GridId& target);
 
   /**
-   * @brief 将实体添加到格子
+   * @brief 实体分片索引
    */
-  void AddToGrid(uint64_t entity_id, const GridId& grid);
+  size_t EntityShardIndex(uint64_t entity_id) const;
 
   /**
-   * @brief 从格子中移除实体
+   * @brief 格子分片索引
    */
-  void RemoveFromGrid(uint64_t entity_id, const GridId& grid);
+  size_t GridShardIndex(const GridId& grid) const;
+
+  /**
+   * @brief 收集并排序去重格子分片索引
+   */
+  std::vector<size_t> CollectGridShardIndices(const GridArray& grids,
+                                              size_t count) const;
+  std::vector<size_t> CollectGridShardIndices(const GridArray& lhs,
+                                              size_t lhs_count,
+                                              const GridArray& rhs,
+                                              size_t rhs_count) const;
+
+  /**
+   * @brief 分片锁帮助函数
+   */
+  std::vector<std::shared_lock<std::shared_mutex>> LockGridShardsShared(
+      const std::vector<size_t>& shard_indices) const;
+  std::vector<std::unique_lock<std::shared_mutex>> LockGridShardsUnique(
+      const std::vector<size_t>& shard_indices);
+  std::vector<std::shared_lock<std::shared_mutex>> LockAllEntityShardsShared() const;
+  std::vector<std::unique_lock<std::shared_mutex>> LockAllEntityShardsUnique();
+  std::vector<std::shared_lock<std::shared_mutex>> LockAllGridShardsShared() const;
+  std::vector<std::unique_lock<std::shared_mutex>> LockAllGridShardsUnique();
+
+  /**
+   * @brief 获取实体快照（线程安全）
+   */
+  bool TryGetEntityPositionSnapshot(uint64_t entity_id, EntityPosition& out) const;
+
+  /**
+   * @brief 获取回调快照（线程安全）
+   */
+  AOICallback SnapshotCallback() const;
+
+  /**
+   * @brief 在调用方已持有对应 grid shard 锁时收集实体
+   */
+  void CollectEntitiesInGridUnsafe(const GridId& grid,
+                                   std::unordered_set<uint64_t>& out) const;
+  void CollectEntitiesFromGridsUnsafe(const GridArray& grids, size_t count,
+                                      std::unordered_set<uint64_t>& out) const;
+
+  /**
+   * @brief 在调用方已持有对应 grid shard unique 锁时更新格子索引
+   */
+  void AddToGrid(uint64_t entity_id, const GridId& grid);
+  bool RemoveFromGrid(uint64_t entity_id, const GridId& grid);
+
+  /**
+   * @brief 热点格指标维护
+   */
+  void ObserveHotGridDensity(size_t density);
+  void SetHotGridDensity(size_t density);
+  void RecomputeHotGridDensity();
 
   // 地图尺寸
   int32_t map_width_;
@@ -245,17 +303,16 @@ class AOIManager {
   int32_t grid_count_x_;
   int32_t grid_count_y_;
 
-  // 格子到实体集合的映射
-  std::unordered_map<GridId, std::unordered_set<uint64_t>, GridIdHash> grids_;
-
-  // 实体到位置信息的映射
-  std::unordered_map<uint64_t, EntityPosition> entities_;
+  // 分片状态
+  std::array<EntityShard, kEntityShardCount> entity_shards_;
+  std::array<GridShard, kGridShardCount> grid_shards_;
 
   // AOI 事件回调
   AOICallback callback_;
+  mutable std::mutex callback_mutex_;
 
-  // 互斥锁
-  mutable std::shared_mutex mutex_;
+  // 当前热点格（单格）实体密度
+  std::atomic<size_t> hot_grid_density_{0};
 };
 
 }  // namespace mir2::game::map

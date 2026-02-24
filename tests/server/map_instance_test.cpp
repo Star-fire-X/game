@@ -164,6 +164,35 @@ TEST_F(MapInstanceTest, EmptyMap) {
   EXPECT_EQ(entities.size(), 0);
 }
 
+TEST_F(MapInstanceTest, AOIEventsAreDeferredUntilDispatch) {
+  entt::entity watcher = entt::entity{1};
+  entt::entity target = entt::entity{2};
+
+  std::vector<AOIEventType> event_types;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    (void)watcher_entity;
+    (void)target_entity;
+    (void)x;
+    (void)y;
+    event_types.push_back(event_type);
+  });
+
+  ASSERT_TRUE(map_->AddEntity(watcher, 10, 10));
+  ASSERT_TRUE(map_->AddEntity(target, 11, 10));
+
+  EXPECT_TRUE(event_types.empty());
+  EXPECT_GT(map_->PendingAOIEventCount(), 0u);
+
+  const size_t dispatched = map_->DispatchPendingAOIEvents();
+  EXPECT_EQ(dispatched, event_types.size());
+  EXPECT_EQ(dispatched, 2u);
+  EXPECT_EQ(map_->PendingAOIEventCount(), 0u);
+}
+
 TEST_F(MapInstanceTest, AOILeaveEventUsesLeaverLatestCoordinates) {
   entt::entity watcher = entt::entity{1};
   entt::entity leaver = entt::entity{2};
@@ -187,9 +216,11 @@ TEST_F(MapInstanceTest, AOILeaveEventUsesLeaverLatestCoordinates) {
 
   ASSERT_TRUE(map_->AddEntity(watcher, 10, 10));
   ASSERT_TRUE(map_->AddEntity(leaver, 11, 10));
+  map_->DispatchPendingAOIEvents();
 
   events.clear();
   ASSERT_TRUE(map_->UpdateEntityPosition(leaver, 90, 90));
+  map_->DispatchPendingAOIEvents();
 
   auto leave_it = std::find_if(
       events.begin(), events.end(), [&](const CapturedEvent& event) {

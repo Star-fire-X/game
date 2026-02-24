@@ -6,9 +6,49 @@
 #include "game/map/aoi_manager.h"
 
 #include <algorithm>
+#include <chrono>
+
+#include "monitor/metrics.h"
 
 namespace mir2::game::map {
 namespace {
+
+using SteadyClock = std::chrono::steady_clock;
+
+constexpr const char* kMetricAoiLockWaitMs = "logic.aoi.lock_wait_ms";
+constexpr const char* kMetricAoiLockWaitSamplesTotal =
+    "logic.aoi.lock_wait_samples_total";
+constexpr const char* kMetricAoiLockWaitNsTotal = "logic.aoi.lock_wait_ns_total";
+constexpr const char* kMetricAoiEventsPerBatch = "logic.aoi.events_per_batch";
+constexpr const char* kMetricAoiEventsTotal = "logic.aoi.events_total";
+constexpr const char* kMetricAoiHotGridDensity = "logic.aoi.hot_grid_density";
+
+void RecordAoiLockWait(SteadyClock::time_point wait_started_at) {
+  const auto wait_ns_raw =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          SteadyClock::now() - wait_started_at)
+          .count();
+  if (wait_ns_raw < 0) {
+    return;
+  }
+  const uint64_t wait_ns = static_cast<uint64_t>(wait_ns_raw);
+  monitor::Metrics::Instance().SetGauge(
+      kMetricAoiLockWaitMs, static_cast<double>(wait_ns) / 1000000.0);
+  monitor::Metrics::Instance().IncrementCounter(kMetricAoiLockWaitSamplesTotal);
+  monitor::Metrics::Instance().IncrementCounter(kMetricAoiLockWaitNsTotal, wait_ns);
+}
+
+void RecordAoiEventBatch(size_t event_count) {
+  monitor::Metrics::Instance().SetGauge(
+      kMetricAoiEventsPerBatch, static_cast<double>(event_count));
+  monitor::Metrics::Instance().IncrementCounter(
+      kMetricAoiEventsTotal, static_cast<uint64_t>(event_count));
+}
+
+void UpdateAoiHotGridDensityGauge(size_t density) {
+  monitor::Metrics::Instance().SetGauge(
+      kMetricAoiHotGridDensity, static_cast<double>(density));
+}
 
 struct PendingAOIEvent {
   AOIEventType type = AOIEventType::kMove;
@@ -18,40 +58,10 @@ struct PendingAOIEvent {
   int32_t y = 0;
 };
 
-template <typename GridArrayT, typename GetEntitiesFn, typename VisitEntityFn>
-void CollectSurroundingEntities(const GridArrayT& surrounding,
-                                size_t surrounding_count,
-                                const GetEntitiesFn& get_entities,
-                                const VisitEntityFn& visit_entity) {
-  for (size_t i = 0; i < surrounding_count; ++i) {
-    const auto* entities = get_entities(surrounding[i]);
-    if (entities == nullptr) {
-      continue;
-    }
-    for (uint64_t entity_id : *entities) {
-      visit_entity(entity_id);
-    }
-  }
-}
-
-template <typename GridArrayT, typename ContainsGridFn, typename EmitOnGridFn>
-void EmitGridDeltaEvents(const GridArrayT& source_grids,
-                         size_t source_count,
-                         const GridArrayT& target_grids,
-                         size_t target_count,
-                         const ContainsGridFn& contains_grid,
-                         const EmitOnGridFn& emit_on_grid) {
-  for (size_t i = 0; i < source_count; ++i) {
-    const auto& grid = source_grids[i];
-    if (contains_grid(target_grids, target_count, grid)) {
-      continue;
-    }
-    emit_on_grid(grid);
-  }
-}
-
 void DispatchAOIEvents(const AOIManager::AOICallback& callback,
                        const std::vector<PendingAOIEvent>& events) {
+  RecordAoiEventBatch(events.size());
+
   if (!callback) {
     return;
   }
@@ -71,292 +81,302 @@ AOIManager::AOIManager(int32_t map_width, int32_t map_height, int32_t grid_size)
   // 计算格子数量（向上取整）
   grid_count_x_ = (map_width + grid_size - 1) / grid_size;
   grid_count_y_ = (map_height + grid_size - 1) / grid_size;
+  SetHotGridDensity(0);
+}
+
+void AOIManager::SetCallback(AOICallback callback) {
+  std::lock_guard<std::mutex> lock(callback_mutex_);
+  callback_ = std::move(callback);
 }
 
 void AOIManager::Enter(uint64_t entity_id, int32_t x, int32_t y) {
   std::vector<PendingAOIEvent> pending_events;
-  AOICallback callback_snapshot;
-  {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unordered_set<uint64_t> nearby_entity_ids;
 
-    // 检查是否已存在
-    if (entities_.find(entity_id) != entities_.end()) {
-      return;
-    }
+  const auto wait_started_at = SteadyClock::now();
+  const size_t entity_shard_idx = EntityShardIndex(entity_id);
+  EntityShard& entity_shard = entity_shards_[entity_shard_idx];
+  std::unique_lock<std::shared_mutex> entity_lock(entity_shard.mutex);
 
-    // 计算所在格子
-    GridId grid = ToGridId(x, y);
-
-    // 存储实体位置
-    entities_[entity_id] = {x, y, grid};
-
-    // 添加到格子
-    AddToGrid(entity_id, grid);
-
-    // 获取视野范围内的格子
-    GridArray surrounding{};
-    const size_t surrounding_count = FillSurroundingGrids(grid, surrounding);
-
-    // 收集视野内事件，避免锁内执行用户回调。
-    CollectSurroundingEntities(
-        surrounding, surrounding_count,
-        [this](const GridId& candidate_grid) {
-          return GetEntitiesInGrid(candidate_grid);
-        },
-        [&](uint64_t other_id) {
-          if (other_id == entity_id) {
-            return;
-          }
-          pending_events.push_back(
-              PendingAOIEvent{AOIEventType::kEnter, other_id, entity_id, x, y});
-          auto it = entities_.find(other_id);
-          if (it != entities_.end()) {
-            pending_events.push_back(PendingAOIEvent{
-                AOIEventType::kEnter, entity_id, other_id, it->second.x,
-                it->second.y});
-          }
-        });
-
-    callback_snapshot = callback_;
+  if (entity_shard.entities.find(entity_id) != entity_shard.entities.end()) {
+    RecordAoiLockWait(wait_started_at);
+    return;
   }
 
-  DispatchAOIEvents(callback_snapshot, pending_events);
+  const GridId grid = ToGridId(x, y);
+  GridArray surrounding{};
+  const size_t surrounding_count = FillSurroundingGrids(grid, surrounding);
+  auto grid_shard_indices = CollectGridShardIndices(surrounding, surrounding_count);
+  auto grid_locks = LockGridShardsUnique(grid_shard_indices);
+  RecordAoiLockWait(wait_started_at);
+
+  entity_shard.entities.emplace(entity_id, EntityPosition{x, y, grid});
+  AddToGrid(entity_id, grid);
+  CollectEntitiesFromGridsUnsafe(surrounding, surrounding_count, nearby_entity_ids);
+
+  grid_locks.clear();
+  entity_lock.unlock();
+
+  nearby_entity_ids.erase(entity_id);
+  for (uint64_t other_id : nearby_entity_ids) {
+    pending_events.push_back(
+        PendingAOIEvent{AOIEventType::kEnter, other_id, entity_id, x, y});
+    EntityPosition other_pos;
+    if (TryGetEntityPositionSnapshot(other_id, other_pos)) {
+      pending_events.push_back(
+          PendingAOIEvent{AOIEventType::kEnter, entity_id, other_id,
+                          other_pos.x, other_pos.y});
+    }
+  }
+
+  DispatchAOIEvents(SnapshotCallback(), pending_events);
 }
 
 void AOIManager::Leave(uint64_t entity_id) {
   std::vector<PendingAOIEvent> pending_events;
-  AOICallback callback_snapshot;
-  {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unordered_set<uint64_t> nearby_entity_ids;
+  bool should_recompute_hot_density = false;
 
-    auto it = entities_.find(entity_id);
-    if (it == entities_.end()) {
-      return;
-    }
+  const auto wait_started_at = SteadyClock::now();
+  const size_t entity_shard_idx = EntityShardIndex(entity_id);
+  EntityShard& entity_shard = entity_shards_[entity_shard_idx];
+  std::unique_lock<std::shared_mutex> entity_lock(entity_shard.mutex);
 
-    const EntityPosition& pos = it->second;
-    int32_t x = pos.x;
-    int32_t y = pos.y;
-    GridId grid = pos.grid;
-
-    // 获取视野范围内的格子
-    GridArray surrounding{};
-    const size_t surrounding_count = FillSurroundingGrids(grid, surrounding);
-
-    // 收集离开事件，避免锁内执行用户回调。
-    CollectSurroundingEntities(
-        surrounding, surrounding_count,
-        [this](const GridId& candidate_grid) {
-          return GetEntitiesInGrid(candidate_grid);
-        },
-        [&](uint64_t other_id) {
-          if (other_id == entity_id) {
-            return;
-          }
-          pending_events.push_back(
-              PendingAOIEvent{AOIEventType::kLeave, other_id, entity_id, x, y});
-        });
-
-    // 从格子中移除
-    RemoveFromGrid(entity_id, grid);
-
-    // 移除实体记录
-    entities_.erase(it);
-    callback_snapshot = callback_;
+  auto it = entity_shard.entities.find(entity_id);
+  if (it == entity_shard.entities.end()) {
+    RecordAoiLockWait(wait_started_at);
+    return;
   }
 
-  DispatchAOIEvents(callback_snapshot, pending_events);
+  const EntityPosition pos = it->second;
+  GridArray surrounding{};
+  const size_t surrounding_count = FillSurroundingGrids(pos.grid, surrounding);
+  auto grid_shard_indices = CollectGridShardIndices(surrounding, surrounding_count);
+  auto grid_locks = LockGridShardsUnique(grid_shard_indices);
+  RecordAoiLockWait(wait_started_at);
+
+  CollectEntitiesFromGridsUnsafe(surrounding, surrounding_count, nearby_entity_ids);
+  should_recompute_hot_density = RemoveFromGrid(entity_id, pos.grid);
+  entity_shard.entities.erase(it);
+
+  grid_locks.clear();
+  entity_lock.unlock();
+
+  if (should_recompute_hot_density) {
+    RecomputeHotGridDensity();
+  }
+
+  nearby_entity_ids.erase(entity_id);
+  for (uint64_t other_id : nearby_entity_ids) {
+    pending_events.push_back(PendingAOIEvent{
+        AOIEventType::kLeave, other_id, entity_id, pos.x, pos.y});
+  }
+
+  DispatchAOIEvents(SnapshotCallback(), pending_events);
 }
 
 void AOIManager::Move(uint64_t entity_id, int32_t new_x, int32_t new_y) {
   std::vector<PendingAOIEvent> pending_events;
-  AOICallback callback_snapshot;
-  {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
+  std::unordered_set<uint64_t> leave_ids;
+  std::unordered_set<uint64_t> enter_ids;
+  std::unordered_set<uint64_t> move_ids;
+  bool should_recompute_hot_density = false;
+  bool crossed_grid = false;
 
-    auto it = entities_.find(entity_id);
-    if (it == entities_.end()) {
-      return;
+  const auto wait_started_at = SteadyClock::now();
+  const size_t entity_shard_idx = EntityShardIndex(entity_id);
+  EntityShard& entity_shard = entity_shards_[entity_shard_idx];
+  std::unique_lock<std::shared_mutex> entity_lock(entity_shard.mutex);
+
+  auto it = entity_shard.entities.find(entity_id);
+  if (it == entity_shard.entities.end()) {
+    RecordAoiLockWait(wait_started_at);
+    return;
+  }
+
+  const EntityPosition old_pos = it->second;
+  const GridId new_grid = ToGridId(new_x, new_y);
+  it->second = EntityPosition{new_x, new_y, new_grid};
+
+  if (old_pos.grid == new_grid) {
+    GridArray surrounding{};
+    const size_t surrounding_count = FillSurroundingGrids(new_grid, surrounding);
+    auto grid_shard_indices = CollectGridShardIndices(surrounding, surrounding_count);
+    auto grid_locks = LockGridShardsShared(grid_shard_indices);
+    RecordAoiLockWait(wait_started_at);
+    CollectEntitiesFromGridsUnsafe(surrounding, surrounding_count, move_ids);
+    grid_locks.clear();
+  } else {
+    crossed_grid = true;
+    GridArray old_surrounding{};
+    GridArray new_surrounding{};
+    const size_t old_surrounding_count =
+        FillSurroundingGrids(old_pos.grid, old_surrounding);
+    const size_t new_surrounding_count =
+        FillSurroundingGrids(new_grid, new_surrounding);
+
+    auto grid_shard_indices = CollectGridShardIndices(
+        old_surrounding, old_surrounding_count,
+        new_surrounding, new_surrounding_count);
+    auto grid_locks = LockGridShardsUnique(grid_shard_indices);
+    RecordAoiLockWait(wait_started_at);
+
+    should_recompute_hot_density = RemoveFromGrid(entity_id, old_pos.grid);
+    AddToGrid(entity_id, new_grid);
+
+    for (size_t i = 0; i < old_surrounding_count; ++i) {
+      const GridId& grid = old_surrounding[i];
+      if (ContainsGrid(new_surrounding, new_surrounding_count, grid)) {
+        continue;
+      }
+      CollectEntitiesInGridUnsafe(grid, leave_ids);
     }
 
-    EntityPosition& pos = it->second;
-    GridId old_grid = pos.grid;
-    GridId new_grid = ToGridId(new_x, new_y);
-
-    // 更新位置
-    pos.x = new_x;
-    pos.y = new_y;
-    pos.grid = new_grid;
-
-    // 如果格子没有变化，只需通知视野内实体移动事件
-    if (old_grid == new_grid) {
-      GridArray surrounding{};
-      const size_t surrounding_count = FillSurroundingGrids(new_grid, surrounding);
-      CollectSurroundingEntities(
-          surrounding, surrounding_count,
-          [this](const GridId& candidate_grid) {
-            return GetEntitiesInGrid(candidate_grid);
-          },
-          [&](uint64_t other_id) {
-            if (other_id == entity_id) {
-              return;
-            }
-            pending_events.push_back(PendingAOIEvent{
-                AOIEventType::kMove, other_id, entity_id, new_x, new_y});
-          });
-      callback_snapshot = callback_;
-    } else {
-      // 格子发生变化，需要计算进入和离开的视野范围
-      GridArray old_surrounding{};
-      GridArray new_surrounding{};
-      const size_t old_surrounding_count =
-          FillSurroundingGrids(old_grid, old_surrounding);
-      const size_t new_surrounding_count =
-          FillSurroundingGrids(new_grid, new_surrounding);
-
-      // 更新格子归属
-      RemoveFromGrid(entity_id, old_grid);
-      AddToGrid(entity_id, new_grid);
-
-      // 处理离开视野的实体
-      EmitGridDeltaEvents(
-          old_surrounding, old_surrounding_count, new_surrounding,
-          new_surrounding_count,
-          [this](const GridArray& grids, size_t count, const GridId& target) {
-            return ContainsGrid(grids, count, target);
-          },
-          [&](const GridId& delta_grid) {
-            CollectSurroundingEntities(
-                std::array<GridId, 1>{delta_grid}, 1,
-                [this](const GridId& candidate_grid) {
-                  return GetEntitiesInGrid(candidate_grid);
-                },
-                [&](uint64_t other_id) {
-                  if (other_id == entity_id) {
-                    return;
-                  }
-                  pending_events.push_back(PendingAOIEvent{
-                      AOIEventType::kLeave, other_id, entity_id, new_x, new_y});
-                  auto other_it = entities_.find(other_id);
-                  if (other_it != entities_.end()) {
-                    pending_events.push_back(PendingAOIEvent{
-                        AOIEventType::kLeave, entity_id, other_id, other_it->second.x,
-                        other_it->second.y});
-                  }
-                });
-          });
-
-      // 处理进入视野的实体
-      EmitGridDeltaEvents(
-          new_surrounding, new_surrounding_count, old_surrounding,
-          old_surrounding_count,
-          [this](const GridArray& grids, size_t count, const GridId& target) {
-            return ContainsGrid(grids, count, target);
-          },
-          [&](const GridId& delta_grid) {
-            CollectSurroundingEntities(
-                std::array<GridId, 1>{delta_grid}, 1,
-                [this](const GridId& candidate_grid) {
-                  return GetEntitiesInGrid(candidate_grid);
-                },
-                [&](uint64_t other_id) {
-                  if (other_id == entity_id) {
-                    return;
-                  }
-                  pending_events.push_back(PendingAOIEvent{
-                      AOIEventType::kEnter, other_id, entity_id, new_x, new_y});
-                  auto other_it = entities_.find(other_id);
-                  if (other_it != entities_.end()) {
-                    pending_events.push_back(PendingAOIEvent{
-                        AOIEventType::kEnter, entity_id, other_id, other_it->second.x,
-                        other_it->second.y});
-                  }
-                });
-          });
-
-      // 仍在视野内，发送移动事件
-      for (size_t i = 0; i < new_surrounding_count; ++i) {
-        const GridId& grid = new_surrounding[i];
-        if (!ContainsGrid(old_surrounding, old_surrounding_count, grid)) {
-          continue;
-        }
-        CollectSurroundingEntities(
-            std::array<GridId, 1>{grid}, 1,
-            [this](const GridId& candidate_grid) {
-              return GetEntitiesInGrid(candidate_grid);
-            },
-            [&](uint64_t other_id) {
-              if (other_id == entity_id) {
-                return;
-              }
-              pending_events.push_back(PendingAOIEvent{
-                  AOIEventType::kMove, other_id, entity_id, new_x, new_y});
-            });
+    for (size_t i = 0; i < new_surrounding_count; ++i) {
+      const GridId& grid = new_surrounding[i];
+      if (ContainsGrid(old_surrounding, old_surrounding_count, grid)) {
+        continue;
       }
-      callback_snapshot = callback_;
+      CollectEntitiesInGridUnsafe(grid, enter_ids);
+    }
+
+    for (size_t i = 0; i < new_surrounding_count; ++i) {
+      const GridId& grid = new_surrounding[i];
+      if (!ContainsGrid(old_surrounding, old_surrounding_count, grid)) {
+        continue;
+      }
+      CollectEntitiesInGridUnsafe(grid, move_ids);
+    }
+
+    grid_locks.clear();
+  }
+
+  entity_lock.unlock();
+
+  leave_ids.erase(entity_id);
+  enter_ids.erase(entity_id);
+  move_ids.erase(entity_id);
+
+  if (should_recompute_hot_density) {
+    RecomputeHotGridDensity();
+  }
+
+  if (!crossed_grid) {
+    for (uint64_t other_id : move_ids) {
+      pending_events.push_back(PendingAOIEvent{
+          AOIEventType::kMove, other_id, entity_id, new_x, new_y});
+    }
+    DispatchAOIEvents(SnapshotCallback(), pending_events);
+    return;
+  }
+
+  for (uint64_t other_id : leave_ids) {
+    pending_events.push_back(PendingAOIEvent{
+        AOIEventType::kLeave, other_id, entity_id, new_x, new_y});
+    EntityPosition other_pos;
+    if (TryGetEntityPositionSnapshot(other_id, other_pos)) {
+      pending_events.push_back(PendingAOIEvent{
+          AOIEventType::kLeave, entity_id, other_id, other_pos.x, other_pos.y});
     }
   }
 
-  DispatchAOIEvents(callback_snapshot, pending_events);
+  for (uint64_t other_id : enter_ids) {
+    pending_events.push_back(PendingAOIEvent{
+        AOIEventType::kEnter, other_id, entity_id, new_x, new_y});
+    EntityPosition other_pos;
+    if (TryGetEntityPositionSnapshot(other_id, other_pos)) {
+      pending_events.push_back(PendingAOIEvent{
+          AOIEventType::kEnter, entity_id, other_id, other_pos.x, other_pos.y});
+    }
+  }
+
+  for (uint64_t other_id : move_ids) {
+    pending_events.push_back(PendingAOIEvent{
+        AOIEventType::kMove, other_id, entity_id, new_x, new_y});
+  }
+
+  DispatchAOIEvents(SnapshotCallback(), pending_events);
 }
 
 std::vector<uint64_t> AOIManager::GetEntitiesInView(int32_t x, int32_t y) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  const auto wait_started_at = SteadyClock::now();
+  GridArray surrounding{};
+  const GridId grid = ToGridId(x, y);
+  const size_t surrounding_count = FillSurroundingGrids(grid, surrounding);
+  auto grid_shard_indices = CollectGridShardIndices(surrounding, surrounding_count);
+  auto grid_locks = LockGridShardsShared(grid_shard_indices);
+  RecordAoiLockWait(wait_started_at);
 
   std::vector<uint64_t> result;
-  GridId grid = ToGridId(x, y);
-  GridArray surrounding{};
-  const size_t surrounding_count = FillSurroundingGrids(grid, surrounding);
-
   size_t reserve_count = 0;
   for (size_t i = 0; i < surrounding_count; ++i) {
-    const auto* entities = GetEntitiesInGrid(surrounding[i]);
-    if (entities != nullptr) {
-      reserve_count += entities->size();
+    const GridId& current = surrounding[i];
+    const GridShard& grid_shard = grid_shards_[GridShardIndex(current)];
+    auto it = grid_shard.grids.find(current);
+    if (it == grid_shard.grids.end()) {
+      continue;
     }
+    reserve_count += it->second.size();
   }
   result.reserve(reserve_count);
 
   for (size_t i = 0; i < surrounding_count; ++i) {
-    const auto* entities = GetEntitiesInGrid(surrounding[i]);
-    if (entities == nullptr) {
+    const GridId& current = surrounding[i];
+    const GridShard& grid_shard = grid_shards_[GridShardIndex(current)];
+    auto it = grid_shard.grids.find(current);
+    if (it == grid_shard.grids.end()) {
       continue;
     }
-    result.insert(result.end(), entities->begin(), entities->end());
+    result.insert(result.end(), it->second.begin(), it->second.end());
   }
 
   return result;
 }
 
 std::vector<uint64_t> AOIManager::GetEntitiesInViewOf(uint64_t entity_id) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  const auto wait_started_at = SteadyClock::now();
 
-  std::vector<uint64_t> result;
-
-  auto it = entities_.find(entity_id);
-  if (it == entities_.end()) {
-    return result;
+  EntityPosition center{};
+  const size_t entity_shard_idx = EntityShardIndex(entity_id);
+  {
+    const EntityShard& entity_shard = entity_shards_[entity_shard_idx];
+    std::shared_lock<std::shared_mutex> entity_lock(entity_shard.mutex);
+    auto it = entity_shard.entities.find(entity_id);
+    if (it == entity_shard.entities.end()) {
+      RecordAoiLockWait(wait_started_at);
+      return {};
+    }
+    center = it->second;
   }
 
   GridArray surrounding{};
   const size_t surrounding_count =
-      FillSurroundingGrids(it->second.grid, surrounding);
+      FillSurroundingGrids(center.grid, surrounding);
+  auto grid_shard_indices = CollectGridShardIndices(surrounding, surrounding_count);
+  auto grid_locks = LockGridShardsShared(grid_shard_indices);
+  RecordAoiLockWait(wait_started_at);
 
+  std::vector<uint64_t> result;
   size_t reserve_count = 0;
   for (size_t i = 0; i < surrounding_count; ++i) {
-    const auto* entities = GetEntitiesInGrid(surrounding[i]);
-    if (entities != nullptr) {
-      reserve_count += entities->size();
+    const GridId& current = surrounding[i];
+    const GridShard& grid_shard = grid_shards_[GridShardIndex(current)];
+    auto it = grid_shard.grids.find(current);
+    if (it == grid_shard.grids.end()) {
+      continue;
     }
+    reserve_count += it->second.size();
   }
   result.reserve(reserve_count);
 
   for (size_t i = 0; i < surrounding_count; ++i) {
-    const auto* entities = GetEntitiesInGrid(surrounding[i]);
-    if (entities == nullptr) {
+    const GridId& current = surrounding[i];
+    const GridShard& grid_shard = grid_shards_[GridShardIndex(current)];
+    auto it = grid_shard.grids.find(current);
+    if (it == grid_shard.grids.end()) {
       continue;
     }
-    for (uint64_t id : *entities) {
+    for (uint64_t id : it->second) {
       if (id != entity_id) {
         result.push_back(id);
       }
@@ -367,47 +387,89 @@ std::vector<uint64_t> AOIManager::GetEntitiesInViewOf(uint64_t entity_id) const 
 }
 
 bool AOIManager::InViewOf(uint64_t entity_a, uint64_t entity_b) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  const auto wait_started_at = SteadyClock::now();
+  const size_t shard_a = EntityShardIndex(entity_a);
+  const size_t shard_b = EntityShardIndex(entity_b);
 
-  auto it_a = entities_.find(entity_a);
-  auto it_b = entities_.find(entity_b);
+  EntityPosition pos_a{};
+  EntityPosition pos_b{};
+  if (shard_a == shard_b) {
+    const EntityShard& shared_shard = entity_shards_[shard_a];
+    std::shared_lock<std::shared_mutex> lock(shared_shard.mutex);
+    RecordAoiLockWait(wait_started_at);
 
-  if (it_a == entities_.end() || it_b == entities_.end()) {
-    return false;
+    auto it_a = shared_shard.entities.find(entity_a);
+    auto it_b = shared_shard.entities.find(entity_b);
+    if (it_a == shared_shard.entities.end() || it_b == shared_shard.entities.end()) {
+      return false;
+    }
+    pos_a = it_a->second;
+    pos_b = it_b->second;
+  } else {
+    const size_t first = std::min(shard_a, shard_b);
+    const size_t second = std::max(shard_a, shard_b);
+    std::shared_lock<std::shared_mutex> first_lock(entity_shards_[first].mutex);
+    std::shared_lock<std::shared_mutex> second_lock(entity_shards_[second].mutex);
+    RecordAoiLockWait(wait_started_at);
+
+    const auto& shard_a_map = entity_shards_[shard_a].entities;
+    const auto& shard_b_map = entity_shards_[shard_b].entities;
+    auto it_a = shard_a_map.find(entity_a);
+    auto it_b = shard_b_map.find(entity_b);
+    if (it_a == shard_a_map.end() || it_b == shard_b_map.end()) {
+      return false;
+    }
+    pos_a = it_a->second;
+    pos_b = it_b->second;
   }
 
-  const GridId& grid_a = it_a->second.grid;
-  const GridId& grid_b = it_b->second.grid;
-
-  // 检查两个实体的格子是否在九宫格范围内
-  int32_t dx = std::abs(grid_a.gx - grid_b.gx);
-  int32_t dy = std::abs(grid_a.gy - grid_b.gy);
-
+  const int32_t dx = std::abs(pos_a.grid.gx - pos_b.grid.gx);
+  const int32_t dy = std::abs(pos_a.grid.gy - pos_b.grid.gy);
   return dx <= 1 && dy <= 1;
 }
 
 size_t AOIManager::EntityCount() const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  return entities_.size();
+  const auto wait_started_at = SteadyClock::now();
+  auto locks = LockAllEntityShardsShared();
+  RecordAoiLockWait(wait_started_at);
+
+  size_t total = 0;
+  for (const auto& shard : entity_shards_) {
+    total += shard.entities.size();
+  }
+  return total;
 }
 
 bool AOIManager::GetEntityPosition(uint64_t entity_id, int32_t& out_x,
                                    int32_t& out_y) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  const auto wait_started_at = SteadyClock::now();
+  const size_t shard_index = EntityShardIndex(entity_id);
+  const EntityShard& shard = entity_shards_[shard_index];
+  std::shared_lock<std::shared_mutex> lock(shard.mutex);
+  RecordAoiLockWait(wait_started_at);
 
-  auto it = entities_.find(entity_id);
-  if (it != entities_.end()) {
-    out_x = it->second.x;
-    out_y = it->second.y;
-    return true;
+  auto it = shard.entities.find(entity_id);
+  if (it == shard.entities.end()) {
+    return false;
   }
-  return false;
+  out_x = it->second.x;
+  out_y = it->second.y;
+  return true;
 }
 
 void AOIManager::Clear() {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
-  grids_.clear();
-  entities_.clear();
+  const auto wait_started_at = SteadyClock::now();
+  auto entity_locks = LockAllEntityShardsUnique();
+  auto grid_locks = LockAllGridShardsUnique();
+  RecordAoiLockWait(wait_started_at);
+
+  for (auto& shard : entity_shards_) {
+    shard.entities.clear();
+  }
+  for (auto& shard : grid_shards_) {
+    shard.grids.clear();
+  }
+  SetHotGridDensity(0);
 }
 
 size_t AOIManager::FillSurroundingGrids(const GridId& center,
@@ -415,26 +477,15 @@ size_t AOIManager::FillSurroundingGrids(const GridId& center,
   size_t count = 0;
   for (int32_t dy = -1; dy <= 1; ++dy) {
     for (int32_t dx = -1; dx <= 1; ++dx) {
-      int32_t gx = center.gx + dx;
-      int32_t gy = center.gy + dy;
+      const int32_t gx = center.gx + dx;
+      const int32_t gy = center.gy + dy;
 
-      // 边界检查
       if (gx >= 0 && gx < grid_count_x_ && gy >= 0 && gy < grid_count_y_) {
         out[count++] = {gx, gy};
       }
     }
   }
-
   return count;
-}
-
-const std::unordered_set<uint64_t>* AOIManager::GetEntitiesInGrid(
-    const GridId& grid) const {
-  auto it = grids_.find(grid);
-  if (it == grids_.end()) {
-    return nullptr;
-  }
-  return &it->second;
 }
 
 bool AOIManager::ContainsGrid(const GridArray& grids, size_t count,
@@ -447,18 +498,187 @@ bool AOIManager::ContainsGrid(const GridArray& grids, size_t count,
   return false;
 }
 
-void AOIManager::AddToGrid(uint64_t entity_id, const GridId& grid) {
-  grids_[grid].insert(entity_id);
+size_t AOIManager::EntityShardIndex(uint64_t entity_id) const {
+  return static_cast<size_t>(entity_id % kEntityShardCount);
 }
 
-void AOIManager::RemoveFromGrid(uint64_t entity_id, const GridId& grid) {
-  auto it = grids_.find(grid);
-  if (it != grids_.end()) {
-    it->second.erase(entity_id);
-    if (it->second.empty()) {
-      grids_.erase(it);
+size_t AOIManager::GridShardIndex(const GridId& grid) const {
+  return GridIdHash{}(grid) % kGridShardCount;
+}
+
+std::vector<size_t> AOIManager::CollectGridShardIndices(const GridArray& grids,
+                                                        size_t count) const {
+  std::vector<size_t> indices;
+  indices.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    indices.push_back(GridShardIndex(grids[i]));
+  }
+  std::sort(indices.begin(), indices.end());
+  indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+  return indices;
+}
+
+std::vector<size_t> AOIManager::CollectGridShardIndices(const GridArray& lhs,
+                                                        size_t lhs_count,
+                                                        const GridArray& rhs,
+                                                        size_t rhs_count) const {
+  std::vector<size_t> indices;
+  indices.reserve(lhs_count + rhs_count);
+  for (size_t i = 0; i < lhs_count; ++i) {
+    indices.push_back(GridShardIndex(lhs[i]));
+  }
+  for (size_t i = 0; i < rhs_count; ++i) {
+    indices.push_back(GridShardIndex(rhs[i]));
+  }
+  std::sort(indices.begin(), indices.end());
+  indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+  return indices;
+}
+
+std::vector<std::shared_lock<std::shared_mutex>> AOIManager::LockGridShardsShared(
+    const std::vector<size_t>& shard_indices) const {
+  std::vector<std::shared_lock<std::shared_mutex>> locks;
+  locks.reserve(shard_indices.size());
+  for (size_t index : shard_indices) {
+    locks.emplace_back(grid_shards_[index].mutex);
+  }
+  return locks;
+}
+
+std::vector<std::unique_lock<std::shared_mutex>> AOIManager::LockGridShardsUnique(
+    const std::vector<size_t>& shard_indices) {
+  std::vector<std::unique_lock<std::shared_mutex>> locks;
+  locks.reserve(shard_indices.size());
+  for (size_t index : shard_indices) {
+    locks.emplace_back(grid_shards_[index].mutex);
+  }
+  return locks;
+}
+
+std::vector<std::shared_lock<std::shared_mutex>>
+AOIManager::LockAllEntityShardsShared() const {
+  std::vector<std::shared_lock<std::shared_mutex>> locks;
+  locks.reserve(kEntityShardCount);
+  for (const auto& shard : entity_shards_) {
+    locks.emplace_back(shard.mutex);
+  }
+  return locks;
+}
+
+std::vector<std::unique_lock<std::shared_mutex>>
+AOIManager::LockAllEntityShardsUnique() {
+  std::vector<std::unique_lock<std::shared_mutex>> locks;
+  locks.reserve(kEntityShardCount);
+  for (auto& shard : entity_shards_) {
+    locks.emplace_back(shard.mutex);
+  }
+  return locks;
+}
+
+std::vector<std::shared_lock<std::shared_mutex>>
+AOIManager::LockAllGridShardsShared() const {
+  std::vector<std::shared_lock<std::shared_mutex>> locks;
+  locks.reserve(kGridShardCount);
+  for (const auto& shard : grid_shards_) {
+    locks.emplace_back(shard.mutex);
+  }
+  return locks;
+}
+
+std::vector<std::unique_lock<std::shared_mutex>> AOIManager::LockAllGridShardsUnique() {
+  std::vector<std::unique_lock<std::shared_mutex>> locks;
+  locks.reserve(kGridShardCount);
+  for (auto& shard : grid_shards_) {
+    locks.emplace_back(shard.mutex);
+  }
+  return locks;
+}
+
+bool AOIManager::TryGetEntityPositionSnapshot(uint64_t entity_id,
+                                              EntityPosition& out) const {
+  const size_t shard_index = EntityShardIndex(entity_id);
+  const EntityShard& shard = entity_shards_[shard_index];
+  std::shared_lock<std::shared_mutex> lock(shard.mutex);
+  auto it = shard.entities.find(entity_id);
+  if (it == shard.entities.end()) {
+    return false;
+  }
+  out = it->second;
+  return true;
+}
+
+AOIManager::AOICallback AOIManager::SnapshotCallback() const {
+  std::lock_guard<std::mutex> lock(callback_mutex_);
+  return callback_;
+}
+
+void AOIManager::CollectEntitiesInGridUnsafe(
+    const GridId& grid, std::unordered_set<uint64_t>& out) const {
+  const GridShard& shard = grid_shards_[GridShardIndex(grid)];
+  auto it = shard.grids.find(grid);
+  if (it == shard.grids.end()) {
+    return;
+  }
+  out.insert(it->second.begin(), it->second.end());
+}
+
+void AOIManager::CollectEntitiesFromGridsUnsafe(
+    const GridArray& grids, size_t count, std::unordered_set<uint64_t>& out) const {
+  for (size_t i = 0; i < count; ++i) {
+    CollectEntitiesInGridUnsafe(grids[i], out);
+  }
+}
+
+void AOIManager::AddToGrid(uint64_t entity_id, const GridId& grid) {
+  GridShard& shard = grid_shards_[GridShardIndex(grid)];
+  auto& entities = shard.grids[grid];
+  entities.insert(entity_id);
+  ObserveHotGridDensity(entities.size());
+}
+
+bool AOIManager::RemoveFromGrid(uint64_t entity_id, const GridId& grid) {
+  GridShard& shard = grid_shards_[GridShardIndex(grid)];
+  auto it = shard.grids.find(grid);
+  if (it == shard.grids.end()) {
+    return false;
+  }
+
+  const size_t old_size = it->second.size();
+  it->second.erase(entity_id);
+  const size_t new_size = it->second.size();
+  if (it->second.empty()) {
+    shard.grids.erase(it);
+  }
+
+  const size_t current_hot = hot_grid_density_.load(std::memory_order_relaxed);
+  return old_size >= current_hot && new_size < old_size;
+}
+
+void AOIManager::ObserveHotGridDensity(size_t density) {
+  size_t current = hot_grid_density_.load(std::memory_order_relaxed);
+  while (current < density &&
+         !hot_grid_density_.compare_exchange_weak(
+             current, density, std::memory_order_relaxed)) {
+  }
+  if (current < density) {
+    UpdateAoiHotGridDensityGauge(density);
+  }
+}
+
+void AOIManager::SetHotGridDensity(size_t density) {
+  hot_grid_density_.store(density, std::memory_order_relaxed);
+  UpdateAoiHotGridDensityGauge(density);
+}
+
+void AOIManager::RecomputeHotGridDensity() {
+  auto locks = LockAllGridShardsShared();
+  size_t max_density = 0;
+  for (const auto& shard : grid_shards_) {
+    for (const auto& entry : shard.grids) {
+      max_density = std::max(max_density, entry.second.size());
     }
   }
+  SetHotGridDensity(max_density);
 }
 
 }  // namespace mir2::game::map

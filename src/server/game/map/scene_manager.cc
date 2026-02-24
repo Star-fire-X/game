@@ -5,15 +5,100 @@
 
 #include "game/map/scene_manager.h"
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "log/logger.h"
+#include "monitor/metrics.h"
 
 namespace mir2::game::map {
 namespace {
+
+constexpr const char* kMetricMapLoadInFlight = "logic.scene.map_load.inflight";
+constexpr const char* kMetricMapLoadWaiters = "logic.scene.map_load.waiters";
+constexpr const char* kMetricMapLoadWaitTimeoutTotal =
+    "logic.scene.map_load.wait_timeout_total";
+constexpr const char* kMetricMapLoadSuccessTotal =
+    "logic.scene.map_load.success_total";
+constexpr const char* kMetricMapLoadFailTotal = "logic.scene.map_load.fail_total";
+constexpr const char* kMetricMapLoadDurationMs = "logic.scene.map_load.duration_ms";
+constexpr auto kMapLoadWaitLogInterval = std::chrono::seconds(3);
+
+std::atomic<int64_t> g_map_load_inflight{0};
+std::atomic<int64_t> g_map_load_waiters{0};
+
+double DurationMs(const std::chrono::steady_clock::duration duration) {
+  return static_cast<double>(
+             std::chrono::duration_cast<std::chrono::microseconds>(duration).count()) /
+         1000.0;
+}
+
+void UpdateMapLoadGauge(const char* name, std::atomic<int64_t>& value) {
+  monitor::Metrics::Instance().SetGauge(name, static_cast<double>(value.load()));
+}
+
+class ScopedMapLoadInFlight {
+ public:
+  explicit ScopedMapLoadInFlight(int32_t map_id) : map_id_(map_id) {
+    g_map_load_inflight.fetch_add(1, std::memory_order_relaxed);
+    UpdateMapLoadGauge(kMetricMapLoadInFlight, g_map_load_inflight);
+  }
+
+  ~ScopedMapLoadInFlight() {
+    g_map_load_inflight.fetch_sub(1, std::memory_order_relaxed);
+    UpdateMapLoadGauge(kMetricMapLoadInFlight, g_map_load_inflight);
+  }
+
+  void Report(bool success, double duration_ms) {
+    monitor::Metrics::Instance().SetGauge(kMetricMapLoadDurationMs, duration_ms);
+    if (success) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricMapLoadSuccessTotal);
+    } else {
+      monitor::Metrics::Instance().IncrementCounter(kMetricMapLoadFailTotal);
+      SYSLOG_WARN("SceneManager: map {} load failed duration_ms={:.3f}",
+                  map_id_,
+                  duration_ms);
+    }
+  }
+
+ private:
+  int32_t map_id_;
+};
+
+class ScopedMapLoadWaiter {
+ public:
+  explicit ScopedMapLoadWaiter(int32_t map_id)
+      : map_id_(map_id), start_(std::chrono::steady_clock::now()) {
+    g_map_load_waiters.fetch_add(1, std::memory_order_relaxed);
+    UpdateMapLoadGauge(kMetricMapLoadWaiters, g_map_load_waiters);
+  }
+
+  ~ScopedMapLoadWaiter() {
+    g_map_load_waiters.fetch_sub(1, std::memory_order_relaxed);
+    UpdateMapLoadGauge(kMetricMapLoadWaiters, g_map_load_waiters);
+  }
+
+  void OnWaitTimeout() const {
+    const auto waited_ms = DurationMs(std::chrono::steady_clock::now() - start_);
+    monitor::Metrics::Instance().IncrementCounter(kMetricMapLoadWaitTimeoutTotal);
+    SYSLOG_WARN(
+        "SceneManager: waiting for map {} load timed out after {:.3f}ms "
+        "(waiters={}, inflight={})",
+        map_id_,
+        waited_ms,
+        g_map_load_waiters.load(),
+        g_map_load_inflight.load());
+  }
+
+ private:
+  int32_t map_id_;
+  std::chrono::steady_clock::time_point start_;
+};
 
 std::vector<std::string> BuildMapPathCandidates(
     const SceneManager::MapConfig& config) {
@@ -146,6 +231,9 @@ MapInstance* SceneManager::GetOrCreateMap(const MapConfig& config) {
     }
   }
 
+  std::optional<std::chrono::steady_clock::time_point> load_start;
+  std::unique_ptr<ScopedMapLoadInFlight> load_guard;
+
   {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     while (true) {
@@ -157,15 +245,29 @@ MapInstance* SceneManager::GetOrCreateMap(const MapConfig& config) {
       const auto [loading_it, inserted] = loading_map_ids_.insert(config.map_id);
       (void)loading_it;
       if (inserted) {
+        load_start = std::chrono::steady_clock::now();
+        load_guard = std::make_unique<ScopedMapLoadInFlight>(config.map_id);
         break;
       }
 
-      map_load_cv_.wait(lock, [this, &config]() {
+      ScopedMapLoadWaiter waiter(config.map_id);
+      while (!map_load_cv_.wait_for(lock, kMapLoadWaitLogInterval, [this, &config]() {
         return maps_.find(config.map_id) != maps_.end() ||
                loading_map_ids_.find(config.map_id) == loading_map_ids_.end();
-      });
+      })) {
+        waiter.OnWaitTimeout();
+      }
     }
   }
+
+  auto report_load_result = [&](bool success) {
+    if (!load_guard || !load_start.has_value()) {
+      return;
+    }
+    const double duration_ms =
+        DurationMs(std::chrono::steady_clock::now() - *load_start);
+    load_guard->Report(success, duration_ms);
+  };
 
   int32_t map_width = config.width;
   int32_t map_height = config.height;
@@ -174,6 +276,7 @@ MapInstance* SceneManager::GetOrCreateMap(const MapConfig& config) {
   try {
     tile_data = LoadMapDataUnlocked(config, map_width, map_height, walkability);
   } catch (...) {
+    report_load_result(false);
     std::unique_lock<std::shared_mutex> lock(mutex_);
     loading_map_ids_.erase(config.map_id);
     map_load_cv_.notify_all();
@@ -181,6 +284,7 @@ MapInstance* SceneManager::GetOrCreateMap(const MapConfig& config) {
   }
 
   if (map_width <= 0 || map_height <= 0) {
+    report_load_result(false);
     std::unique_lock<std::shared_mutex> lock(mutex_);
     loading_map_ids_.erase(config.map_id);
     map_load_cv_.notify_all();
@@ -202,6 +306,7 @@ MapInstance* SceneManager::GetOrCreateMap(const MapConfig& config) {
   auto it = maps_.find(config.map_id);
   if (it != maps_.end()) {
     map_load_cv_.notify_all();
+    report_load_result(true);
     return it->second.get();
   }
 
@@ -214,6 +319,7 @@ MapInstance* SceneManager::GetOrCreateMap(const MapConfig& config) {
   map_configs_[config.map_id] = std::move(stored_config);
 
   map_load_cv_.notify_all();
+  report_load_result(true);
   return map_ptr;
 }
 
@@ -273,11 +379,17 @@ std::optional<int32_t> SceneManager::TryGetEntityMapId(entt::entity entity) cons
   return entity_it->second;
 }
 
+std::mutex& SceneManager::GetEntityOpsMutex(entt::entity entity) const {
+  const size_t entity_id = static_cast<size_t>(entt::to_integral(entity));
+  return entity_ops_mutexes_[entity_id % kEntityOpsLockStripeCount];
+}
+
 bool SceneManager::AddEntityToMap(int32_t map_id,
                                   entt::entity entity,
                                   int32_t x,
                                   int32_t y) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::shared_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
+  std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   std::shared_ptr<MapInstance> target_map;
   std::shared_ptr<MapInstance> old_map;
@@ -322,7 +434,8 @@ bool SceneManager::AddEntityToMap(int32_t map_id,
 }
 
 bool SceneManager::RemoveEntityFromMap(entt::entity entity) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::shared_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
+  std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   std::shared_ptr<MapInstance> map;
   int32_t map_id = 0;
@@ -361,7 +474,8 @@ bool SceneManager::RemoveEntityFromMap(entt::entity entity) {
 bool SceneManager::UpdateEntityPosition(entt::entity entity,
                                         int32_t new_x,
                                         int32_t new_y) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::shared_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
+  std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   std::shared_ptr<MapInstance> map;
   {
@@ -390,7 +504,8 @@ bool SceneManager::TeleportEntity(entt::entity entity,
                                   int32_t target_map_id,
                                   int32_t target_x,
                                   int32_t target_y) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::shared_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
+  std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   std::shared_ptr<MapInstance> target_map;
   std::shared_ptr<MapInstance> current_map;
@@ -473,7 +588,7 @@ bool SceneManager::TeleportEntity(entt::entity entity,
 }
 
 bool SceneManager::DestroyMap(int32_t map_id) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::unique_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
 
   std::unique_lock<std::shared_mutex> lock(mutex_);
   auto map_it = maps_.find(map_id);
@@ -503,7 +618,7 @@ bool SceneManager::ReloadMap(int32_t map_id) {
     int32_t y;
   };
 
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::unique_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
 
   std::shared_ptr<MapInstance> old_map;
   MapConfig config;
@@ -613,7 +728,7 @@ size_t SceneManager::MapCount() const {
 }
 
 void SceneManager::Clear() {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::unique_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
 
   std::unique_lock<std::shared_mutex> lock(mutex_);
   loading_map_ids_.clear();
@@ -621,6 +736,36 @@ void SceneManager::Clear() {
   maps_.clear();
   map_configs_.clear();
   map_load_cv_.notify_all();
+}
+
+size_t SceneManager::DispatchPendingAOIEvents() {
+  return DispatchPendingAOIEvents(std::numeric_limits<size_t>::max());
+}
+
+size_t SceneManager::DispatchPendingAOIEvents(size_t max_events_per_map) {
+  if (max_events_per_map == 0) {
+    return 0;
+  }
+
+  std::vector<std::shared_ptr<MapInstance>> maps_snapshot;
+  {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    maps_snapshot.reserve(maps_.size());
+    for (const auto& [map_id, map] : maps_) {
+      (void)map_id;
+      maps_snapshot.push_back(map);
+    }
+  }
+
+  size_t dispatched_events = 0;
+  for (const auto& map : maps_snapshot) {
+    if (!map) {
+      continue;
+    }
+    dispatched_events += map->DispatchPendingAOIEvents(max_events_per_map);
+  }
+
+  return dispatched_events;
 }
 
 void SceneManager::IndexEntity(entt::entity entity, int32_t map_id) {

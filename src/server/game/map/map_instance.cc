@@ -7,8 +7,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
+
+#include "monitor/metrics.h"
 
 namespace mir2::game::map {
+namespace {
+
+constexpr const char* kMetricAoiPendingEvents = "logic.aoi.pending_events";
+constexpr const char* kMetricAoiDispatchBatch = "logic.aoi.dispatch_batch";
+constexpr const char* kMetricAoiDispatchTotal = "logic.aoi.dispatch_total";
+constexpr const char* kMetricAoiQueueOverflowTotal = "logic.aoi.queue_overflow_total";
+constexpr size_t kDefaultAoiDispatchReserve = 256;
+
+}  // namespace
 
 MapInstance::MapInstance(int32_t map_id, int32_t map_width, int32_t map_height,
                          int32_t grid_size, std::vector<uint8_t> walkability,
@@ -52,6 +64,9 @@ MapInstance::MapInstance(int32_t map_id, int32_t map_width, int32_t map_height,
       std::shared_ptr<const MapAttributes>(
           std::make_shared<MapAttributes>(attributes_)),
       std::memory_order_release);
+
+  monitor::Metrics::Instance().SetGauge(kMetricAoiPendingEvents, 0.0);
+  monitor::Metrics::Instance().SetGauge(kMetricAoiDispatchBatch, 0.0);
 }
 
 bool MapInstance::IsValidPosition(int32_t x, int32_t y) const {
@@ -232,6 +247,62 @@ void MapInstance::SetAttributes(const MapAttributes& attrs) {
 void MapInstance::SetAOICallback(AOIEventCallback callback) {
   std::lock_guard<std::mutex> lock(aoi_callback_mutex_);
   aoi_callback_ = std::move(callback);
+  aoi_callback_enabled_.store(static_cast<bool>(aoi_callback_),
+                              std::memory_order_release);
+}
+
+size_t MapInstance::DispatchPendingAOIEvents() {
+  return DispatchPendingAOIEvents(std::numeric_limits<size_t>::max());
+}
+
+size_t MapInstance::DispatchPendingAOIEvents(size_t max_events) {
+  if (max_events == 0) {
+    return 0;
+  }
+
+  std::vector<PendingAOIEvent> events;
+  const size_t reserve_hint = std::min(max_events, kDefaultAoiDispatchReserve);
+  events.reserve(reserve_hint);
+
+  {
+    std::lock_guard<std::mutex> dispatch_lock(aoi_dispatch_mutex_);
+    PendingAOIEvent event;
+    while (events.size() < max_events && pending_aoi_events_.TryDequeue(&event)) {
+      events.push_back(event);
+    }
+  }
+
+  monitor::Metrics::Instance().SetGauge(
+      kMetricAoiPendingEvents,
+      static_cast<double>(pending_aoi_events_.ApproxSize()));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricAoiDispatchBatch,
+      static_cast<double>(events.size()));
+
+  if (events.empty()) {
+    return 0;
+  }
+
+  AOIEventCallback callback;
+  {
+    std::lock_guard<std::mutex> callback_lock(aoi_callback_mutex_);
+    callback = aoi_callback_;
+  }
+
+  if (callback) {
+    for (const auto& event : events) {
+      callback(event.event_type, event.watcher, event.target, event.x, event.y);
+    }
+  }
+
+  monitor::Metrics::Instance().IncrementCounter(
+      kMetricAoiDispatchTotal,
+      static_cast<uint64_t>(events.size()));
+  return events.size();
+}
+
+size_t MapInstance::PendingAOIEventCount() const {
+  return pending_aoi_events_.ApproxSize();
 }
 
 void MapInstance::SetEventBus(ecs::EventBus* event_bus) {
@@ -267,8 +338,14 @@ void MapInstance::UpdateAreaEvents(float delta_time, entt::registry& registry) {
   area_event_processor_.FlushPendingEvents();
 }
 
+std::mutex& MapInstance::GetEntityOpsMutex(entt::entity entity) const {
+  const size_t entity_id = static_cast<size_t>(EntityToId(entity));
+  return entity_ops_mutexes_[entity_id % kEntityOpsLockStripeCount];
+}
+
 bool MapInstance::AddEntity(entt::entity entity, int32_t x, int32_t y) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::shared_lock<std::shared_mutex> ops_barrier_lock(entity_ops_barrier_mutex_);
+  std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   {
     std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -305,7 +382,8 @@ bool MapInstance::AddEntity(entt::entity entity, int32_t x, int32_t y) {
 }
 
 bool MapInstance::RemoveEntity(entt::entity entity) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::shared_lock<std::shared_mutex> ops_barrier_lock(entity_ops_barrier_mutex_);
+  std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   {
     std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -337,8 +415,9 @@ bool MapInstance::RemoveEntity(entt::entity entity) {
 }
 
 bool MapInstance::UpdateEntityPosition(entt::entity entity, int32_t new_x,
-                                        int32_t new_y) {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+                                       int32_t new_y) {
+  std::shared_lock<std::shared_mutex> ops_barrier_lock(entity_ops_barrier_mutex_);
+  std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   {
     std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -421,7 +500,7 @@ size_t MapInstance::EntityCount() const {
 }
 
 bool MapInstance::GetEntityPosition(entt::entity entity, int32_t& out_x,
-                                     int32_t& out_y) const {
+                                    int32_t& out_y) const {
   std::shared_lock<std::shared_mutex> lock(mutex_);
 
   // 检查实体是否存在
@@ -433,10 +512,19 @@ bool MapInstance::GetEntityPosition(entt::entity entity, int32_t& out_x,
 }
 
 void MapInstance::Clear() {
-  std::lock_guard<std::mutex> entity_ops_lock(entity_ops_mutex_);
+  std::unique_lock<std::shared_mutex> ops_barrier_lock(entity_ops_barrier_mutex_);
   std::unique_lock<std::shared_mutex> lock(mutex_);
   entities_.clear();
   aoi_manager_->Clear();
+
+  {
+    std::lock_guard<std::mutex> dispatch_lock(aoi_dispatch_mutex_);
+    PendingAOIEvent event;
+    while (pending_aoi_events_.TryDequeue(&event)) {
+    }
+  }
+  monitor::Metrics::Instance().SetGauge(kMetricAoiPendingEvents, 0.0);
+  monitor::Metrics::Instance().SetGauge(kMetricAoiDispatchBatch, 0.0);
 }
 
 void MapInstance::RebuildSafeZoneIndex() {
@@ -482,19 +570,25 @@ std::vector<uint8_t>& MapInstance::MutableWalkabilityDataUnsafe() {
 
 void MapInstance::OnAOIEvent(AOIEventType event_type, uint64_t watcher_id,
                              uint64_t target_id, int32_t x, int32_t y) {
-  // 转换 ID 为实体
-  entt::entity watcher = IdToEntity(watcher_id);
-  entt::entity target = IdToEntity(target_id);
-
-  AOIEventCallback callback;
-  {
-    std::lock_guard<std::mutex> lock(aoi_callback_mutex_);
-    callback = aoi_callback_;
+  if (!aoi_callback_enabled_.load(std::memory_order_acquire)) {
+    return;
   }
 
-  if (callback) {
-    callback(event_type, watcher, target, x, y);
+  PendingAOIEvent event;
+  event.event_type = event_type;
+  event.watcher = IdToEntity(watcher_id);
+  event.target = IdToEntity(target_id);
+  event.x = x;
+  event.y = y;
+
+  if (!pending_aoi_events_.TryEnqueue(event)) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricAoiQueueOverflowTotal);
+    return;
   }
+
+  monitor::Metrics::Instance().SetGauge(
+      kMetricAoiPendingEvents,
+      static_cast<double>(pending_aoi_events_.ApproxSize()));
 }
 
 bool MapInstance::CanRecall() const {

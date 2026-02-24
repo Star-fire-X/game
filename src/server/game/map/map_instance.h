@@ -10,15 +10,18 @@
 
 #include <entt/entt.hpp>
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <optional>
+#include <shared_mutex>
 #include <unordered_set>
 #include <vector>
 
+#include "core/concurrency/mpsc_ring.h"
 #include "game/map/aoi_manager.h"
 #include "game/map/area_event_processor.h"
 #include "game/map/door_manager.h"
@@ -243,6 +246,26 @@ class MapInstance {
   void SetAOICallback(AOIEventCallback callback);
 
   /**
+   * @brief 派发待处理 AOI 事件（消费端）
+   *
+   * @return 本次派发的事件数
+   */
+  size_t DispatchPendingAOIEvents();
+
+  /**
+   * @brief 派发待处理 AOI 事件（限制批量）
+   *
+   * @param max_events 最多派发事件数
+   * @return 本次派发的事件数
+   */
+  size_t DispatchPendingAOIEvents(size_t max_events);
+
+  /**
+   * @brief 获取待处理 AOI 事件近似数量
+   */
+  size_t PendingAOIEventCount() const;
+
+  /**
    * @brief 设置区域事件总线
    */
   void SetEventBus(ecs::EventBus* event_bus);
@@ -359,6 +382,14 @@ class MapInstance {
    */
   void RebuildSafeZoneIndex();
 
+  struct PendingAOIEvent {
+    AOIEventType event_type = AOIEventType::kMove;
+    entt::entity watcher = entt::null;
+    entt::entity target = entt::null;
+    int32_t x = 0;
+    int32_t y = 0;
+  };
+
   /**
    * @brief 实体转换为 uint64_t
    */
@@ -383,6 +414,11 @@ class MapInstance {
    */
   std::vector<uint8_t>& MutableWalkabilityDataUnsafe();
 
+  /**
+   * @brief 获取实体操作分片锁
+   */
+  std::mutex& GetEntityOpsMutex(entt::entity entity) const;
+
   int32_t map_id_;
   int32_t map_width_;
   int32_t map_height_;
@@ -400,7 +436,14 @@ class MapInstance {
 
   AOIEventCallback aoi_callback_;
   mutable std::mutex aoi_callback_mutex_;
-  std::mutex entity_ops_mutex_;
+  std::atomic<bool> aoi_callback_enabled_{false};
+  static constexpr size_t kAOIEventQueueCapacity = 8192;
+  core::concurrency::MpscRingQueue<PendingAOIEvent, kAOIEventQueueCapacity>
+      pending_aoi_events_;
+  mutable std::mutex aoi_dispatch_mutex_;
+  mutable std::shared_mutex entity_ops_barrier_mutex_;
+  static constexpr size_t kEntityOpsLockStripeCount = 64;
+  mutable std::array<std::mutex, kEntityOpsLockStripeCount> entity_ops_mutexes_;
   mutable std::shared_mutex mutex_;  // 使用 shared_mutex 支持读写锁分离
 };
 

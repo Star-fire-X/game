@@ -8,6 +8,7 @@
 #include "ecs/event_bus.h"
 #include "ecs/events/map_events.h"
 #include "game/map/scene_manager.h"
+#include "game/map/scene_manager_adapter.h"
 
 #include <gtest/gtest.h>
 
@@ -27,7 +28,8 @@ class TeleportSystemTest : public ::testing::Test {
     scene_manager_.CreateMap(map2_config);
 
     // 创建传送系统
-    teleport_system_ = std::make_unique<TeleportSystem>(scene_manager_, event_bus_);
+    map_port_ = std::make_unique<SceneManagerAdapter>(scene_manager_);
+    teleport_system_ = std::make_unique<TeleportSystem>(*map_port_, event_bus_);
   }
 
   void TearDown() override {
@@ -38,6 +40,7 @@ class TeleportSystemTest : public ::testing::Test {
   entt::registry registry_;
   EventBus event_bus_{registry_};
   SceneManager scene_manager_;
+  std::unique_ptr<SceneManagerAdapter> map_port_;
   std::unique_ptr<TeleportSystem> teleport_system_;
 };
 
@@ -49,7 +52,7 @@ TEST_F(TeleportSystemTest, CrossMapTeleportSuccess) {
   scene_manager_.AddEntityToMap(1, entity, 10, 10);
 
   // 请求传送到地图2
-  TeleportCommand cmd{entity, 2, 50, 50};
+  TeleportRequest cmd{entity, 2, 50, 50};
   teleport_system_->RequestTeleport(cmd);
 
   // 执行系统更新
@@ -81,7 +84,7 @@ TEST_F(TeleportSystemTest, CrossMapTeleportPublishesMapChangeEvent) {
         ++publish_count;
       });
 
-  TeleportCommand cmd{entity, 2, 50, 50};
+  TeleportRequest cmd{entity, 2, 50, 50};
   teleport_system_->RequestTeleport(cmd);
   teleport_system_->Update(registry_, 0.0f);
 
@@ -100,7 +103,7 @@ TEST_F(TeleportSystemTest, SameMapTeleport) {
   scene_manager_.AddEntityToMap(1, entity, 10, 10);
 
   // 请求同地图传送
-  TeleportCommand cmd{entity, 1, 30, 30};
+  TeleportRequest cmd{entity, 1, 30, 30};
   teleport_system_->RequestTeleport(cmd);
   teleport_system_->Update(registry_, 0.0f);
 
@@ -122,7 +125,7 @@ TEST_F(TeleportSystemTest, SameMapTeleportInvalidPositionKeepsState) {
   scene_manager_.AddEntityToMap(1, entity, 10, 10);
 
   // 地图1尺寸为 100x100，(150,150) 非法
-  TeleportCommand cmd{entity, 1, 150, 150};
+  TeleportRequest cmd{entity, 1, 150, 150};
   teleport_system_->RequestTeleport(cmd);
   teleport_system_->Update(registry_, 0.0f);
 
@@ -149,7 +152,7 @@ TEST_F(TeleportSystemTest, TeleportToNonExistentMap) {
   scene_manager_.AddEntityToMap(1, entity, 10, 10);
 
   // 请求传送到不存在的地图999
-  TeleportCommand cmd{entity, 999, 50, 50};
+  TeleportRequest cmd{entity, 999, 50, 50};
   teleport_system_->RequestTeleport(cmd);
   teleport_system_->Update(registry_, 0.0f);
 
@@ -168,7 +171,7 @@ TEST_F(TeleportSystemTest, TeleportToInvalidPosition) {
   scene_manager_.AddEntityToMap(1, entity, 10, 10);
 
   // 请求传送到超出边界的坐标
-  TeleportCommand cmd{entity, 2, 300, 300};  // 地图2是200x200
+  TeleportRequest cmd{entity, 2, 300, 300};  // 地图2是200x200
   teleport_system_->RequestTeleport(cmd);
   teleport_system_->Update(registry_, 0.0f);
 

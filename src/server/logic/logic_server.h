@@ -62,6 +62,11 @@ class SceneManager;
 class MapContextService;
 }  // namespace mir2::game::map
 
+namespace mir2::game::ports {
+class IGuildPort;
+class IWorldMapPort;
+}  // namespace mir2::game::ports
+
 namespace mir2::logic {
 
 namespace events {
@@ -236,11 +241,13 @@ class LogicServer {
   std::unique_ptr<game::map::AOIManager> chat_aoi_manager_;
   std::shared_ptr<db::PgConnectionPool> db_pool_;
   ecs::GuildSystem* guild_system_ = nullptr;
+  std::unique_ptr<game::ports::IGuildPort> guild_port_;
   std::unique_ptr<RoleStore> role_store_;
   ClientRegistry client_registry_;
   game::map::GateManager gate_manager_;
   ecs::RegistryManager* registry_manager_ = nullptr;
   std::unique_ptr<game::map::SceneManager> scene_manager_;
+  std::unique_ptr<game::ports::IWorldMapPort> world_map_port_;
   std::unique_ptr<game::map::MapContextService> map_context_service_;
   std::unordered_map<uint32_t, std::unique_ptr<WorldSystemBundle>> world_systems_;
   std::string config_path_;

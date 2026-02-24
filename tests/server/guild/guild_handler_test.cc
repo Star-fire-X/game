@@ -19,6 +19,7 @@
 #include "ecs/event_bus.h"
 #include "ecs/systems/guild_system.h"
 #include "game/guild/guild_manager.h"
+#include "game/guild/guild_manager_adapter.h"
 #include "guild_generated.h"
 #include "logic/coroutine_executor.h"
 #include "logic/handlers/guild/guild_handler.h"
@@ -91,7 +92,9 @@ class GuildHandlerTest : public ::testing::Test {
     event_bus_ = std::make_unique<ecs::EventBus>(registry_);
     guild_mgr_ = &game::guild::GuildManager::Instance();
     guild_mgr_->Clear(registry_);
-    guild_system_ = std::make_unique<ecs::GuildSystem>(*event_bus_, *guild_mgr_);
+    guild_port_ =
+        std::make_unique<game::guild::GuildManagerAdapter>(*guild_mgr_);
+    guild_system_ = std::make_unique<ecs::GuildSystem>(*event_bus_, *guild_port_);
     player_presence_service_ = std::make_unique<PlayerPresenceService>(registry_);
     handler_ = std::make_unique<GuildHandler>(*executor_,
                                               *response_sender_,
@@ -164,6 +167,7 @@ class GuildHandlerTest : public ::testing::Test {
   std::unique_ptr<ThrowOnceResponseSender> response_sender_;
   std::unique_ptr<ecs::EventBus> event_bus_;
   game::guild::GuildManager* guild_mgr_ = nullptr;
+  std::unique_ptr<game::guild::GuildManagerAdapter> guild_port_;
   std::unique_ptr<ecs::GuildSystem> guild_system_;
   std::unique_ptr<PlayerPresenceService> player_presence_service_;
   ClientRegistry client_registry_;

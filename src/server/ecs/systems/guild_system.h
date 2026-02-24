@@ -13,7 +13,7 @@
 
 #include "ecs/components/guild_component.h"
 #include "ecs/world.h"
-#include "game/guild/guild_manager.h"
+#include "game/ports/i_guild_port.h"
 
 namespace mir2::ecs {
 
@@ -24,7 +24,7 @@ class EventBus;
  */
 class GuildSystem : public System {
  public:
-    explicit GuildSystem(EventBus& event_bus, game::guild::GuildManager& guild_mgr);
+    explicit GuildSystem(EventBus& event_bus, game::ports::IGuildPort& guild_port);
 
     void Update(entt::registry& registry, float delta_time) override;
 
@@ -76,7 +76,7 @@ class GuildSystem : public System {
     void CheckWarTimeout(entt::registry& registry);
 
     EventBus& event_bus_;
-    game::guild::GuildManager& guild_mgr_;
+    game::ports::IGuildPort& guild_mgr_;
     float war_check_timer_ = 0.0f;
 
     static constexpr float WAR_CHECK_INTERVAL = 60.0f;

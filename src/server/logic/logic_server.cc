@@ -79,9 +79,11 @@
 #include "storage_engine/storage_engine.h"
 #include "ecs/systems/guild_system.h"
 #include "game/guild/guild_manager.h"
+#include "game/guild/guild_manager_adapter.h"
 #include "game/map/aoi_manager.h"
 #include "game/map/map_context_service.h"
 #include "game/map/map_instance.h"
+#include "game/map/scene_manager_adapter.h"
 #include "guild_generated.h"
 #include "chat_generated.h"
 #include "game/map/scene_manager.h"
@@ -739,9 +741,17 @@ bool LogicServer::Initialize(const std::string& config_path) {
   if (!scene_manager_) {
     scene_manager_ = std::make_unique<game::map::SceneManager>();
   }
+  if (!world_map_port_) {
+    world_map_port_ =
+        std::make_unique<game::map::SceneManagerAdapter>(*scene_manager_);
+  }
   if (!map_context_service_) {
     map_context_service_ =
         std::make_unique<game::map::MapContextService>(*scene_manager_);
+  }
+  if (!guild_port_) {
+    guild_port_ = std::make_unique<game::guild::GuildManagerAdapter>(
+        game::guild::GuildManager::Instance());
   }
 
   const uint32_t default_map_id = ResolveDefaultMapId();
@@ -1071,8 +1081,10 @@ void LogicServer::Shutdown() {
   }
 
   world_systems_.clear();
-  scene_manager_.reset();
   map_context_service_.reset();
+  world_map_port_.reset();
+  scene_manager_.reset();
+  guild_port_.reset();
   registry_manager_ = nullptr;
 
   app_.ReleaseWorkGuard();
@@ -1338,10 +1350,14 @@ void LogicServer::RegisterHandlers() {
         return;
       }
       default_registry = &default_world->Registry();
+      if (!guild_port_) {
+        guild_port_ = std::make_unique<game::guild::GuildManagerAdapter>(
+            game::guild::GuildManager::Instance());
+      }
       if (!guild_system_) {
         guild_system_ = default_world->CreateSystem<ecs::GuildSystem>(
             default_world->GetEventBus(),
-            game::guild::GuildManager::Instance());
+            *guild_port_);
       }
       auto& bundle = EnsureWorldSystems(default_map_id, *default_world);
       teleport_system = bundle.teleport_system;
@@ -3374,8 +3390,12 @@ WorldSystemBundle& LogicServer::EnsureWorldSystems(uint32_t map_id,
     if (!scene_manager_) {
       scene_manager_ = std::make_unique<game::map::SceneManager>();
     }
+    if (!world_map_port_) {
+      world_map_port_ =
+          std::make_unique<game::map::SceneManagerAdapter>(*scene_manager_);
+    }
     bundle->teleport_system =
-        world.CreateSystem<ecs::TeleportSystem>(*scene_manager_, world.GetEventBus());
+        world.CreateSystem<ecs::TeleportSystem>(*world_map_port_, world.GetEventBus());
     bundle->ecs_systems_registered = true;
   }
 

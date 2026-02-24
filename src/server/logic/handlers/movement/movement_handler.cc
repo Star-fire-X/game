@@ -17,10 +17,10 @@
 #include "core/utils.h"
 #include "ecs/components/character_components.h"
 #include "ecs/character_entity_manager.h"
-#include "game/map/gate_manager.h"
-#include "game/map/teleport_command.h"
-#include "game_generated.h"
 #include "ecs/systems/teleport_system.h"
+#include "game/map/gate_manager.h"
+#include "game/map/scene_manager.h"
+#include "game_generated.h"
 #include "log/logger.h"
 #include "logic/handlers/handler_error_utils.h"
 #include "logic/response_sender.h"
@@ -354,8 +354,8 @@ Task<void> MovementHandler::HandleMove(HandlerContext ctx,
       triggered_gate.has_value() && teleport_system_ && entity != entt::null) {
     int32_t target_map_id = 0;
     if (TryParseMapId(triggered_gate->target_map, &target_map_id)) {
-      mir2::game::map::TeleportCommand cmd(
-          entity, target_map_id, triggered_gate->target_x, triggered_gate->target_y);
+      mir2::ecs::TeleportRequest cmd{
+          entity, target_map_id, triggered_gate->target_x, triggered_gate->target_y};
       teleport_system_->RequestTeleport(cmd);
     }
   }

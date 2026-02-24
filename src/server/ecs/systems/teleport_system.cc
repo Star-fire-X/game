@@ -11,24 +11,26 @@
 
 namespace mir2::ecs {
 
-TeleportSystem::TeleportSystem(game::map::SceneManager& scene_manager, EventBus& event_bus)
-    : System(SystemPriority::kMovement), scene_manager_(scene_manager), event_bus_(&event_bus) {
+TeleportSystem::TeleportSystem(game::ports::IWorldMapPort& world_map_port, EventBus& event_bus)
+    : System(SystemPriority::kMovement),
+      world_map_port_(world_map_port),
+      event_bus_(&event_bus) {
   if (event_bus_) {
     event_bus_->Subscribe<events::TeleportRequestEvent>(
         [this](events::TeleportRequestEvent& event) {
-          RequestTeleport(game::map::TeleportCommand{
+          RequestTeleport(TeleportRequest{
               event.entity, event.target_map_id, event.target_x, event.target_y});
         });
   }
 }
 
-void TeleportSystem::RequestTeleport(const game::map::TeleportCommand& cmd) {
+void TeleportSystem::RequestTeleport(const TeleportRequest& cmd) {
   std::lock_guard<std::mutex> lock(teleport_queue_mutex_);
   teleport_queue_.push(cmd);
 }
 
 void TeleportSystem::Update(entt::registry& registry, float /*delta_time*/) {
-  std::queue<game::map::TeleportCommand> pending_queue;
+  std::queue<TeleportRequest> pending_queue;
   {
     std::lock_guard<std::mutex> lock(teleport_queue_mutex_);
     std::swap(pending_queue, teleport_queue_);
@@ -56,9 +58,10 @@ void TeleportSystem::Update(entt::registry& registry, float /*delta_time*/) {
     // 检查是否同地图传送
     if (state->map_id == static_cast<uint32_t>(cmd.target_map_id)) {
       SYSLOG_DEBUG("TeleportSystem: Same map teleport, use movement instead");
-      // 同地图传送，直接更新位置。仅在 SceneManager 更新成功时同步组件状态。
-      if (!scene_manager_.UpdateEntityPosition(cmd.entity, cmd.target_x,
-                                               cmd.target_y)) {
+      // 同地图传送，直接更新位置。仅在地图端口更新成功时同步组件状态。
+      if (!world_map_port_.UpdateEntityPosition(cmd.entity,
+                                                cmd.target_x,
+                                                cmd.target_y)) {
         SYSLOG_WARN("TeleportSystem: Same map teleport failed on map {} to ({}, {})",
                     cmd.target_map_id, cmd.target_x, cmd.target_y);
         continue;
@@ -74,15 +77,16 @@ void TeleportSystem::Update(entt::registry& registry, float /*delta_time*/) {
     }
 
     // 验证目标地图存在
-    auto* target_map = scene_manager_.GetMap(cmd.target_map_id);
-    if (!target_map) {
+    if (!world_map_port_.MapExists(cmd.target_map_id)) {
       SYSLOG_WARN("TeleportSystem: Target map {} not found", cmd.target_map_id);
       continue;
     }
 
-    // 通过 SceneManager 原子迁移：仅当目标地图添加成功时才会从旧地图移除。
-    if (!scene_manager_.AddEntityToMap(cmd.target_map_id, cmd.entity,
-                                       cmd.target_x, cmd.target_y)) {
+    // 通过地图端口原子迁移：仅当目标地图添加成功时才会从旧地图移除。
+    if (!world_map_port_.AddEntityToMap(cmd.target_map_id,
+                                        cmd.entity,
+                                        cmd.target_x,
+                                        cmd.target_y)) {
       SYSLOG_ERROR("TeleportSystem: Failed to add entity to map {}", cmd.target_map_id);
       continue;
     }

@@ -23,6 +23,7 @@
 #include <asio/executor_work_guard.hpp>
 #include <asio/detail/config.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -208,7 +209,52 @@ class LogicServerTest : public ::testing::Test {
     ASSERT_TRUE(config_file.good())
         << "Failed to write test config file: " << config_path_;
 
+    EnsureDefaultMapFixture();
     WriteCombatConfig(/*respawn_map_id=*/0);
+  }
+
+  void EnsureDefaultMapFixture() {
+    map_file_path_.clear();
+    created_map_file_ = false;
+    had_existing_map_file_ = false;
+
+    const std::filesystem::path map_dir = std::filesystem::current_path() / "Map";
+    std::error_code ec;
+    ASSERT_TRUE(std::filesystem::create_directories(map_dir, ec) || !ec)
+        << "Failed to create map dir: " << map_dir << " error=" << ec.message();
+
+    map_file_path_ = map_dir / "1.map";
+    had_existing_map_file_ = std::filesystem::exists(map_file_path_);
+    if (had_existing_map_file_) {
+      return;
+    }
+
+    std::ofstream map_file(map_file_path_, std::ios::out | std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(map_file.is_open())
+        << "Failed to open default map fixture file: " << map_file_path_;
+
+    constexpr int32_t kWidth = 4;
+    constexpr int32_t kHeight = 4;
+    std::vector<uint8_t> header(52, 0);
+    header[0] = static_cast<uint8_t>(kWidth & 0xFF);
+    header[1] = static_cast<uint8_t>((kWidth >> 8) & 0xFF);
+    header[2] = static_cast<uint8_t>(kHeight & 0xFF);
+    header[3] = static_cast<uint8_t>((kHeight >> 8) & 0xFF);
+    map_file.write(reinterpret_cast<const char*>(header.data()),
+                   static_cast<std::streamsize>(header.size()));
+
+    std::array<uint8_t, 12> tile{};
+    for (int32_t x = 0; x < kWidth; ++x) {
+      for (int32_t y = 0; y < kHeight; ++y) {
+        map_file.write(reinterpret_cast<const char*>(tile.data()),
+                       static_cast<std::streamsize>(tile.size()));
+      }
+    }
+
+    map_file.flush();
+    ASSERT_TRUE(map_file.good())
+        << "Failed to write default map fixture file: " << map_file_path_;
+    created_map_file_ = true;
   }
 
   void WriteCombatConfig(int respawn_map_id) {
@@ -263,6 +309,13 @@ class LogicServerTest : public ::testing::Test {
     config_path_.clear();
     combat_config_path_.clear();
     maps_config_path_.clear();
+    if (created_map_file_ && !had_existing_map_file_ && !map_file_path_.empty()) {
+      std::error_code map_ec;
+      std::filesystem::remove(map_file_path_, map_ec);
+    }
+    map_file_path_.clear();
+    created_map_file_ = false;
+    had_existing_map_file_ = false;
   }
 
   /**
@@ -303,6 +356,9 @@ class LogicServerTest : public ::testing::Test {
   std::filesystem::path combat_config_path_;
   std::filesystem::path maps_config_path_;
   std::filesystem::path test_artifacts_dir_;
+  std::filesystem::path map_file_path_;
+  bool created_map_file_ = false;
+  bool had_existing_map_file_ = false;
   std::thread server_thread_;
 };
 

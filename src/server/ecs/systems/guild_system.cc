@@ -93,7 +93,7 @@ bool IsFightMember(const GuildComponent& guild, entt::entity member) {
 
 }  // namespace
 
-GuildSystem::GuildSystem(EventBus& event_bus, game::guild::GuildManager& guild_mgr)
+GuildSystem::GuildSystem(EventBus& event_bus, game::ports::IGuildPort& guild_mgr)
     : System(SystemPriority::kInventory),
       event_bus_(event_bus),
       guild_mgr_(guild_mgr) {}

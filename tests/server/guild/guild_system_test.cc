@@ -12,6 +12,7 @@
 #include "ecs/event_bus.h"
 #include "ecs/systems/guild_system.h"
 #include "game/guild/guild_manager.h"
+#include "game/guild/guild_manager_adapter.h"
 
 namespace mir2::ecs {
 namespace {
@@ -23,7 +24,9 @@ class GuildSystemTest : public ::testing::Test {
     event_bus_ = std::make_unique<EventBus>(*registry_);
     guild_mgr_ = &mir2::game::guild::GuildManager::Instance();
     guild_mgr_->Clear(*registry_);
-    guild_system_ = std::make_unique<GuildSystem>(*event_bus_, *guild_mgr_);
+    guild_port_ =
+        std::make_unique<mir2::game::guild::GuildManagerAdapter>(*guild_mgr_);
+    guild_system_ = std::make_unique<GuildSystem>(*event_bus_, *guild_port_);
     next_id_ = 1;
   }
 
@@ -32,6 +35,7 @@ class GuildSystemTest : public ::testing::Test {
       guild_mgr_->Clear(*registry_);
     }
     guild_system_.reset();
+    guild_port_.reset();
     event_bus_.reset();
     registry_.reset();
   }
@@ -63,6 +67,7 @@ class GuildSystemTest : public ::testing::Test {
   std::unique_ptr<entt::registry> registry_;
   std::unique_ptr<EventBus> event_bus_;
   std::unique_ptr<GuildSystem> guild_system_;
+  std::unique_ptr<mir2::game::guild::GuildManagerAdapter> guild_port_;
   mir2::game::guild::GuildManager* guild_mgr_ = nullptr;
   CharacterId next_id_ = 1;
 };

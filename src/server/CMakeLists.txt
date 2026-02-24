@@ -99,6 +99,7 @@ set(MIR2_SERVER_SOURCES
     network/handlers/kcp_upgrade_handler.cc
     game/chat/chat_service.cc
     game/guild/guild_manager.cc
+    game/guild/guild_manager_adapter.cc
     game/item/item_effect_processor.cc
     storage_engine/backends/common/account_storage_codec.cc
     ecs/persistence/character_codec.cc
@@ -161,6 +162,7 @@ set(MIR2_SERVER_SOURCES
     game/map/map_instance.cc
     game/map/chunk_manager.cc
     game/map/scene_manager.cc
+    game/map/scene_manager_adapter.cc
     game/map/cross_server_teleport.cc
     game/map/scroll_teleport.cc
     gateway/connection_holder.cc

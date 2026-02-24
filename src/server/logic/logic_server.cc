@@ -482,10 +482,12 @@ bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
   }
 
   std::filesystem::path map_table_dir = std::filesystem::path("config") / "tables";
+  std::filesystem::path gate_config_path = std::filesystem::path("config") / "gates.yaml";
   const std::filesystem::path config_dir =
       std::filesystem::path(config_path_).parent_path();
   if (!config_dir.empty()) {
     map_table_dir = config_dir / "tables";
+    gate_config_path = config_dir / "gates.yaml";
   }
 
   const auto map_configs =
@@ -503,13 +505,6 @@ bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
       continue;
     }
 
-    ecs::World* world = registry_manager_->CreateWorld(map_id);
-    if (!world) {
-      SYSLOG_WARN("LogicServer map runtime bootstrap skipped map {}: world init failed",
-                  map_id);
-      continue;
-    }
-
     game::map::SceneManager::MapConfig scene_config;
     scene_config.map_id = map_config.map_id;
     scene_config.fixes = map_config.fixes;
@@ -519,17 +514,17 @@ bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
       continue;
     }
 
+    ecs::World* world = registry_manager_->CreateWorld(map_id);
+    if (!world) {
+      SYSLOG_WARN("LogicServer map runtime bootstrap skipped map {}: world init failed",
+                  map_id);
+      continue;
+    }
+
     (void)BindWorldMapContext(map_id, *world, false);
   }
 
-  ecs::World* default_world = registry_manager_->CreateWorld(default_map_id);
-  if (!default_world) {
-    SYSLOG_ERROR("LogicServer map runtime bootstrap failed: default world {} init failed",
-                 default_map_id);
-    return false;
-  }
-
-  if (prepared_maps.find(default_map_id) == prepared_maps.end()) {
+  if (!scene_manager_->GetMap(static_cast<int32_t>(default_map_id))) {
     game::map::SceneManager::MapConfig default_scene_config;
     default_scene_config.map_id = static_cast<int32_t>(default_map_id);
     if (!scene_manager_->GetOrCreateMap(default_scene_config)) {
@@ -540,11 +535,18 @@ bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
     }
   }
 
+  ecs::World* default_world = registry_manager_->CreateWorld(default_map_id);
+  if (!default_world) {
+    SYSLOG_ERROR("LogicServer map runtime bootstrap failed: default world {} init failed",
+                 default_map_id);
+    return false;
+  }
+
   if (!BindWorldMapContext(default_map_id, *default_world, true)) {
     return false;
   }
 
-  gate_manager_.LoadFromConfig("config/gates.yaml");
+  gate_manager_.LoadFromConfig(gate_config_path.lexically_normal().string());
 
   size_t world_count = 0;
   registry_manager_->ForEachWorld([&world_count](uint32_t /*map_id*/, ecs::World& /*world*/) {

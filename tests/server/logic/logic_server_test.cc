@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "logic/logic_server.h"
+#include "ecs/registry_manager.h"
 #include "log/logger.h"
 #include "storage_engine/interfaces/storage_backend.h"
 #include "storage_engine/storage_engine.h"
@@ -233,6 +234,25 @@ class LogicServerTest : public ::testing::Test {
         << "Failed to write combat config file: " << combat_config_path_;
   }
 
+  void WriteMapsConfig(const std::vector<int32_t>& map_ids) {
+    const std::filesystem::path tables_dir = test_artifacts_dir_ / "tables";
+    std::error_code ec;
+    ASSERT_TRUE(std::filesystem::create_directories(tables_dir, ec) || !ec)
+        << "Failed to create tables dir: " << tables_dir << " error=" << ec.message();
+
+    maps_config_path_ = tables_dir / "maps.yaml";
+    std::ofstream maps_file(maps_config_path_, std::ios::out | std::ios::trunc);
+    ASSERT_TRUE(maps_file.is_open())
+        << "Failed to open maps config file: " << maps_config_path_;
+    maps_file << "maps:\n";
+    for (const int32_t map_id : map_ids) {
+      maps_file << "  - id: " << map_id << "\n";
+    }
+    maps_file.flush();
+    ASSERT_TRUE(maps_file.good())
+        << "Failed to write maps config file: " << maps_config_path_;
+  }
+
   void CleanupTestConfig() {
     if (test_artifacts_dir_.empty()) {
       return;
@@ -242,6 +262,7 @@ class LogicServerTest : public ::testing::Test {
     test_artifacts_dir_.clear();
     config_path_.clear();
     combat_config_path_.clear();
+    maps_config_path_.clear();
   }
 
   /**
@@ -280,6 +301,7 @@ class LogicServerTest : public ::testing::Test {
   std::unique_ptr<MockStorageBackend> mock_storage_;
   std::string config_path_;
   std::filesystem::path combat_config_path_;
+  std::filesystem::path maps_config_path_;
   std::filesystem::path test_artifacts_dir_;
   std::thread server_thread_;
 };
@@ -302,6 +324,20 @@ TEST_F(LogicServerTest, InitializeFailsWithInvalidConfig) {
 TEST_F(LogicServerTest, InitializeFailsWhenDefaultMapBootstrapFails) {
   WriteCombatConfig(/*respawn_map_id=*/65535);
   EXPECT_FALSE(InitializeServer());
+}
+
+TEST_F(LogicServerTest, InitializeSkipsWorldCreationWhenSceneBootstrapFails) {
+  constexpr int32_t kMissingMapId = 2000000001;
+  ASSERT_EQ(ecs::RegistryManager::Instance().GetWorld(
+                static_cast<uint32_t>(kMissingMapId)),
+            nullptr);
+
+  WriteMapsConfig({kMissingMapId});
+  ASSERT_TRUE(InitializeServer());
+
+  EXPECT_EQ(ecs::RegistryManager::Instance().GetWorld(
+                static_cast<uint32_t>(kMissingMapId)),
+            nullptr);
 }
 
 /**

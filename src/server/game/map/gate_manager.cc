@@ -188,15 +188,11 @@ void GateManager::LoadFromConfig(const std::string& config_path) {
       return;
     }
 
-    const auto& allowed_base = GetAllowedConfigBase();
-    if (!allowed_base.has_value()) {
-      return;
-    }
-
     // Path validation
     std::filesystem::path path(config_path);
+    const bool is_absolute_path = path.is_absolute();
     std::error_code abs_ec;
-    if (!path.is_absolute()) {
+    if (!is_absolute_path) {
       path = std::filesystem::absolute(path, abs_ec);
       if (abs_ec) {
         return;
@@ -209,9 +205,17 @@ void GateManager::LoadFromConfig(const std::string& config_path) {
       return;
     }
 
-    // Ensure path is within config/ directory
-    if (!IsPathWithinBase(path, *allowed_base)) {
-      return;
+    // Relative config paths are restricted to the configured base.
+    // Absolute paths are treated as explicit trusted targets from callers.
+    if (!is_absolute_path) {
+      const auto& allowed_base = GetAllowedConfigBase();
+      if (!allowed_base.has_value()) {
+        return;
+      }
+
+      if (!IsPathWithinBase(path, *allowed_base)) {
+        return;
+      }
     }
 
     if (!std::filesystem::exists(path)) {

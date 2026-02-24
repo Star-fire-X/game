@@ -32,6 +32,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "logic/logic_server.h"
 #include "ecs/registry_manager.h"
 #include "log/logger.h"
@@ -209,11 +215,33 @@ class LogicServerTest : public ::testing::Test {
     ASSERT_TRUE(config_file.good())
         << "Failed to write test config file: " << config_path_;
 
-    EnsureDefaultMapFixture();
-    WriteCombatConfig(/*respawn_map_id=*/0);
+    default_map_id_ = AllocateDefaultMapId();
+    EnsureDefaultMapFixture(default_map_id_);
+    WriteCombatConfig(static_cast<int>(default_map_id_));
   }
 
-  void EnsureDefaultMapFixture() {
+  uint32_t AllocateDefaultMapId() {
+    static std::atomic<uint32_t> map_sequence{0};
+    const uint32_t seq = map_sequence.fetch_add(1, std::memory_order_relaxed);
+
+#if defined(_WIN32)
+    const uint64_t process_id = static_cast<uint64_t>(_getpid());
+#else
+    const uint64_t process_id = static_cast<uint64_t>(getpid());
+#endif
+
+    constexpr uint32_t kMapIdBase = 1000000;
+    constexpr uint32_t kMapIdSpan = 1000000000;
+    uint32_t map_id = kMapIdBase +
+                      static_cast<uint32_t>((process_id * 2654435761ULL + seq) %
+                                            kMapIdSpan);
+    if (map_id == 65535u) {
+      ++map_id;
+    }
+    return map_id;
+  }
+
+  void EnsureDefaultMapFixture(uint32_t map_id) {
     map_file_path_.clear();
     created_map_file_ = false;
     had_existing_map_file_ = false;
@@ -223,7 +251,7 @@ class LogicServerTest : public ::testing::Test {
     ASSERT_TRUE(std::filesystem::create_directories(map_dir, ec) || !ec)
         << "Failed to create map dir: " << map_dir << " error=" << ec.message();
 
-    map_file_path_ = map_dir / "1.map";
+    map_file_path_ = map_dir / (std::to_string(map_id) + ".map");
     had_existing_map_file_ = std::filesystem::exists(map_file_path_);
     if (had_existing_map_file_) {
       return;
@@ -357,6 +385,7 @@ class LogicServerTest : public ::testing::Test {
   std::filesystem::path maps_config_path_;
   std::filesystem::path test_artifacts_dir_;
   std::filesystem::path map_file_path_;
+  uint32_t default_map_id_ = 1;
   bool created_map_file_ = false;
   bool had_existing_map_file_ = false;
   std::thread server_thread_;

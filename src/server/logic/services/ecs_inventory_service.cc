@@ -18,6 +18,7 @@
 #include "ecs/world.h"
 #include "log/logger.h"
 #include "logic/services/error_code_adapter.h"
+#include "monitor/metrics.h"
 
 namespace mir2::logic {
 
@@ -25,6 +26,10 @@ namespace {
 
 constexpr int kMaxInventorySlots = mir2::common::constants::MAX_INVENTORY_SIZE;
 constexpr int kMaxEquipmentSlots = mir2::common::constants::MAX_EQUIPMENT_SLOTS;
+constexpr const char* kMetricSaveCriticalCallsTotal =
+    "logic.ecs.save_critical.pickup.calls_total";
+constexpr const char* kMetricSaveCriticalFailTotal =
+    "logic.ecs.save_critical.pickup.fail_total";
 
 bool IsValidSlot(int slot) {
   return slot >= 0 && slot < kMaxInventorySlots;
@@ -183,12 +188,14 @@ void TryPersistCriticalPickup(mir2::ecs::CharacterEntityManager& character_manag
     return;
   }
 
+  monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalCallsTotal);
   auto save_result = character_manager.SaveCritical(character_id);
   if (save_result == mir2::ecs::CharacterEntityManager::SaveResult::kEntityNotFound) {
     character_manager.RebuildIndex();
     save_result = character_manager.SaveCritical(character_id);
   }
   if (save_result != mir2::ecs::CharacterEntityManager::SaveResult::kSuccess) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalFailTotal);
     SYSLOG_WARN("EcsInventoryService::PickupItem SaveCritical failed (character_id={}, item_id={}, result={})",
                 character_id, item_component.item_id, static_cast<int>(save_result));
   }

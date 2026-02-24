@@ -380,7 +380,8 @@ public:
     // ===== Set实现 =====
     bool SetInternal(const std::string& key,
                      const VersionedData& data,
-                     Priority priority) {
+                     Priority priority,
+                     bool enforce_sync_prefix_semantics = true) {
         if (shutdown_.load(std::memory_order_acquire)) {
             return false;
         }
@@ -436,7 +437,8 @@ public:
             queued_for_persistence = async_queue_->Enqueue(key, data, priority);
             if (!queued_for_persistence) {
                 const bool requires_sync_compensation =
-                    priority == Priority::CRITICAL || IsSyncWriteCriticalKey(key);
+                    priority == Priority::CRITICAL ||
+                    (enforce_sync_prefix_semantics && IsSyncWriteCriticalKey(key));
                 if (requires_sync_compensation) {
                     backend_persisted = PersistToBackendSync(key, data);
                     if (!backend_persisted) {
@@ -1514,6 +1516,23 @@ bool StorageEngine::Set(const std::string& key,
         return pimpl_->SetSyncInternal(key, versioned, Priority::CRITICAL);
     }
     return pimpl_->SetInternal(key, versioned, priority);
+}
+
+bool StorageEngine::SetAsyncDurable(const std::string& key,
+                                    const std::vector<uint8_t>& data,
+                                    Priority priority) {
+    if (!IsValidStorageKey(key) || data.size() > kMaxStorageValueSize) {
+        return false;
+    }
+
+    size_t stripe = pimpl_->GetStripe(key);
+    std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
+    VersionedData versioned{
+        pimpl_->NextVersion(),
+        data,
+        detail::GetCurrentTimeMs()
+    };
+    return pimpl_->SetInternal(key, versioned, priority, false);
 }
 
 bool StorageEngine::SetSync(const std::string& key,

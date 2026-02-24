@@ -106,7 +106,7 @@ set(MIR2_SERVER_SOURCES
     ecs/world.cc
     ecs/character_entity_manager.cc
     ecs/character_snapshot_codec.cc
-    ecs/inventory_migration.cc
+    ecs/persistence/inventory_snapshot_codec.cc
     ecs/registry_manager.cc
     ecs/skill_registry.cc
     ecs/systems/combat_system.cc

@@ -16,6 +16,7 @@
 #include "ecs/systems/movement_system.h"
 #include "ecs/persistence/character_codec.h"
 #include "log/logger.h"
+#include "monitor/metrics.h"
 #include "storage_engine/storage_engine.h"
 
 #include <cassert>
@@ -30,6 +31,24 @@ namespace {
 
 std::once_flag g_default_map_init_flag;
 uint32_t g_default_map_id = 0;
+constexpr const char* kMetricSaveCriticalCallsTotal =
+    "logic.ecs.save_critical.calls_total";
+constexpr const char* kMetricSaveCriticalFailTotal =
+    "logic.ecs.save_critical.fail_total";
+constexpr const char* kMetricSaveCriticalLatencyMs =
+    "logic.ecs.save_critical.latency_ms";
+constexpr const char* kMetricSaveAsyncDurableCallsTotal =
+    "logic.ecs.save_async_durable.calls_total";
+constexpr const char* kMetricSaveAsyncDurableFailTotal =
+    "logic.ecs.save_async_durable.fail_total";
+constexpr const char* kMetricSaveAsyncDurableLatencyMs =
+    "logic.ecs.save_async_durable.latency_ms";
+
+double DurationMs(std::chrono::steady_clock::duration duration) {
+  return static_cast<double>(
+             std::chrono::duration_cast<std::chrono::microseconds>(duration).count()) /
+         1000.0;
+}
 
 mir2::common::CharacterCreateRequest BuildDefaultCreateRequest(uint32_t character_id) {
   mir2::common::CharacterCreateRequest request;
@@ -614,15 +633,27 @@ CharacterEntityManager::SaveResult CharacterEntityManager::SaveIfDirty(uint32_t 
 }
 
 CharacterEntityManager::SaveResult CharacterEntityManager::SaveCritical(uint32_t character_id) {
+  const auto start = std::chrono::steady_clock::now();
+  monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalCallsTotal);
+  const auto record_result = [start](SaveResult result) {
+    monitor::Metrics::Instance().SetGauge(
+        kMetricSaveCriticalLatencyMs,
+        DurationMs(std::chrono::steady_clock::now() - start));
+    if (result != SaveResult::kSuccess) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalFailTotal);
+    }
+    return result;
+  };
+
   AssertSameThread();
   auto entity = TryGet(character_id);
   if (!entity) {
-    return SaveResult::kEntityNotFound;
+    return record_result(SaveResult::kEntityNotFound);
   }
 
   entt::registry* registry = TryGetRegistry(character_id);
   if (!registry) {
-    return SaveResult::kEntityNotFound;
+    return record_result(SaveResult::kEntityNotFound);
   }
 
   try {
@@ -638,7 +669,7 @@ CharacterEntityManager::SaveResult CharacterEntityManager::SaveCritical(uint32_t
       if (error_policy_ == ErrorPolicy::kClearDirtyFlag) {
         dirty_tracker::clear_dirty(*registry, *entity);
       }
-      return SaveResult::kSaveFailed;
+      return record_result(SaveResult::kSaveFailed);
     }
 
     std::string key = "char:" + std::to_string(character_id);
@@ -651,11 +682,11 @@ CharacterEntityManager::SaveResult CharacterEntityManager::SaveCritical(uint32_t
       if (error_policy_ == ErrorPolicy::kClearDirtyFlag) {
         dirty_tracker::clear_dirty(*registry, *entity);
       }
-      return SaveResult::kSaveFailed;
+      return record_result(SaveResult::kSaveFailed);
     }
 
     dirty_tracker::clear_dirty(*registry, *entity);
-    return SaveResult::kSuccess;
+    return record_result(SaveResult::kSuccess);
   } catch (const std::exception& ex) {
     SYSLOG_ERROR("CharacterEntityManager SaveCritical failed id={} error={}",
                  character_id, ex.what());
@@ -667,7 +698,7 @@ CharacterEntityManager::SaveResult CharacterEntityManager::SaveCritical(uint32_t
   if (error_policy_ == ErrorPolicy::kClearDirtyFlag) {
     dirty_tracker::clear_dirty(*registry, *entity);
   }
-  return SaveResult::kSaveFailed;
+  return record_result(SaveResult::kSaveFailed);
 }
 
 void CharacterEntityManager::SaveAll() {
@@ -888,10 +919,18 @@ void CharacterEntityManager::StoreCharacterData(
 
   // Persist to StorageEngine (RocksDB WAL → async PostgreSQL).
   if (storage_engine::StorageEngine::IsInitialized()) {
+    const auto start = std::chrono::steady_clock::now();
+    monitor::Metrics::Instance().IncrementCounter(kMetricSaveAsyncDurableCallsTotal);
     std::string key = "char:" + std::to_string(character_id);
     auto bytes = SerializeCharacterSnapshot(data);
-    storage_engine::StorageEngine::Instance().Set(
+    const bool persisted = storage_engine::StorageEngine::Instance().SetAsyncDurable(
         key, bytes, storage_engine::Priority::HIGH);
+    monitor::Metrics::Instance().SetGauge(
+        kMetricSaveAsyncDurableLatencyMs,
+        DurationMs(std::chrono::steady_clock::now() - start));
+    if (!persisted) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricSaveAsyncDurableFailTotal);
+    }
   }
 }
 

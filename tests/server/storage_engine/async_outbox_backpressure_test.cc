@@ -123,6 +123,34 @@ TEST(StorageEngineOutboxBackpressureTest, NonCriticalWriteFailsWhenOutboxIsFull)
   std::filesystem::remove_all(l2_path, ec);
 }
 
+TEST(StorageEngineOutboxBackpressureTest, AsyncDurableWriteBypassesSyncPrefixCompensation) {
+  if (StorageEngine::IsInitialized()) {
+    StorageEngine::Shutdown();
+  }
+
+  const std::string l2_path = BuildTempPath("mir2_storage_engine_outbox_async_char");
+  std::error_code ec;
+  std::filesystem::remove_all(l2_path, ec);
+
+  auto backend = std::make_unique<OutboxBlockingBackend>();
+  auto* backend_ptr = backend.get();
+  auto config = BuildOutboxTestConfig(l2_path);
+  ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+  auto& engine = StorageEngine::Instance();
+  ASSERT_TRUE(engine.Set("normal:key:1", std::vector<uint8_t>{1}, Priority::NORMAL));
+  ASSERT_TRUE(engine.Flush(2000));
+
+  EXPECT_FALSE(engine.SetAsyncDurable("char:async:1",
+                                      std::vector<uint8_t>{2},
+                                      Priority::HIGH));
+  EXPECT_EQ(backend_ptr->batch_save_calls.load(std::memory_order_relaxed), 1U);
+  EXPECT_EQ(backend_ptr->sync_save_calls.load(std::memory_order_relaxed), 0U);
+
+  StorageEngine::Shutdown();
+  std::filesystem::remove_all(l2_path, ec);
+}
+
 TEST(AsyncPersistenceQueueOutboxMetricTest, RejectedCriticalCounterIncrementsWhenOutboxFull) {
   const std::string db_path = BuildTempPath("mir2_async_outbox_metrics");
   std::error_code ec;

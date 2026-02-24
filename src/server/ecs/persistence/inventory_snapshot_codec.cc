@@ -1,9 +1,9 @@
 /**
- * @file inventory_migration.cc
- * @brief JSON 与实体化库存快照兼容迁移工具实现
+ * @file inventory_snapshot_codec.cc
+ * @brief Inventory snapshot JSON codec implementation
  */
 
-#include "ecs/inventory_migration.h"
+#include "ecs/persistence/inventory_snapshot_codec.h"
 
 #include "common/types/constants.h"
 #include "ecs/components/character_components.h"
@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-namespace mir2::ecs::inventory::compat {
+namespace mir2::ecs::persistence {
 namespace {
 
 using json = nlohmann::json;
@@ -333,14 +333,14 @@ void SyncInventorySnapshotFromRuntime(entt::registry& registry,
 
         const int slot = ClampSlotIndex(owner.slot_index, inventory_slot_limit);
         if (slot < 0) {
-            SYSLOG_WARN("InventoryMigration: runtime inventory slot out of range slot={} id={}",
+            SYSLOG_WARN("InventorySnapshotCodec: runtime inventory slot out of range slot={} id={}",
                         owner.slot_index, character_id);
             continue;
         }
 
         auto& slot_ref = snapshot.slots[static_cast<std::size_t>(slot)];
         if (slot_ref.has_value()) {
-            SYSLOG_WARN("InventoryMigration: runtime duplicate inventory slot={} id={}",
+            SYSLOG_WARN("InventorySnapshotCodec: runtime duplicate inventory slot={} id={}",
                         slot, character_id);
             continue;
         }
@@ -358,7 +358,7 @@ void SyncInventorySnapshotFromRuntime(entt::registry& registry,
 
             const auto* item = registry.try_get<ItemComponent>(item_entity);
             if (!item) {
-                SYSLOG_WARN("InventoryMigration: runtime equipment missing item slot={} id={}",
+                SYSLOG_WARN("InventorySnapshotCodec: runtime equipment missing item slot={} id={}",
                             slot, character_id);
                 continue;
             }
@@ -408,11 +408,11 @@ std::optional<json> ParseJsonSafe(const std::string& input,
         return json::parse(input);
     } catch (const std::exception& ex) {
         had_error = true;
-        SYSLOG_WARN("InventoryMigration: parse {} failed id={} error={}",
+        SYSLOG_WARN("InventorySnapshotCodec: parse {} failed id={} error={}",
                     label, character_id, ex.what());
     } catch (...) {
         had_error = true;
-        SYSLOG_WARN("InventoryMigration: parse {} failed id={} error=unknown",
+        SYSLOG_WARN("InventorySnapshotCodec: parse {} failed id={} error=unknown",
                     label, character_id);
     }
     return std::nullopt;
@@ -541,11 +541,11 @@ bool AssignEquipmentItem(entt::registry& registry,
                          const ItemComponent& item,
                          uint32_t character_id) {
     if (slot < 0 || slot >= static_cast<int>(equipment.slots.size())) {
-        SYSLOG_WARN("InventoryMigration: invalid equipment slot={} id={}", slot, character_id);
+        SYSLOG_WARN("InventorySnapshotCodec: invalid equipment slot={} id={}", slot, character_id);
         return false;
     }
     if (equipment.slots[slot] != entt::null) {
-        SYSLOG_WARN("InventoryMigration: duplicate equipment slot={} id={}", slot, character_id);
+        SYSLOG_WARN("InventorySnapshotCodec: duplicate equipment slot={} id={}", slot, character_id);
         return false;
     }
 
@@ -562,13 +562,13 @@ bool AssignEquipmentItem(entt::registry& registry,
 
 }  // namespace
 
-void LoadInventoryFromJson(entt::registry& registry,
+void LoadInventorySnapshotFromJson(entt::registry& registry,
                            entt::entity character,
                            const std::string& inventory_json,
                            const std::string& equipment_json,
                            const std::string& skills_json) {
     if (!registry.valid(character)) {
-        SYSLOG_ERROR("InventoryMigration: invalid character entity");
+        SYSLOG_ERROR("InventorySnapshotCodec: invalid character entity");
         return;
     }
 
@@ -592,7 +592,7 @@ void LoadInventoryFromJson(entt::registry& registry,
             if (items->empty() || has_object_entry) {
                 ClearInventoryItems(registry, character);
             } else {
-                SYSLOG_WARN("InventoryMigration: inventory_json items unsupported id={}",
+                SYSLOG_WARN("InventorySnapshotCodec: inventory_json items unsupported id={}",
                             character_id);
             }
 
@@ -601,7 +601,7 @@ void LoadInventoryFromJson(entt::registry& registry,
                 for (size_t index = 0; index < items->size(); ++index) {
                     const json& entry = (*items)[index];
                     if (!entry.is_object()) {
-                        SYSLOG_WARN("InventoryMigration: inventory entry not object id={}",
+                        SYSLOG_WARN("InventorySnapshotCodec: inventory entry not object id={}",
                                     character_id);
                         continue;
                     }
@@ -615,11 +615,11 @@ void LoadInventoryFromJson(entt::registry& registry,
 
                     slot = ClampSlotIndex(slot, mir2::common::constants::MAX_INVENTORY_SIZE);
                     if (slot < 0) {
-                        SYSLOG_WARN("InventoryMigration: invalid inventory slot id={}", character_id);
+                        SYSLOG_WARN("InventorySnapshotCodec: invalid inventory slot id={}", character_id);
                         continue;
                     }
                     if (used_slots[slot]) {
-                        SYSLOG_WARN("InventoryMigration: duplicate inventory slot={} id={}",
+                        SYSLOG_WARN("InventorySnapshotCodec: duplicate inventory slot={} id={}",
                                     slot, character_id);
                         continue;
                     }
@@ -632,7 +632,7 @@ void LoadInventoryFromJson(entt::registry& registry,
 
                     ItemComponent item;
                     if (!PopulateItemFromJson(*item_json, item)) {
-                        SYSLOG_WARN("InventoryMigration: invalid inventory item slot={} id={}",
+                        SYSLOG_WARN("InventorySnapshotCodec: invalid inventory item slot={} id={}",
                                     slot, character_id);
                         continue;
                     }
@@ -649,7 +649,7 @@ void LoadInventoryFromJson(entt::registry& registry,
         } else if (parsed->is_null()) {
             ClearInventoryItems(registry, character);
         } else {
-            SYSLOG_WARN("InventoryMigration: inventory_json shape unsupported id={}", character_id);
+            SYSLOG_WARN("InventorySnapshotCodec: inventory_json shape unsupported id={}", character_id);
         }
     } else if (!inventory_error) {
         ClearInventoryItems(registry, character);
@@ -667,27 +667,27 @@ void LoadInventoryFromJson(entt::registry& registry,
             if (entries->empty() || has_object_entry) {
                 ClearEquipmentItems(registry, character, equipment);
             } else {
-                SYSLOG_WARN("InventoryMigration: equipment_json entries unsupported id={}",
+                SYSLOG_WARN("InventorySnapshotCodec: equipment_json entries unsupported id={}",
                             character_id);
             }
 
             if (has_object_entry) {
                 for (const auto& entry : *entries) {
                     if (!entry.is_object()) {
-                        SYSLOG_WARN("InventoryMigration: equipment entry not object id={}",
+                        SYSLOG_WARN("InventorySnapshotCodec: equipment entry not object id={}",
                                     character_id);
                         continue;
                     }
 
                     auto parsed_slot = ParseSlotIndex(entry);
                     if (!parsed_slot) {
-                        SYSLOG_WARN("InventoryMigration: missing equipment slot id={}", character_id);
+                        SYSLOG_WARN("InventorySnapshotCodec: missing equipment slot id={}", character_id);
                         continue;
                     }
                     int slot = ClampSlotIndex(*parsed_slot,
                                               static_cast<int>(equipment.slots.size()));
                     if (slot < 0) {
-                        SYSLOG_WARN("InventoryMigration: invalid equipment slot id={}", character_id);
+                        SYSLOG_WARN("InventorySnapshotCodec: invalid equipment slot id={}", character_id);
                         continue;
                     }
 
@@ -699,7 +699,7 @@ void LoadInventoryFromJson(entt::registry& registry,
 
                     ItemComponent item;
                     if (!PopulateItemFromJson(*item_json, item)) {
-                        SYSLOG_WARN("InventoryMigration: invalid equipment item slot={} id={}",
+                        SYSLOG_WARN("InventorySnapshotCodec: invalid equipment item slot={} id={}",
                                     slot, character_id);
                         continue;
                     }
@@ -721,14 +721,14 @@ void LoadInventoryFromJson(entt::registry& registry,
             if (parsed->empty() || has_supported_entry) {
                 ClearEquipmentItems(registry, character, equipment);
             } else {
-                SYSLOG_WARN("InventoryMigration: equipment_json values unsupported id={}",
+                SYSLOG_WARN("InventorySnapshotCodec: equipment_json values unsupported id={}",
                             character_id);
             }
 
             if (has_supported_entry) {
                 for (auto it = parsed->begin(); it != parsed->end(); ++it) {
                     if (!it.value().is_object()) {
-                        SYSLOG_WARN("InventoryMigration: equipment entry not object key={} id={}",
+                        SYSLOG_WARN("InventorySnapshotCodec: equipment entry not object key={} id={}",
                                     it.key(), character_id);
                         continue;
                     }
@@ -740,7 +740,7 @@ void LoadInventoryFromJson(entt::registry& registry,
 
                     ItemComponent item;
                     if (!PopulateItemFromJson(it.value(), item)) {
-                        SYSLOG_WARN("InventoryMigration: invalid equipment item key={} id={}",
+                        SYSLOG_WARN("InventorySnapshotCodec: invalid equipment item key={} id={}",
                                     it.key(), character_id);
                         continue;
                     }
@@ -754,7 +754,7 @@ void LoadInventoryFromJson(entt::registry& registry,
         } else if (parsed->is_null()) {
             ClearEquipmentItems(registry, character, equipment);
         } else {
-            SYSLOG_WARN("InventoryMigration: equipment_json shape unsupported id={}",
+            SYSLOG_WARN("InventorySnapshotCodec: equipment_json shape unsupported id={}",
                         character_id);
         }
     } else if (!equipment_error) {
@@ -797,13 +797,13 @@ void LoadInventoryFromJson(entt::registry& registry,
                 }
 
                 if (!valid) {
-                    SYSLOG_WARN("InventoryMigration: invalid skill entry id={}", character_id);
+                    SYSLOG_WARN("InventorySnapshotCodec: invalid skill entry id={}", character_id);
                     continue;
                 }
 
                 if (std::find(seen_skills.begin(), seen_skills.end(),
                               skill.skill_id) != seen_skills.end()) {
-                    SYSLOG_WARN("InventoryMigration: duplicate skill_id={} id={}",
+                    SYSLOG_WARN("InventorySnapshotCodec: duplicate skill_id={} id={}",
                                 skill.skill_id, character_id);
                     continue;
                 }
@@ -819,7 +819,7 @@ void LoadInventoryFromJson(entt::registry& registry,
         } else if (parsed->is_null()) {
             ClearSkills(registry, character);
         } else {
-            SYSLOG_WARN("InventoryMigration: skills_json shape unsupported id={}", character_id);
+            SYSLOG_WARN("InventorySnapshotCodec: skills_json shape unsupported id={}", character_id);
         }
     } else if (!skills_error) {
         ClearSkills(registry, character);
@@ -829,14 +829,14 @@ void LoadInventoryFromJson(entt::registry& registry,
     SyncInventorySnapshotFromRuntime(
         registry, character, inventory_snapshot, character_id);
 
-    SYSLOG_INFO("InventoryMigration: loaded id={} items={} equipment={} skills={}",
+    SYSLOG_INFO("InventorySnapshotCodec: loaded id={} items={} equipment={} skills={}",
                 character_id, loaded_items, loaded_equipment, loaded_skills);
 }
 
 std::tuple<std::string, std::string, std::string>
-SaveInventoryToJson(entt::registry& registry, entt::entity character) {
+SaveInventorySnapshotToJson(entt::registry& registry, entt::entity character) {
     if (!registry.valid(character)) {
-        SYSLOG_ERROR("InventoryMigration: invalid character entity");
+        SYSLOG_ERROR("InventorySnapshotCodec: invalid character entity");
         return {"[]", "[]", "[]"};
     }
 
@@ -893,7 +893,7 @@ SaveInventoryToJson(entt::registry& registry, entt::entity character) {
 
     for (const auto& skill : skill_entries) {
         if (skill.skill_id == 0) {
-            SYSLOG_WARN("InventoryMigration: skip invalid skill id=0 character_id={}",
+            SYSLOG_WARN("InventorySnapshotCodec: skip invalid skill id=0 character_id={}",
                         character_id);
             continue;
         }
@@ -909,18 +909,4 @@ SaveInventoryToJson(entt::registry& registry, entt::entity character) {
     return {inventory.dump(), equipment.dump(), skills.dump()};
 }
 
-void MigrateAllCharacters(entt::registry& registry) {
-    auto view = registry.view<CharacterIdentityComponent>();
-    size_t migrated = 0;
-    for (auto entity : view) {
-        uint32_t character_id = GetCharacterId(registry, entity);
-        auto& inventory_snapshot = registry.get_or_emplace<InventorySnapshotComponent>(entity);
-        SyncInventorySnapshotFromRuntime(
-            registry, entity, inventory_snapshot, character_id);
-        ++migrated;
-    }
-
-    SYSLOG_INFO("InventoryMigration: migrated {} characters to inventory snapshots", migrated);
-}
-
-}  // namespace mir2::ecs::inventory::compat
+}  // namespace mir2::ecs::persistence

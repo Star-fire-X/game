@@ -7,7 +7,7 @@
 
 #include "ecs/components/character_components.h"
 #include "ecs/components/equipment_component.h"
-#include "ecs/inventory_migration.h"
+#include "ecs/persistence/inventory_snapshot_codec.h"
 #include <chrono>
 #include <utility>
 
@@ -94,11 +94,11 @@ entt::entity LoadCharacterEntity(entt::registry& registry,
     state.is_online = false;
     registry.emplace<mir2::ecs::ChatPreferenceComponent>(entity);
 
-    mir2::ecs::inventory::compat::LoadInventoryFromJson(registry,
-                                                        entity,
-                                                        data.inventory_json,
-                                                        data.equipment_json,
-                                                        data.skills_json);
+    mir2::ecs::persistence::LoadInventorySnapshotFromJson(registry,
+                                                          entity,
+                                                          data.inventory_json,
+                                                          data.equipment_json,
+                                                          data.skills_json);
 
     registry.emplace<mir2::ecs::DirtyComponent>(entity);
 
@@ -139,7 +139,7 @@ mir2::common::CharacterData SaveCharacterData(entt::registry& registry, entt::en
     }
 
     auto [inventory_json, equipment_json, skills_json] =
-        mir2::ecs::inventory::compat::SaveInventoryToJson(registry, entity);
+        mir2::ecs::persistence::SaveInventorySnapshotToJson(registry, entity);
     data.inventory_json = std::move(inventory_json);
     data.equipment_json = std::move(equipment_json);
     data.skills_json = std::move(skills_json);

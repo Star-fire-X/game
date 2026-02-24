@@ -21,6 +21,7 @@
 #include "ecs/registry_manager.h"
 #include "ecs/systems/inventory_system.h"
 #include "log/logger.h"
+#include "monitor/metrics.h"
 
 namespace mir2::logic {
 
@@ -28,6 +29,10 @@ namespace {
 
 constexpr float kDefaultBuyRate = 1.0f;
 constexpr float kDefaultSellRate = 0.5f;
+constexpr const char* kMetricSaveCriticalCallsTotal =
+    "logic.ecs.save_critical.merchant.calls_total";
+constexpr const char* kMetricSaveCriticalFailTotal =
+    "logic.ecs.save_critical.merchant.fail_total";
 
 template <typename T>
 bool TryReadScalar(const YAML::Node& node, const char* key, T* out) {
@@ -115,6 +120,7 @@ void PersistCriticalCharacter(entt::registry& registry,
         return;
     }
 
+    monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalCallsTotal);
     auto& character_manager = ecs::RegistryManager::Instance().GetCharacterManager();
     auto save_result = character_manager.SaveCritical(identity->id);
     if (save_result == ecs::CharacterEntityManager::SaveResult::kEntityNotFound) {
@@ -122,6 +128,7 @@ void PersistCriticalCharacter(entt::registry& registry,
         save_result = character_manager.SaveCritical(identity->id);
     }
     if (save_result != ecs::CharacterEntityManager::SaveResult::kSuccess) {
+        monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalFailTotal);
         SYSLOG_WARN("MerchantService {} SaveCritical failed character_id={} result={}",
                     context,
                     identity->id,

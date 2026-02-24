@@ -218,6 +218,17 @@ public:
              Priority priority = Priority::NORMAL);
 
     /**
+     * @brief API 2.0: Durable async write (bypass sync-prefix auto-upgrade)
+     *
+     * 与 Set() 的区别：
+     * - 不会因 sync_write_key_prefixes 自动升级为 SetSync；
+     * - 仍保证至少写入 L2 / backend / outbox 之一，否则返回 false。
+     */
+    bool SetAsyncDurable(const std::string& key,
+                         const std::vector<uint8_t>& data,
+                         Priority priority = Priority::HIGH);
+
+    /**
      * @brief API 2.1: 强制同步写入 (WAL fsync)
      *
      * 关键路径使用：充值、交易确认、稀有掉落

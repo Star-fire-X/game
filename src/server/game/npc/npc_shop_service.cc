@@ -18,12 +18,17 @@
 #include "ecs/registry_manager.h"
 #include "ecs/systems/inventory_system.h"
 #include "log/logger.h"
+#include "monitor/metrics.h"
 
 namespace mir2::game::npc {
 
 namespace {
 
 constexpr float kDefaultSellRate = 0.5f;
+constexpr const char* kMetricSaveCriticalCallsTotal =
+    "logic.ecs.save_critical.npc_shop.calls_total";
+constexpr const char* kMetricSaveCriticalFailTotal =
+    "logic.ecs.save_critical.npc_shop.fail_total";
 
 ecs::ShopItem* FindShopItem(ecs::NpcShopComponent& shop, uint32_t item_id) {
   auto it = std::find_if(shop.items.begin(), shop.items.end(),
@@ -105,6 +110,7 @@ void PersistCriticalCharacter(entt::registry& registry,
     return;
   }
 
+  monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalCallsTotal);
   auto& character_manager = ecs::RegistryManager::Instance().GetCharacterManager();
   auto save_result = character_manager.SaveCritical(identity->id);
   if (save_result == ecs::CharacterEntityManager::SaveResult::kEntityNotFound) {
@@ -112,6 +118,7 @@ void PersistCriticalCharacter(entt::registry& registry,
     save_result = character_manager.SaveCritical(identity->id);
   }
   if (save_result != ecs::CharacterEntityManager::SaveResult::kSuccess) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalFailTotal);
     SYSLOG_WARN("NpcShopService {} SaveCritical failed character_id={} result={}",
                 context,
                 identity->id,

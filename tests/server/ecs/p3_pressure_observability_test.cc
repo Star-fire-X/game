@@ -11,6 +11,7 @@
 
 #include "ecs/components/effect_component.h"
 #include "ecs/components/guild_component.h"
+#include "ecs/registry_manager.h"
 
 namespace {
 
@@ -268,6 +269,28 @@ ScenarioResult RunScenario(bool optimized) {
   return result;
 }
 
+size_t FindWorldEntityCount(const mir2::ecs::WorldEntityCountSnapshot& snapshot,
+                            uint32_t map_id) {
+  for (const auto& [current_map_id, count] : snapshot.per_world) {
+    if (current_map_id == map_id) {
+      return count;
+    }
+  }
+  return 0;
+}
+
+size_t CountEntities(const entt::registry& registry) {
+  size_t count = 0;
+  const auto* entity_storage = registry.storage<entt::entity>();
+  if (entity_storage) {
+    for (const auto entity : entity_storage->each()) {
+      (void)entity;
+      ++count;
+    }
+  }
+  return count;
+}
+
 TEST(P3PressureObservabilityTest, LegacyVsCurrentHotPathMetrics) {
   const ScenarioResult legacy = RunScenario(false);
   const ScenarioResult current = RunScenario(true);
@@ -288,6 +311,42 @@ TEST(P3PressureObservabilityTest, LegacyVsCurrentHotPathMetrics) {
 
   EXPECT_LE(current.tick_stats.p95_us, legacy.tick_stats.p95_us * 1.10);
   EXPECT_LE(current.tick_stats.p99_us, legacy.tick_stats.p99_us * 1.10);
+}
+
+TEST(P3PressureObservabilityTest, PerWorldEntityCountMetrics) {
+  auto& manager = mir2::ecs::RegistryManager::Instance();
+  constexpr uint32_t kMapIdA = 990001;
+  constexpr uint32_t kMapIdB = 990002;
+  constexpr size_t kAddedMapA = 5;
+  constexpr size_t kAddedMapB = 8;
+
+  auto* world_a = manager.CreateWorld(kMapIdA);
+  auto* world_b = manager.CreateWorld(kMapIdB);
+  ASSERT_NE(world_a, nullptr);
+  ASSERT_NE(world_b, nullptr);
+
+  const size_t before_map_a = CountEntities(world_a->Registry());
+  const size_t before_map_b = CountEntities(world_b->Registry());
+  const auto before_snapshot = manager.CollectEntityCounts();
+
+  for (size_t i = 0; i < kAddedMapA; ++i) {
+    (void)world_a->Registry().create();
+  }
+  for (size_t i = 0; i < kAddedMapB; ++i) {
+    (void)world_b->Registry().create();
+  }
+
+  const auto after_snapshot = manager.CollectEntityCounts();
+  const size_t after_map_a = FindWorldEntityCount(after_snapshot, kMapIdA);
+  const size_t after_map_b = FindWorldEntityCount(after_snapshot, kMapIdB);
+
+  std::cout << "current.world.entity_count.total=" << after_snapshot.total << '\n';
+  std::cout << "current.world.map_" << kMapIdA << ".entity_count=" << after_map_a << '\n';
+  std::cout << "current.world.map_" << kMapIdB << ".entity_count=" << after_map_b << '\n';
+
+  EXPECT_EQ(after_map_a, before_map_a + kAddedMapA);
+  EXPECT_EQ(after_map_b, before_map_b + kAddedMapB);
+  EXPECT_EQ(after_snapshot.total, before_snapshot.total + kAddedMapA + kAddedMapB);
 }
 
 }  // namespace

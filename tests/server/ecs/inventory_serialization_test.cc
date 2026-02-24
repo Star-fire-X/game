@@ -12,7 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ecs/components/inventory_snapshot_component.h"
-#include "ecs/inventory_migration.h"
+#include "ecs/persistence/inventory_snapshot_codec.h"
 
 namespace {
 
@@ -27,7 +27,7 @@ void LoadInventoryFromJson(entt::registry& registry,
                            entt::entity character,
                            const std::string& inventory_json,
                            uint32_t /*character_id*/) {
-  mir2::ecs::inventory::compat::LoadInventoryFromJson(
+  mir2::ecs::persistence::LoadInventorySnapshotFromJson(
       registry, character, inventory_json, "[]", "[]");
 }
 
@@ -37,7 +37,7 @@ void LoadEquipmentFromJson(entt::registry& registry,
                            uint32_t /*character_id*/) {
   const json parsed = json::parse(equipment_json, nullptr, false);
   if (!parsed.is_object() || !parsed.contains("slots") || !parsed["slots"].is_array()) {
-    mir2::ecs::inventory::compat::LoadInventoryFromJson(
+    mir2::ecs::persistence::LoadInventorySnapshotFromJson(
         registry, character, "[]", equipment_json, "[]");
     return;
   }
@@ -55,7 +55,7 @@ void LoadEquipmentFromJson(entt::registry& registry,
     adapted.push_back(std::move(entry));
   }
 
-  mir2::ecs::inventory::compat::LoadInventoryFromJson(
+  mir2::ecs::persistence::LoadInventorySnapshotFromJson(
       registry, character, "[]", adapted.dump(), "[]");
 }
 
@@ -63,7 +63,7 @@ void LoadSkillsFromJson(entt::registry& registry,
                         entt::entity character,
                         const std::string& skills_json,
                         uint32_t /*character_id*/) {
-  mir2::ecs::inventory::compat::LoadInventoryFromJson(
+  mir2::ecs::persistence::LoadInventorySnapshotFromJson(
       registry, character, "[]", "[]", skills_json);
 }
 

@@ -158,6 +158,10 @@ constexpr const char* kMetricTickPhaseAoiDispatchMs =
     "logic.tick.phase.aoi_dispatch_ms";
 constexpr const char* kMetricTickPhaseHungScanMs = "logic.tick.phase.hung_scan_ms";
 constexpr const char* kMetricAoiDispatchedPerTick = "logic.aoi.dispatched_per_tick";
+constexpr const char* kMetricWorldEntityCountTotal =
+    "logic.world.entity_count.total";
+constexpr const char* kMetricWorldEntityCountPrefix = "logic.world.map_";
+constexpr const char* kMetricWorldEntityCountSuffix = ".entity_count";
 constexpr const char* kMetricHotDrainBudgetHitTotal =
     "logic.hot_event.drain_budget_hit_total";
 constexpr size_t kAoiDispatchMaxEventsPerMapPerTick = 4096;
@@ -216,6 +220,11 @@ double DurationMs(std::chrono::steady_clock::duration duration) {
   return static_cast<double>(
              std::chrono::duration_cast<std::chrono::microseconds>(duration).count()) /
          1000.0;
+}
+
+std::string BuildWorldEntityCountMetricName(uint32_t map_id) {
+  return std::string(kMetricWorldEntityCountPrefix) +
+         std::to_string(map_id) + kMetricWorldEntityCountSuffix;
 }
 
 bool IsAuthWhitelistedMsgId(uint16_t msg_id) {
@@ -3528,6 +3537,7 @@ void LogicServer::Tick(float delta_time) {
       std::chrono::steady_clock::duration::zero();
   std::chrono::steady_clock::duration character_update_duration =
       std::chrono::steady_clock::duration::zero();
+  ecs::WorldEntityCountSnapshot world_entity_counts;
   if (registry_manager_) {
     const auto ecs_world_systems_start = std::chrono::steady_clock::now();
     registry_manager_->ForEachWorld([this, delta_time, now_ms](uint32_t map_id,
@@ -3547,6 +3557,8 @@ void LogicServer::Tick(float delta_time) {
     registry_manager_->GetCharacterManager().Update(delta_time);
     character_update_duration = std::chrono::steady_clock::now() -
                                 character_update_start;
+
+    world_entity_counts = registry_manager_->CollectEntityCounts();
   }
   monitor::Metrics::Instance().SetGauge(
       kMetricTickPhaseEcsWorldSystemsMs, DurationMs(ecs_world_systems_duration));
@@ -3554,6 +3566,14 @@ void LogicServer::Tick(float delta_time) {
       kMetricTickPhaseEcsRegistryUpdateMs, DurationMs(ecs_registry_update_duration));
   monitor::Metrics::Instance().SetGauge(
       kMetricTickPhaseCharacterUpdateMs, DurationMs(character_update_duration));
+  monitor::Metrics::Instance().SetGauge(
+      kMetricWorldEntityCountTotal,
+      static_cast<double>(world_entity_counts.total));
+  for (const auto& [map_id, count] : world_entity_counts.per_world) {
+    monitor::Metrics::Instance().SetGauge(
+        BuildWorldEntityCountMetricName(map_id),
+        static_cast<double>(count));
+  }
 
   const auto network_tick_start = std::chrono::steady_clock::now();
   if (network_) {

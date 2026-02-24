@@ -68,6 +68,7 @@ class World {
      * @brief 获取底层Registry
      */
     entt::registry& Registry() { return registry_; }
+    const entt::registry& Registry() const { return registry_; }
 
     /**
      * @brief 获取事件总线

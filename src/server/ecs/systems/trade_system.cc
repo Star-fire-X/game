@@ -16,6 +16,7 @@
 #include "ecs/events/trade_events.h"
 #include "ecs/registry_manager.h"
 #include "log/logger.h"
+#include "monitor/metrics.h"
 
 namespace mir2::ecs {
 
@@ -24,6 +25,10 @@ namespace {
 constexpr int kMaxInventorySlots = mir2::common::constants::MAX_INVENTORY_SIZE;
 constexpr int64_t kTradeTimeoutMs = 120000;
 constexpr int64_t kTradeCloseCooldownMs = 3000;
+constexpr const char* kMetricSaveCriticalCallsTotal =
+    "logic.ecs.save_critical.trade.calls_total";
+constexpr const char* kMetricSaveCriticalFailTotal =
+    "logic.ecs.save_critical.trade.fail_total";
 std::atomic<uint64_t> g_next_trade_id{1};
 
 uint64_t GenerateTradeId() {
@@ -140,6 +145,7 @@ void PersistCriticalCharacter(entt::registry& registry,
         return;
     }
 
+    monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalCallsTotal);
     auto& character_manager = RegistryManager::Instance().GetCharacterManager();
     auto save_result = character_manager.SaveCritical(identity->id);
     if (save_result == CharacterEntityManager::SaveResult::kEntityNotFound) {
@@ -147,6 +153,7 @@ void PersistCriticalCharacter(entt::registry& registry,
         save_result = character_manager.SaveCritical(identity->id);
     }
     if (save_result != CharacterEntityManager::SaveResult::kSuccess) {
+        monitor::Metrics::Instance().IncrementCounter(kMetricSaveCriticalFailTotal);
         SYSLOG_WARN("TradeSystem {} SaveCritical failed character_id={} result={}",
                     context,
                     identity->id,

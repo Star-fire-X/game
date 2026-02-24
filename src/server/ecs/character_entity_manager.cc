@@ -154,7 +154,7 @@ entt::entity CharacterEntityManager::GetOrCreate(uint32_t character_id, uint32_t
     }
     entity = legend2::LoadCharacterEntity(*registry, data);
     if (entity != entt::null) {
-      StoreCharacterData(character_id, data);
+      (void)StoreCharacterData(character_id, data);
     }
   } else {
     entity = legend2::CreateCharacterEntity(
@@ -228,7 +228,7 @@ entt::entity CharacterEntityManager::CreateFromRequest(
 }
 
 entt::entity CharacterEntityManager::Preload(const mir2::common::CharacterData& data) {
-  StoreCharacterData(data.id, data);
+  (void)StoreCharacterData(data.id, data);
   entt::entity entity = GetOrCreate(data.id, data.map_id);
   entt::registry* registry = ResolveRegistry(data.map_id);
   if (entity != entt::null && registry && registry->valid(entity)) {
@@ -465,7 +465,7 @@ bool CharacterEntityManager::MoveToMap(uint32_t character_id,
   }
 
   EnsureEntityVersion(*target_registry, new_entity, character_id);
-  StoreCharacterData(character_id, data);
+  (void)StoreCharacterData(character_id, data);
   auto [session_it, inserted] = sessions_.try_emplace(character_id);
   (void)inserted;
   if (auto* state = target_registry->try_get<CharacterStateComponent>(new_entity)) {
@@ -593,7 +593,11 @@ std::optional<mir2::common::CharacterData> CharacterEntityManager::Save(uint32_t
   }
 
   auto data = legend2::SaveCharacterData(*registry, *entity);
-  StoreCharacterData(character_id, data);
+  if (!StoreCharacterData(character_id, data)) {
+    SYSLOG_ERROR("CharacterEntityManager Save storage write failed id={}",
+                 character_id);
+    return std::nullopt;
+  }
   return data;
 }
 
@@ -615,7 +619,14 @@ CharacterEntityManager::SaveResult CharacterEntityManager::SaveIfDirty(uint32_t 
 
   try {
     auto data = legend2::SaveCharacterData(*registry, *entity);
-    StoreCharacterData(character_id, data);
+    if (!StoreCharacterData(character_id, data)) {
+      SYSLOG_ERROR("CharacterEntityManager SaveIfDirty storage write failed id={}",
+                   character_id);
+      if (error_policy_ == ErrorPolicy::kClearDirtyFlag) {
+        dirty_tracker::clear_dirty(*registry, *entity);
+      }
+      return SaveResult::kSaveFailed;
+    }
     dirty_tracker::clear_dirty(*registry, *entity);
     return SaveResult::kSuccess;
   } catch (const std::exception& ex) {
@@ -737,7 +748,14 @@ void CharacterEntityManager::SaveAllDirty() {
 
       try {
         auto data = legend2::SaveCharacterData(registry, entity);
-        StoreCharacterData(identity->id, data);
+        if (!StoreCharacterData(identity->id, data)) {
+          SYSLOG_ERROR("CharacterEntityManager SaveAllDirty storage write failed id={}",
+                       identity->id);
+          if (error_policy_ == ErrorPolicy::kClearDirtyFlag) {
+            dirty_tracker::clear_dirty(registry, entity);
+          }
+          continue;
+        }
         dirty_tracker::clear_dirty(registry, entity);
       } catch (const std::exception& ex) {
         SYSLOG_ERROR("CharacterEntityManager SaveAllDirty failed id={} error={}",
@@ -910,7 +928,7 @@ void CharacterEntityManager::TouchStoredCharacter(uint32_t character_id) const {
   stored_lru_index_[character_id] = stored_lru_.begin();
 }
 
-void CharacterEntityManager::StoreCharacterData(
+bool CharacterEntityManager::StoreCharacterData(
     uint32_t character_id,
     const mir2::common::CharacterData& data) {
   stored_characters_[character_id] = data;
@@ -918,20 +936,23 @@ void CharacterEntityManager::StoreCharacterData(
   EnforceStoredCapacity();
 
   // Persist to StorageEngine (RocksDB WAL → async PostgreSQL).
-  if (storage_engine::StorageEngine::IsInitialized()) {
-    const auto start = std::chrono::steady_clock::now();
-    monitor::Metrics::Instance().IncrementCounter(kMetricSaveAsyncDurableCallsTotal);
-    std::string key = "char:" + std::to_string(character_id);
-    auto bytes = SerializeCharacterSnapshot(data);
-    const bool persisted = storage_engine::StorageEngine::Instance().SetAsyncDurable(
-        key, bytes, storage_engine::Priority::HIGH);
-    monitor::Metrics::Instance().SetGauge(
-        kMetricSaveAsyncDurableLatencyMs,
-        DurationMs(std::chrono::steady_clock::now() - start));
-    if (!persisted) {
-      monitor::Metrics::Instance().IncrementCounter(kMetricSaveAsyncDurableFailTotal);
-    }
+  if (!storage_engine::StorageEngine::IsInitialized()) {
+    return true;
   }
+
+  const auto start = std::chrono::steady_clock::now();
+  monitor::Metrics::Instance().IncrementCounter(kMetricSaveAsyncDurableCallsTotal);
+  std::string key = "char:" + std::to_string(character_id);
+  auto bytes = SerializeCharacterSnapshot(data);
+  const bool persisted = storage_engine::StorageEngine::Instance().SetAsyncDurable(
+      key, bytes, storage_engine::Priority::HIGH);
+  monitor::Metrics::Instance().SetGauge(
+      kMetricSaveAsyncDurableLatencyMs,
+      DurationMs(std::chrono::steady_clock::now() - start));
+  if (!persisted) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricSaveAsyncDurableFailTotal);
+  }
+  return persisted;
 }
 
 void CharacterEntityManager::EnsureEntityVersion(entt::registry& registry,

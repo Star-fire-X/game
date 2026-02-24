@@ -1,10 +1,16 @@
 #include <gtest/gtest.h>
 
 #include <entt/entt.hpp>
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <string>
 
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
 #include "ecs/dirty_tracker.h"
+#include "storage_engine/storage_engine.h"
+#include "storage_engine/test_backend_mocks.h"
 
 namespace {
 
@@ -12,6 +18,50 @@ using mir2::ecs::CharacterAttributesComponent;
 using mir2::ecs::CharacterEntityManager;
 using mir2::ecs::DirtyComponent;
 namespace dirty_tracker = mir2::ecs::dirty_tracker;
+using mir2::storage_engine::Priority;
+using mir2::storage_engine::StorageEngine;
+
+class OutboxBlockingBackend : public mir2::storage_engine::test::NoopStorageBackend {
+ public:
+  StorageResult Save(const std::string&,
+                     uint64_t,
+                     const std::vector<uint8_t>&) override {
+    sync_save_calls.fetch_add(1, std::memory_order_relaxed);
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult SaveBatch(const BatchItems&) override {
+    const uint32_t call_index =
+        batch_save_calls.fetch_add(1, std::memory_order_relaxed);
+    if (call_index == 0) {
+      return StorageResult{false, "forced first batch save failure", 0};
+    }
+    return StorageResult{true, "", 0};
+  }
+
+  std::atomic<uint32_t> sync_save_calls{0};
+  std::atomic<uint32_t> batch_save_calls{0};
+};
+
+StorageEngine::Config BuildOutboxTestConfig(const std::string& l2_path) {
+  StorageEngine::Config config;
+  config.l2_path = l2_path;
+  config.enable_outbox = true;
+  config.outbox_max_items = 1;
+  config.auto_sync_interval_ms = 10;
+  config.queue_retry_count = 0;
+  config.queue_retry_delay_ms = 0;
+  config.enable_strict_write_guarantee = false;
+  config.sync_write_key_prefixes = {"char:"};
+  config.critical_key_prefixes = {"char:"};
+  return config;
+}
+
+std::string BuildTempPath(const char* prefix) {
+  return std::string("/tmp/") + prefix + "_" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count());
+}
 
 }  // namespace
 
@@ -159,4 +209,39 @@ TEST(CharacterEntityManagerDirtyTest, UpdateUsesSaveIfDirty) {
     ASSERT_TRUE(stored.has_value());
     EXPECT_EQ(stored->stats.hp, 77);
     EXPECT_FALSE(dirty_tracker::is_dirty(registry, entity));
+}
+
+TEST(CharacterEntityManagerDirtyTest, SaveIfDirtyKeepsDirtyWhenAsyncDurableWriteFails) {
+    entt::registry registry;
+    CharacterEntityManager manager(registry);
+    auto entity = manager.GetOrCreate(30);
+
+    if (StorageEngine::IsInitialized()) {
+      StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path = BuildTempPath("mir2_char_manager_outbox_full");
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+
+    auto backend = std::make_unique<OutboxBlockingBackend>();
+    auto config = BuildOutboxTestConfig(l2_path);
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    ASSERT_TRUE(engine.Set("normal:key:1", std::vector<uint8_t>{1}, Priority::NORMAL));
+    ASSERT_TRUE(engine.Flush(2000));
+
+    auto& attributes = registry.get<CharacterAttributesComponent>(entity);
+    attributes.hp = 66;
+    dirty_tracker::mark_attributes_dirty(registry, entity);
+    ASSERT_TRUE(dirty_tracker::is_dirty(registry, entity));
+
+    auto result = manager.SaveIfDirty(30);
+
+    EXPECT_EQ(result, CharacterEntityManager::SaveResult::kSaveFailed);
+    EXPECT_TRUE(dirty_tracker::is_dirty(registry, entity));
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
 }

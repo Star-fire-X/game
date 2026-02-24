@@ -147,7 +147,7 @@ class CharacterEntityManager {
   void UnindexCharacter(uint32_t character_id);
   void Touch(uint32_t character_id);
   void TouchStoredCharacter(uint32_t character_id) const;
-  void StoreCharacterData(uint32_t character_id, const mir2::common::CharacterData& data);
+  bool StoreCharacterData(uint32_t character_id, const mir2::common::CharacterData& data);
   void EnsureEntityVersion(entt::registry& registry,
                            entt::entity entity,
                            uint32_t character_id);

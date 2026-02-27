@@ -182,7 +182,10 @@ class MailHandlerPersistenceTest : public ::testing::Test {
     return Player{character_id, client_id, entity};
   }
 
-  void CreateInventoryItem(entt::entity owner, int slot, uint32_t item_id, int count) {
+  entt::entity CreateInventoryItem(entt::entity owner,
+                                   int slot,
+                                   uint32_t item_id,
+                                   int count) {
     const entt::entity item = registry_.create();
     auto& item_comp = registry_.emplace<ecs::ItemComponent>(item);
     item_comp.item_id = item_id;
@@ -192,6 +195,7 @@ class MailHandlerPersistenceTest : public ::testing::Test {
     auto& owner_comp = registry_.emplace<ecs::InventoryOwnerComponent>(item);
     owner_comp.owner = owner;
     owner_comp.slot_index = slot;
+    return item;
   }
 
   int CountOwnedItem(entt::entity owner, uint32_t item_id) const {
@@ -205,6 +209,18 @@ class MailHandlerPersistenceTest : public ::testing::Test {
       }
     }
     return total;
+  }
+
+  const ecs::ItemComponent* FindOwnedItem(entt::entity owner, uint32_t item_id) const {
+    auto view = registry_.view<ecs::ItemComponent, ecs::InventoryOwnerComponent>();
+    for (const entt::entity entity : view) {
+      const auto& item = view.get<ecs::ItemComponent>(entity);
+      const auto& owner_comp = view.get<ecs::InventoryOwnerComponent>(entity);
+      if (owner_comp.owner == owner && owner_comp.slot_index >= 0 && item.item_id == item_id) {
+        return &item;
+      }
+    }
+    return nullptr;
   }
 
   std::optional<CapturedResponse> FindLastResponse(uint64_t client_id,
@@ -366,6 +382,100 @@ TEST_F(MailHandlerPersistenceTest, ItemAttachmentsPersistAndAreGrantedOnClaim) {
   ASSERT_NE(receiver_attrs, nullptr);
   EXPECT_EQ(receiver_attrs->gold, 70);
   EXPECT_EQ(CountOwnedItem(receiver.entity, 88088), 2);
+}
+
+TEST_F(MailHandlerPersistenceTest, ItemAttachmentStatePersistsAcrossRecreateAndClaim) {
+  const auto sender = CreatePlayer(5301, 9301, "Sender", 0);
+  const auto receiver = CreatePlayer(5302, 9302, "Receiver", 0);
+  const entt::entity sender_item = CreateInventoryItem(sender.entity, 0, 88111, 2);
+
+  auto* sender_item_component = registry_.try_get<ecs::ItemComponent>(sender_item);
+  ASSERT_NE(sender_item_component, nullptr);
+  sender_item_component->durability = 66;
+  sender_item_component->max_durability = 99;
+  sender_item_component->shape = 702;
+  sender_item_component->looks = 1107;
+  sender_item_component->std_mode = 25;
+  sender_item_component->enhancement_level = 5;
+  sender_item_component->luck = 1;
+  sender_item_component->equip_slot = 5;
+  sender_item_component->attack_bonus = 12;
+  sender_item_component->defense_bonus = 8;
+  sender_item_component->magic_attack_bonus = 6;
+  sender_item_component->magic_defense_bonus = 4;
+  sender_item_component->hp_bonus = 60;
+  sender_item_component->mp_bonus = 30;
+  sender_item_component->hit_rate_bonus = 7;
+  sender_item_component->dodge_bonus = 3;
+  sender_item_component->speed_bonus = 1;
+  sender_item_component->lifesteal_percent = 2;
+  sender_item_component->reflect_percent = 1;
+  sender_item_component->elemental_damage = 9;
+  sender_item_component->elemental_type = 3;
+
+  HandlerContext send_ctx;
+  send_ctx.client_id = sender.client_id;
+  send_ctx.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kMailSendReq);
+  send_ctx.entity = sender.entity;
+  Dispatch(send_ctx,
+           BuildSendReqPayload(receiver.character_id,
+                               "PersistState",
+                               "AttachmentState",
+                               0,
+                               {{88111, 1}}));
+
+  const auto send_rsp = FindLastResponse(
+      sender.client_id, static_cast<uint16_t>(mir2::common::MsgId::kMailSendRsp));
+  ASSERT_TRUE(send_rsp.has_value());
+  flatbuffers::Verifier send_verifier(send_rsp->payload.data(), send_rsp->payload.size());
+  ASSERT_TRUE(send_verifier.VerifyBuffer<mir2::proto::MailSendRsp>(nullptr));
+  const auto* send_root = flatbuffers::GetRoot<mir2::proto::MailSendRsp>(send_rsp->payload.data());
+  ASSERT_NE(send_root, nullptr);
+  ASSERT_TRUE(send_root->success());
+  const uint64_t mail_id = send_root->mail_id();
+
+  RecreateHandler();
+
+  HandlerContext claim_ctx;
+  claim_ctx.client_id = receiver.client_id;
+  claim_ctx.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kMailClaimReq);
+  claim_ctx.entity = receiver.entity;
+  Dispatch(claim_ctx, BuildClaimReqPayload(mail_id));
+
+  const auto claim_rsp = FindLastResponse(
+      receiver.client_id, static_cast<uint16_t>(mir2::common::MsgId::kMailClaimRsp));
+  ASSERT_TRUE(claim_rsp.has_value());
+  flatbuffers::Verifier claim_verifier(claim_rsp->payload.data(), claim_rsp->payload.size());
+  ASSERT_TRUE(claim_verifier.VerifyBuffer<mir2::proto::MailClaimRsp>(nullptr));
+  const auto* claim_root =
+      flatbuffers::GetRoot<mir2::proto::MailClaimRsp>(claim_rsp->payload.data());
+  ASSERT_NE(claim_root, nullptr);
+  ASSERT_TRUE(claim_root->success());
+
+  const auto* claimed_item = FindOwnedItem(receiver.entity, 88111);
+  ASSERT_NE(claimed_item, nullptr);
+  EXPECT_EQ(claimed_item->count, 1);
+  EXPECT_EQ(claimed_item->durability, 66);
+  EXPECT_EQ(claimed_item->max_durability, 99);
+  EXPECT_EQ(claimed_item->shape, 702);
+  EXPECT_EQ(claimed_item->looks, 1107);
+  EXPECT_EQ(claimed_item->std_mode, 25);
+  EXPECT_EQ(claimed_item->enhancement_level, 5);
+  EXPECT_EQ(claimed_item->luck, 1);
+  EXPECT_EQ(claimed_item->equip_slot, 5);
+  EXPECT_EQ(claimed_item->attack_bonus, 12);
+  EXPECT_EQ(claimed_item->defense_bonus, 8);
+  EXPECT_EQ(claimed_item->magic_attack_bonus, 6);
+  EXPECT_EQ(claimed_item->magic_defense_bonus, 4);
+  EXPECT_EQ(claimed_item->hp_bonus, 60);
+  EXPECT_EQ(claimed_item->mp_bonus, 30);
+  EXPECT_EQ(claimed_item->hit_rate_bonus, 7);
+  EXPECT_EQ(claimed_item->dodge_bonus, 3);
+  EXPECT_EQ(claimed_item->speed_bonus, 1);
+  EXPECT_EQ(claimed_item->lifesteal_percent, 2);
+  EXPECT_EQ(claimed_item->reflect_percent, 1);
+  EXPECT_EQ(claimed_item->elemental_damage, 9);
+  EXPECT_EQ(claimed_item->elemental_type, 3);
 }
 
 }  // namespace

@@ -56,6 +56,29 @@ class MailHandler {
   struct MailAttachmentRecord {
     uint32_t item_id = 0;
     uint32_t count = 0;
+    bool has_instance_state = false;
+    uint64_t instance_id = 0;
+    int durability = 0;
+    int max_durability = 0;
+    int shape = 0;
+    int looks = 0;
+    int std_mode = 0;
+    int enhancement_level = 0;
+    int luck = 0;
+    int equip_slot = -1;
+    int attack_bonus = 0;
+    int defense_bonus = 0;
+    int magic_attack_bonus = 0;
+    int magic_defense_bonus = 0;
+    int hp_bonus = 0;
+    int mp_bonus = 0;
+    int hit_rate_bonus = 0;
+    int dodge_bonus = 0;
+    int speed_bonus = 0;
+    int lifesteal_percent = 0;
+    int reflect_percent = 0;
+    int elemental_damage = 0;
+    int elemental_type = 0;
   };
 
   struct MailRecord {

@@ -16,6 +16,7 @@
 
 #include "common/enums.h"
 #include "common/types/constants.h"
+#include "data/item_template.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/item_component.h"
 #include "log/logger.h"
@@ -47,12 +48,99 @@ struct DeductedAssets {
   uint32_t gold = 0;
   std::vector<InventoryDelta> inventory_deltas;
   std::vector<entt::entity> emptied_items;
+  std::vector<MailHandler::MailAttachmentRecord> transferred_items;
 };
 
 struct GrantedAssets {
   uint32_t gold = 0;
   std::vector<entt::entity> created_items;
 };
+
+MailHandler::MailAttachmentRecord BuildAttachmentFromItemComponent(
+    const mir2::ecs::ItemComponent& item,
+    uint32_t count) {
+  MailHandler::MailAttachmentRecord attachment;
+  attachment.item_id = item.item_id;
+  attachment.count = count;
+  attachment.has_instance_state = true;
+  attachment.instance_id = item.instance_id;
+  attachment.durability = item.durability;
+  attachment.max_durability = item.max_durability;
+  attachment.shape = item.shape;
+  attachment.looks = item.looks;
+  attachment.std_mode = item.std_mode;
+  attachment.enhancement_level = item.enhancement_level;
+  attachment.luck = item.luck;
+  attachment.equip_slot = item.equip_slot;
+  attachment.attack_bonus = item.attack_bonus;
+  attachment.defense_bonus = item.defense_bonus;
+  attachment.magic_attack_bonus = item.magic_attack_bonus;
+  attachment.magic_defense_bonus = item.magic_defense_bonus;
+  attachment.hp_bonus = item.hp_bonus;
+  attachment.mp_bonus = item.mp_bonus;
+  attachment.hit_rate_bonus = item.hit_rate_bonus;
+  attachment.dodge_bonus = item.dodge_bonus;
+  attachment.speed_bonus = item.speed_bonus;
+  attachment.lifesteal_percent = item.lifesteal_percent;
+  attachment.reflect_percent = item.reflect_percent;
+  attachment.elemental_damage = item.elemental_damage;
+  attachment.elemental_type = item.elemental_type;
+  return attachment;
+}
+
+void ApplyTemplateDefaults(uint32_t item_id, mir2::ecs::ItemComponent* item) {
+  if (!item || item_id == 0) {
+    return;
+  }
+  if (const auto* tmpl = data::ItemTemplateManager::Instance().GetTemplate(item_id)) {
+    item->std_mode = tmpl->std_mode;
+    item->shape = tmpl->shape;
+    item->looks = tmpl->looks;
+    item->max_durability = tmpl->dura_max;
+    item->durability = tmpl->dura_max;
+  }
+}
+
+void ApplyAttachmentToItemComponent(const MailHandler::MailAttachmentRecord& attachment,
+                                    entt::entity item_entity,
+                                    mir2::ecs::ItemComponent* item) {
+  if (!item) {
+    return;
+  }
+
+  item->item_id = attachment.item_id;
+  item->count = static_cast<int>(attachment.count);
+  item->instance_id = attachment.instance_id > 0
+                          ? attachment.instance_id
+                          : static_cast<uint64_t>(entt::to_integral(item_entity));
+
+  if (!attachment.has_instance_state) {
+    ApplyTemplateDefaults(attachment.item_id, item);
+    return;
+  }
+
+  item->durability = attachment.durability;
+  item->max_durability = attachment.max_durability;
+  item->shape = attachment.shape;
+  item->looks = attachment.looks;
+  item->std_mode = attachment.std_mode;
+  item->enhancement_level = attachment.enhancement_level;
+  item->luck = attachment.luck;
+  item->equip_slot = attachment.equip_slot;
+  item->attack_bonus = attachment.attack_bonus;
+  item->defense_bonus = attachment.defense_bonus;
+  item->magic_attack_bonus = attachment.magic_attack_bonus;
+  item->magic_defense_bonus = attachment.magic_defense_bonus;
+  item->hp_bonus = attachment.hp_bonus;
+  item->mp_bonus = attachment.mp_bonus;
+  item->hit_rate_bonus = attachment.hit_rate_bonus;
+  item->dodge_bonus = attachment.dodge_bonus;
+  item->speed_bonus = attachment.speed_bonus;
+  item->lifesteal_percent = attachment.lifesteal_percent;
+  item->reflect_percent = attachment.reflect_percent;
+  item->elemental_damage = attachment.elemental_damage;
+  item->elemental_type = attachment.elemental_type;
+}
 
 void RollbackDeductedAssets(entt::registry& registry,
                             entt::entity sender,
@@ -184,6 +272,10 @@ bool DeductAssetsFromSender(entt::registry& registry,
   if (!deducted || sender == entt::null || !registry.valid(sender)) {
     return false;
   }
+  deducted->gold = 0;
+  deducted->inventory_deltas.clear();
+  deducted->emptied_items.clear();
+  deducted->transferred_items.clear();
 
   auto* attributes = registry.try_get<mir2::ecs::CharacterAttributesComponent>(sender);
   if ((gold > 0 && attributes == nullptr) ||
@@ -230,13 +322,12 @@ bool DeductAssetsFromSender(entt::registry& registry,
     deducted->gold = gold;
   }
 
-  deducted->inventory_deltas.clear();
-  deducted->emptied_items.clear();
   for (const auto& [item_id, required_total] : required_counts) {
     uint32_t remaining = required_total;
     const auto it = inventory_by_item.find(item_id);
     if (it == inventory_by_item.end()) {
       RollbackDeductedAssets(registry, sender, *deducted);
+      deducted->transferred_items.clear();
       return false;
     }
 
@@ -248,6 +339,7 @@ bool DeductAssetsFromSender(entt::registry& registry,
       auto* owner = registry.try_get<mir2::ecs::InventoryOwnerComponent>(entity);
       if (!item || !owner || owner->owner != sender || owner->slot_index < 0 || item->count <= 0) {
         RollbackDeductedAssets(registry, sender, *deducted);
+        deducted->transferred_items.clear();
         return false;
       }
 
@@ -259,6 +351,11 @@ bool DeductAssetsFromSender(entt::registry& registry,
 
       const uint32_t available = static_cast<uint32_t>(item->count);
       const uint32_t consume = std::min<uint32_t>(available, remaining);
+      if (consume == 0) {
+        continue;
+      }
+      deducted->transferred_items.push_back(
+          BuildAttachmentFromItemComponent(*item, consume));
       item->count -= static_cast<int>(consume);
       remaining -= consume;
       if (item->count <= 0) {
@@ -270,6 +367,7 @@ bool DeductAssetsFromSender(entt::registry& registry,
 
     if (remaining != 0) {
       RollbackDeductedAssets(registry, sender, *deducted);
+      deducted->transferred_items.clear();
       return false;
     }
   }
@@ -367,9 +465,7 @@ bool GrantAssetsToRecipient(entt::registry& registry,
   for (const auto& attachment : attachments) {
     const entt::entity item_entity = registry.create();
     auto& item = registry.emplace<mir2::ecs::ItemComponent>(item_entity);
-    item.item_id = attachment.item_id;
-    item.count = static_cast<int>(attachment.count);
-    item.instance_id = static_cast<uint64_t>(entt::to_integral(item_entity));
+    ApplyAttachmentToItemComponent(attachment, item_entity, &item);
 
     auto& owner = registry.emplace<mir2::ecs::InventoryOwnerComponent>(item_entity);
     owner.owner = recipient;
@@ -409,7 +505,36 @@ std::string SerializeItemsJson(const std::vector<MailHandler::MailAttachmentReco
     if (item.item_id == 0 || item.count == 0) {
       continue;
     }
-    serialized.push_back({{"item_id", item.item_id}, {"count", item.count}});
+    nlohmann::json node = {
+        {"item_id", item.item_id},
+        {"count", item.count},
+    };
+    if (item.has_instance_state) {
+      node["has_instance_state"] = true;
+      node["instance_id"] = item.instance_id;
+      node["durability"] = item.durability;
+      node["max_durability"] = item.max_durability;
+      node["shape"] = item.shape;
+      node["looks"] = item.looks;
+      node["std_mode"] = item.std_mode;
+      node["enhancement_level"] = item.enhancement_level;
+      node["luck"] = item.luck;
+      node["equip_slot"] = item.equip_slot;
+      node["attack_bonus"] = item.attack_bonus;
+      node["defense_bonus"] = item.defense_bonus;
+      node["magic_attack_bonus"] = item.magic_attack_bonus;
+      node["magic_defense_bonus"] = item.magic_defense_bonus;
+      node["hp_bonus"] = item.hp_bonus;
+      node["mp_bonus"] = item.mp_bonus;
+      node["hit_rate_bonus"] = item.hit_rate_bonus;
+      node["dodge_bonus"] = item.dodge_bonus;
+      node["speed_bonus"] = item.speed_bonus;
+      node["lifesteal_percent"] = item.lifesteal_percent;
+      node["reflect_percent"] = item.reflect_percent;
+      node["elemental_damage"] = item.elemental_damage;
+      node["elemental_type"] = item.elemental_type;
+    }
+    serialized.push_back(std::move(node));
   }
   return serialized.dump();
 }
@@ -437,6 +562,55 @@ std::vector<MailHandler::MailAttachmentRecord> ParseItemsJson(const std::string&
     MailHandler::MailAttachmentRecord record;
     record.item_id = item_id;
     record.count = count;
+    const bool has_instance_state =
+        node.value("has_instance_state", false) ||
+        node.contains("instance_id") ||
+        node.contains("durability") ||
+        node.contains("max_durability") ||
+        node.contains("shape") ||
+        node.contains("looks") ||
+        node.contains("std_mode") ||
+        node.contains("enhancement_level") ||
+        node.contains("luck") ||
+        node.contains("equip_slot") ||
+        node.contains("attack_bonus") ||
+        node.contains("defense_bonus") ||
+        node.contains("magic_attack_bonus") ||
+        node.contains("magic_defense_bonus") ||
+        node.contains("hp_bonus") ||
+        node.contains("mp_bonus") ||
+        node.contains("hit_rate_bonus") ||
+        node.contains("dodge_bonus") ||
+        node.contains("speed_bonus") ||
+        node.contains("lifesteal_percent") ||
+        node.contains("reflect_percent") ||
+        node.contains("elemental_damage") ||
+        node.contains("elemental_type");
+    record.has_instance_state = has_instance_state;
+    if (has_instance_state) {
+      record.instance_id = node.value("instance_id", 0ULL);
+      record.durability = node.value("durability", 0);
+      record.max_durability = node.value("max_durability", 0);
+      record.shape = node.value("shape", 0);
+      record.looks = node.value("looks", 0);
+      record.std_mode = node.value("std_mode", 0);
+      record.enhancement_level = node.value("enhancement_level", 0);
+      record.luck = node.value("luck", 0);
+      record.equip_slot = node.value("equip_slot", -1);
+      record.attack_bonus = node.value("attack_bonus", 0);
+      record.defense_bonus = node.value("defense_bonus", 0);
+      record.magic_attack_bonus = node.value("magic_attack_bonus", 0);
+      record.magic_defense_bonus = node.value("magic_defense_bonus", 0);
+      record.hp_bonus = node.value("hp_bonus", 0);
+      record.mp_bonus = node.value("mp_bonus", 0);
+      record.hit_rate_bonus = node.value("hit_rate_bonus", 0);
+      record.dodge_bonus = node.value("dodge_bonus", 0);
+      record.speed_bonus = node.value("speed_bonus", 0);
+      record.lifesteal_percent = node.value("lifesteal_percent", 0);
+      record.reflect_percent = node.value("reflect_percent", 0);
+      record.elemental_damage = node.value("elemental_damage", 0);
+      record.elemental_type = node.value("elemental_type", 0);
+    }
     items.push_back(record);
   }
   return items;
@@ -462,10 +636,44 @@ std::optional<MailHandler::MailRecord> ParseMailRow(const pqxx::row& row) {
   return mail;
 }
 
+std::vector<MailHandler::MailAttachmentRecord> AggregateAttachmentCountsForDisplay(
+    const std::vector<MailHandler::MailAttachmentRecord>& items) {
+  std::unordered_map<uint32_t, uint32_t> counts_by_item;
+  counts_by_item.reserve(items.size());
+  for (const auto& item : items) {
+    if (item.item_id == 0 || item.count == 0) {
+      continue;
+    }
+    auto& total = counts_by_item[item.item_id];
+    if (total > std::numeric_limits<uint32_t>::max() - item.count) {
+      total = std::numeric_limits<uint32_t>::max();
+    } else {
+      total += item.count;
+    }
+  }
+
+  std::vector<MailHandler::MailAttachmentRecord> aggregated;
+  aggregated.reserve(counts_by_item.size());
+  for (const auto& [item_id, count] : counts_by_item) {
+    MailHandler::MailAttachmentRecord item;
+    item.item_id = item_id;
+    item.count = count;
+    aggregated.push_back(item);
+  }
+  std::sort(aggregated.begin(),
+            aggregated.end(),
+            [](const MailHandler::MailAttachmentRecord& lhs,
+               const MailHandler::MailAttachmentRecord& rhs) {
+              return lhs.item_id < rhs.item_id;
+            });
+  return aggregated;
+}
+
 flatbuffers::Offset<mir2::proto::MailSummary> BuildSummary(
     flatbuffers::FlatBufferBuilder& builder,
     const MailHandler::MailRecord& mail) {
   const auto subject = builder.CreateString(mail.subject);
+  const auto aggregated_items = AggregateAttachmentCountsForDisplay(mail.items);
   return mir2::proto::CreateMailSummary(
       builder,
       mail.mail_id,
@@ -477,15 +685,16 @@ flatbuffers::Offset<mir2::proto::MailSummary> BuildSummary(
       mail.send_time,
       mail.expire_time,
       mail.gold,
-      static_cast<uint32_t>(mail.items.size()));
+      static_cast<uint32_t>(aggregated_items.size()));
 }
 
 flatbuffers::Offset<mir2::proto::MailDetail> BuildDetail(
     flatbuffers::FlatBufferBuilder& builder,
     const MailHandler::MailRecord& mail) {
+  const auto aggregated_items = AggregateAttachmentCountsForDisplay(mail.items);
   std::vector<flatbuffers::Offset<mir2::proto::MailAttachmentItem>> item_offsets;
-  item_offsets.reserve(mail.items.size());
-  for (const auto& item : mail.items) {
+  item_offsets.reserve(aggregated_items.size());
+  for (const auto& item : aggregated_items) {
     item_offsets.emplace_back(
         mir2::proto::CreateMailAttachmentItem(builder, item.item_id, item.count));
   }
@@ -736,15 +945,16 @@ Task<void> MailHandler::HandleSend(HandlerContext ctx,
       total += item->count();
     }
   }
-  mail.items.reserve(attachment_totals.size());
+  std::vector<MailAttachmentRecord> requested_items;
+  requested_items.reserve(attachment_totals.size());
   for (const auto& [item_id, count] : attachment_totals) {
     MailAttachmentRecord record;
     record.item_id = item_id;
     record.count = count;
-    mail.items.push_back(record);
+    requested_items.push_back(record);
   }
-  std::sort(mail.items.begin(), mail.items.end(), [](const MailAttachmentRecord& lhs,
-                                                     const MailAttachmentRecord& rhs) {
+  std::sort(requested_items.begin(), requested_items.end(), [](const MailAttachmentRecord& lhs,
+                                                               const MailAttachmentRecord& rhs) {
     return lhs.item_id < rhs.item_id;
   });
 
@@ -757,11 +967,22 @@ Task<void> MailHandler::HandleSend(HandlerContext ctx,
 
   DeductedAssets deducted_assets;
   if (!DeductAssetsFromSender(
-          ecs_registry_, *sender_entity, mail.gold, mail.items, &deducted_assets)) {
+          ecs_registry_, *sender_entity, mail.gold, requested_items, &deducted_assets)) {
     co_await SendMailSendRsp(
         ctx.client_id, false, mir2::common::ErrorCode::kMailAttachmentInvalid, 0);
     co_return;
   }
+  mail.items = deducted_assets.transferred_items;
+  std::sort(mail.items.begin(), mail.items.end(), [](const MailAttachmentRecord& lhs,
+                                                     const MailAttachmentRecord& rhs) {
+    if (lhs.item_id != rhs.item_id) {
+      return lhs.item_id < rhs.item_id;
+    }
+    if (lhs.instance_id != rhs.instance_id) {
+      return lhs.instance_id < rhs.instance_id;
+    }
+    return lhs.count < rhs.count;
+  });
 
   if (PersistenceEnabled()) {
     uint32_t unread_count = 0;

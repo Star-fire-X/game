@@ -48,6 +48,18 @@ struct PersistedListingRow {
   bool item_returned = false;
 };
 
+struct PendingReturnDelivery {
+  uint64_t listing_id = 0;
+  entt::entity seller_entity = entt::null;
+  uint32_t item_id = 0;
+  uint32_t count = 0;
+};
+
+struct AppliedReturnDelivery {
+  PendingReturnDelivery delivery;
+  entt::entity item_entity = entt::null;
+};
+
 const char* kListingColumns =
     "listing_id, seller_character_id, buyer_character_id, item_id, item_count, unit_price, "
     "status, item_returned, version, "
@@ -98,6 +110,31 @@ std::optional<PersistedListingRow> ParsePersistedListingRow(const pqxx::row& row
   parsed.buyer_character_id = row["buyer_character_id"].as<uint64_t>(0);
   ApplyDbStatus(&parsed.listing, parsed.status);
   return parsed;
+}
+
+uint16_t CountFreeInventorySlots(const entt::registry& registry, entt::entity owner) {
+  if (owner == entt::null || !registry.valid(owner)) {
+    return 0;
+  }
+
+  std::array<bool, kMaxInventorySlots> occupied{};
+  auto view = registry.view<mir2::ecs::InventoryOwnerComponent>();
+  for (const entt::entity entity : view) {
+    const auto& owner_component = view.get<mir2::ecs::InventoryOwnerComponent>(entity);
+    if (owner_component.owner != owner || owner_component.slot_index < 0 ||
+        owner_component.slot_index >= static_cast<int>(kMaxInventorySlots)) {
+      continue;
+    }
+    occupied[static_cast<size_t>(owner_component.slot_index)] = true;
+  }
+
+  uint16_t free_slots = 0;
+  for (bool used : occupied) {
+    if (!used) {
+      ++free_slots;
+    }
+  }
+  return free_slots;
 }
 
 flatbuffers::Offset<mir2::proto::AuctionListing> BuildListingOffset(
@@ -1323,6 +1360,9 @@ void AuctionHandler::SweepExpiredListingsPersistent() {
     return;
   }
 
+  std::vector<AppliedReturnDelivery> provisional_deliveries;
+  std::vector<AppliedReturnDelivery> committed_deliveries;
+  bool txn_committed = false;
   try {
     auto conn = db_pool_->Acquire();
     if (!conn) {
@@ -1340,8 +1380,8 @@ void AuctionHandler::SweepExpiredListingsPersistent() {
     const pqxx::result expired =
         txn.exec(update_sql, pqxx::params{kDbStatusExpired, kDbStatusActive});
 
-    std::vector<uint64_t> returned_listing_ids;
-    std::vector<entt::entity> dirty_entities;
+    std::unordered_map<entt::entity, uint16_t> remaining_slots_by_seller;
+    std::vector<PendingReturnDelivery> pending_returns;
 
     for (const auto& row : expired) {
       const auto parsed = ParsePersistedListingRow(row);
@@ -1352,33 +1392,79 @@ void AuctionHandler::SweepExpiredListingsPersistent() {
       if (!seller_entity.has_value()) {
         continue;
       }
+
+      auto slot_it = remaining_slots_by_seller.find(*seller_entity);
+      if (slot_it == remaining_slots_by_seller.end()) {
+        slot_it =
+            remaining_slots_by_seller.emplace(
+                *seller_entity, CountFreeInventorySlots(ecs_registry_, *seller_entity))
+                .first;
+      }
+      if (slot_it->second == 0) {
+        continue;
+      }
+      --slot_it->second;
+
+      PendingReturnDelivery delivery;
+      delivery.listing_id = parsed->listing.listing_id;
+      delivery.seller_entity = *seller_entity;
+      delivery.item_id = parsed->listing.item_id;
+      delivery.count = parsed->listing.count;
+      pending_returns.push_back(delivery);
+    }
+
+    for (const auto& delivery : pending_returns) {
       const entt::entity item = AddInventoryItem(
-          *seller_entity,
-          parsed->listing.item_id,
-          parsed->listing.count,
-          parsed->listing.listing_id);
+          delivery.seller_entity, delivery.item_id, delivery.count, delivery.listing_id);
       if (item == entt::null) {
         continue;
       }
-      returned_listing_ids.push_back(parsed->listing.listing_id);
-      dirty_entities.push_back(*seller_entity);
+      provisional_deliveries.push_back(AppliedReturnDelivery{
+          .delivery = delivery,
+          .item_entity = item,
+      });
     }
 
-    for (const uint64_t listing_id : returned_listing_ids) {
-      txn.exec(
+    for (const auto& applied : provisional_deliveries) {
+      const pqxx::result marked = txn.exec(
           "UPDATE auction_listings "
           "SET item_returned = TRUE, updated_at = NOW(), version = version + 1 "
-          "WHERE listing_id = $1",
-          pqxx::params{listing_id});
+          "WHERE listing_id = $1 AND item_returned = FALSE "
+          "RETURNING listing_id",
+          pqxx::params{applied.delivery.listing_id});
+      if (marked.empty()) {
+        if (ecs_registry_.valid(applied.item_entity)) {
+          ecs_registry_.destroy(applied.item_entity);
+        }
+        continue;
+      }
+      committed_deliveries.push_back(applied);
     }
 
     txn.commit();
-
-    for (const entt::entity entity : dirty_entities) {
-      MarkItemsDirty(entity);
-    }
+    txn_committed = true;
   } catch (const std::exception& ex) {
+    if (!txn_committed) {
+      for (const auto& applied : provisional_deliveries) {
+        if (ecs_registry_.valid(applied.item_entity)) {
+          ecs_registry_.destroy(applied.item_entity);
+        }
+      }
+    }
     SYSLOG_ERROR("AuctionHandler persistent sweep failed: {}", ex.what());
+    return;
+  }
+
+  std::vector<entt::entity> dirty_entities;
+  dirty_entities.reserve(committed_deliveries.size());
+  for (const auto& applied : committed_deliveries) {
+    dirty_entities.push_back(applied.delivery.seller_entity);
+  }
+  std::sort(dirty_entities.begin(), dirty_entities.end());
+  dirty_entities.erase(std::unique(dirty_entities.begin(), dirty_entities.end()),
+                       dirty_entities.end());
+  for (const entt::entity entity : dirty_entities) {
+    MarkItemsDirty(entity);
   }
 }
 
@@ -1392,6 +1478,9 @@ void AuctionHandler::RecoverPendingReturnsForCharacter(uint64_t character_id) {
     return;
   }
 
+  std::vector<AppliedReturnDelivery> provisional_deliveries;
+  std::vector<AppliedReturnDelivery> committed_deliveries;
+  bool txn_committed = false;
   try {
     auto conn = db_pool_->Acquire();
     if (!conn) {
@@ -1415,40 +1504,71 @@ void AuctionHandler::RecoverPendingReturnsForCharacter(uint64_t character_id) {
                               kDbStatusExpired,
                               static_cast<uint32_t>(kPendingRecoveryBatchSize)});
 
-    std::vector<uint64_t> returned_listing_ids;
+    uint16_t remaining_slots = CountFreeInventorySlots(ecs_registry_, *seller_entity);
+    std::vector<PendingReturnDelivery> pending_returns;
     for (const auto& row : pending_rows) {
+      if (remaining_slots == 0) {
+        break;
+      }
       const auto parsed = ParsePersistedListingRow(row);
       if (!parsed.has_value()) {
         continue;
       }
+      PendingReturnDelivery delivery;
+      delivery.listing_id = parsed->listing.listing_id;
+      delivery.seller_entity = *seller_entity;
+      delivery.item_id = parsed->listing.item_id;
+      delivery.count = parsed->listing.count;
+      pending_returns.push_back(delivery);
+      --remaining_slots;
+    }
+
+    for (const auto& delivery : pending_returns) {
       const entt::entity item = AddInventoryItem(
-          *seller_entity,
-          parsed->listing.item_id,
-          parsed->listing.count,
-          parsed->listing.listing_id);
+          delivery.seller_entity, delivery.item_id, delivery.count, delivery.listing_id);
       if (item == entt::null) {
         continue;
       }
-      returned_listing_ids.push_back(parsed->listing.listing_id);
+      provisional_deliveries.push_back(AppliedReturnDelivery{
+          .delivery = delivery,
+          .item_entity = item,
+      });
     }
 
-    for (const uint64_t listing_id : returned_listing_ids) {
-      txn.exec(
+    for (const auto& applied : provisional_deliveries) {
+      const pqxx::result marked = txn.exec(
           "UPDATE auction_listings "
           "SET item_returned = TRUE, updated_at = NOW(), version = version + 1 "
-          "WHERE listing_id = $1",
-          pqxx::params{listing_id});
+          "WHERE listing_id = $1 AND item_returned = FALSE "
+          "RETURNING listing_id",
+          pqxx::params{applied.delivery.listing_id});
+      if (marked.empty()) {
+        if (ecs_registry_.valid(applied.item_entity)) {
+          ecs_registry_.destroy(applied.item_entity);
+        }
+        continue;
+      }
+      committed_deliveries.push_back(applied);
     }
 
     txn.commit();
-
-    if (!returned_listing_ids.empty()) {
-      MarkItemsDirty(*seller_entity);
-    }
+    txn_committed = true;
   } catch (const std::exception& ex) {
+    if (!txn_committed) {
+      for (const auto& applied : provisional_deliveries) {
+        if (ecs_registry_.valid(applied.item_entity)) {
+          ecs_registry_.destroy(applied.item_entity);
+        }
+      }
+    }
     SYSLOG_ERROR("AuctionHandler pending return recovery failed (character_id={}): {}",
                  character_id,
                  ex.what());
+    return;
+  }
+
+  if (!committed_deliveries.empty()) {
+    MarkItemsDirty(*seller_entity);
   }
 }
 

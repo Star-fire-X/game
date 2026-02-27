@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <asio/io_context.hpp>
@@ -16,6 +17,7 @@
 #include "common/enums.h"
 #include "config/config_manager.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/item_component.h"
 #include "logic/coroutine_executor.h"
 #include "logic/handlers/mail/mail_handler.h"
 #include "logic/mock_response_sender.h"
@@ -49,12 +51,19 @@ config::DatabaseConfig BuildDbConfigFromEnv() {
 std::vector<uint8_t> BuildSendReqPayload(uint64_t target_character_id,
                                          const std::string& subject,
                                          const std::string& content,
-                                         uint32_t gold = 0) {
+                                         uint32_t gold = 0,
+                                         const std::vector<std::pair<uint32_t, uint32_t>>& items = {}) {
   flatbuffers::FlatBufferBuilder builder;
   const auto subject_offset = builder.CreateString(subject);
   const auto content_offset = builder.CreateString(content);
+  std::vector<flatbuffers::Offset<mir2::proto::MailAttachmentItem>> item_offsets;
+  item_offsets.reserve(items.size());
+  for (const auto& [item_id, count] : items) {
+    item_offsets.push_back(mir2::proto::CreateMailAttachmentItem(builder, item_id, count));
+  }
+  const auto items_offset = builder.CreateVector(item_offsets);
   const auto req = mir2::proto::CreateMailSendReq(
-      builder, target_character_id, subject_offset, content_offset, gold, 0, 0);
+      builder, target_character_id, subject_offset, content_offset, gold, items_offset, 0);
   builder.Finish(req);
   return {builder.GetBufferPointer(), builder.GetBufferPointer() + builder.GetSize()};
 }
@@ -173,6 +182,31 @@ class MailHandlerPersistenceTest : public ::testing::Test {
     return Player{character_id, client_id, entity};
   }
 
+  void CreateInventoryItem(entt::entity owner, int slot, uint32_t item_id, int count) {
+    const entt::entity item = registry_.create();
+    auto& item_comp = registry_.emplace<ecs::ItemComponent>(item);
+    item_comp.item_id = item_id;
+    item_comp.count = count;
+    item_comp.instance_id = static_cast<uint64_t>(entt::to_integral(item));
+
+    auto& owner_comp = registry_.emplace<ecs::InventoryOwnerComponent>(item);
+    owner_comp.owner = owner;
+    owner_comp.slot_index = slot;
+  }
+
+  int CountOwnedItem(entt::entity owner, uint32_t item_id) const {
+    int total = 0;
+    auto view = registry_.view<ecs::ItemComponent, ecs::InventoryOwnerComponent>();
+    for (const entt::entity entity : view) {
+      const auto& item = view.get<ecs::ItemComponent>(entity);
+      const auto& owner_comp = view.get<ecs::InventoryOwnerComponent>(entity);
+      if (owner_comp.owner == owner && owner_comp.slot_index >= 0 && item.item_id == item_id) {
+        total += item.count;
+      }
+    }
+    return total;
+  }
+
   std::optional<CapturedResponse> FindLastResponse(uint64_t client_id,
                                                    uint16_t msg_id) const {
     const auto responses = response_sender_->GetCapturedResponses();
@@ -199,7 +233,7 @@ class MailHandlerPersistenceTest : public ::testing::Test {
 };
 
 TEST_F(MailHandlerPersistenceTest, MailPersistsAcrossHandlerRecreationAndCanBeClaimedDeleted) {
-  const auto sender = CreatePlayer(5101, 9101, "Sender");
+  const auto sender = CreatePlayer(5101, 9101, "Sender", 500);
   const auto receiver = CreatePlayer(5102, 9102, "Receiver", 100);
 
   HandlerContext send_ctx;
@@ -275,6 +309,63 @@ TEST_F(MailHandlerPersistenceTest, MailPersistsAcrossHandlerRecreationAndCanBeCl
   ASSERT_NE(delete_root, nullptr);
   EXPECT_TRUE(delete_root->success());
   EXPECT_EQ(delete_root->mail_id(), mail_id);
+}
+
+TEST_F(MailHandlerPersistenceTest, ItemAttachmentsPersistAndAreGrantedOnClaim) {
+  const auto sender = CreatePlayer(5201, 9201, "Sender", 100);
+  const auto receiver = CreatePlayer(5202, 9202, "Receiver", 50);
+  CreateInventoryItem(sender.entity, 0, 88088, 3);
+
+  HandlerContext send_ctx;
+  send_ctx.client_id = sender.client_id;
+  send_ctx.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kMailSendReq);
+  send_ctx.entity = sender.entity;
+  Dispatch(send_ctx,
+           BuildSendReqPayload(receiver.character_id,
+                               "PersistItem",
+                               "Attachment",
+                               20,
+                               {{88088, 2}}));
+
+  const auto send_rsp = FindLastResponse(
+      sender.client_id, static_cast<uint16_t>(mir2::common::MsgId::kMailSendRsp));
+  ASSERT_TRUE(send_rsp.has_value());
+  flatbuffers::Verifier send_verifier(send_rsp->payload.data(), send_rsp->payload.size());
+  ASSERT_TRUE(send_verifier.VerifyBuffer<mir2::proto::MailSendRsp>(nullptr));
+  const auto* send_root = flatbuffers::GetRoot<mir2::proto::MailSendRsp>(send_rsp->payload.data());
+  ASSERT_NE(send_root, nullptr);
+  ASSERT_TRUE(send_root->success());
+  const uint64_t mail_id = send_root->mail_id();
+  ASSERT_NE(mail_id, 0u);
+
+  const auto* sender_attrs = registry_.try_get<ecs::CharacterAttributesComponent>(sender.entity);
+  ASSERT_NE(sender_attrs, nullptr);
+  EXPECT_EQ(sender_attrs->gold, 80);
+  EXPECT_EQ(CountOwnedItem(sender.entity, 88088), 1);
+
+  RecreateHandler();
+
+  HandlerContext claim_ctx;
+  claim_ctx.client_id = receiver.client_id;
+  claim_ctx.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kMailClaimReq);
+  claim_ctx.entity = receiver.entity;
+  Dispatch(claim_ctx, BuildClaimReqPayload(mail_id));
+
+  const auto claim_rsp = FindLastResponse(
+      receiver.client_id, static_cast<uint16_t>(mir2::common::MsgId::kMailClaimRsp));
+  ASSERT_TRUE(claim_rsp.has_value());
+  flatbuffers::Verifier claim_verifier(claim_rsp->payload.data(), claim_rsp->payload.size());
+  ASSERT_TRUE(claim_verifier.VerifyBuffer<mir2::proto::MailClaimRsp>(nullptr));
+  const auto* claim_root =
+      flatbuffers::GetRoot<mir2::proto::MailClaimRsp>(claim_rsp->payload.data());
+  ASSERT_NE(claim_root, nullptr);
+  ASSERT_TRUE(claim_root->success());
+
+  const auto* receiver_attrs =
+      registry_.try_get<ecs::CharacterAttributesComponent>(receiver.entity);
+  ASSERT_NE(receiver_attrs, nullptr);
+  EXPECT_EQ(receiver_attrs->gold, 70);
+  EXPECT_EQ(CountOwnedItem(receiver.entity, 88088), 2);
 }
 
 }  // namespace

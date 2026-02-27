@@ -1,10 +1,13 @@
 #include "logic/handlers/mail/mail_handler.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include <flatbuffers/flatbuffers.h>
@@ -12,7 +15,9 @@
 #include <pqxx/pqxx>
 
 #include "common/enums.h"
+#include "common/types/constants.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/item_component.h"
 #include "log/logger.h"
 #include "logic/handlers/handler_error_utils.h"
 #include "logic/response_sender.h"
@@ -26,10 +31,377 @@ namespace mir2::logic {
 namespace {
 
 constexpr uint64_t kDefaultMailExpireMs = 7ULL * 24ULL * 60ULL * 60ULL * 1000ULL;
+constexpr int kMaxInventorySlots = mir2::common::constants::MAX_INVENTORY_SIZE;
 const char* kMailSelectColumns =
     "id, from_id, to_id, subject, content, gold, items, is_read, claimed, "
     "CAST(EXTRACT(EPOCH FROM send_time) * 1000 AS BIGINT) AS send_time_ms, "
     "CAST(EXTRACT(EPOCH FROM expire_time) * 1000 AS BIGINT) AS expire_time_ms";
+
+struct InventoryDelta {
+  entt::entity item_entity = entt::null;
+  int old_count = 0;
+  int old_slot = -1;
+};
+
+struct DeductedAssets {
+  uint32_t gold = 0;
+  std::vector<InventoryDelta> inventory_deltas;
+  std::vector<entt::entity> emptied_items;
+};
+
+struct GrantedAssets {
+  uint32_t gold = 0;
+  std::vector<entt::entity> created_items;
+};
+
+void RollbackDeductedAssets(entt::registry& registry,
+                            entt::entity sender,
+                            const DeductedAssets& deducted);
+
+void MarkDirty(entt::registry& registry,
+               entt::entity character,
+               bool items_dirty,
+               bool attributes_dirty) {
+  if (character == entt::null || !registry.valid(character) ||
+      (!items_dirty && !attributes_dirty)) {
+    return;
+  }
+
+  auto* dirty = registry.try_get<mir2::ecs::DirtyComponent>(character);
+  if (!dirty) {
+    dirty = &registry.emplace<mir2::ecs::DirtyComponent>(character);
+  }
+  if (items_dirty) {
+    dirty->items_dirty = true;
+  }
+  if (attributes_dirty) {
+    dirty->attributes_dirty = true;
+  }
+}
+
+std::optional<entt::entity> ResolveEntityByCharacterId(entt::registry& registry,
+                                                       entt::entity hint,
+                                                       uint64_t character_id) {
+  if (character_id == 0) {
+    return std::nullopt;
+  }
+
+  if (hint != entt::null && registry.valid(hint)) {
+    const auto* identity = registry.try_get<mir2::ecs::CharacterIdentityComponent>(hint);
+    if (identity && identity->id == character_id) {
+      return hint;
+    }
+  }
+
+  auto view = registry.view<mir2::ecs::CharacterIdentityComponent>();
+  for (const entt::entity entity : view) {
+    const auto& identity = view.get<mir2::ecs::CharacterIdentityComponent>(entity);
+    if (identity.id == character_id) {
+      return entity;
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::vector<entt::entity> CollectInventoryStacks(entt::registry& registry,
+                                                 entt::entity owner,
+                                                 uint32_t item_id) {
+  std::vector<entt::entity> stacks;
+  if (owner == entt::null || !registry.valid(owner) || item_id == 0) {
+    return stacks;
+  }
+
+  auto view = registry.view<mir2::ecs::ItemComponent, mir2::ecs::InventoryOwnerComponent>();
+  for (const entt::entity entity : view) {
+    const auto& item = view.get<mir2::ecs::ItemComponent>(entity);
+    const auto& owner_comp = view.get<mir2::ecs::InventoryOwnerComponent>(entity);
+    if (owner_comp.owner != owner || owner_comp.slot_index < 0 || item.item_id != item_id ||
+        item.count <= 0) {
+      continue;
+    }
+    stacks.push_back(entity);
+  }
+
+  std::sort(stacks.begin(), stacks.end(), [&registry](entt::entity lhs, entt::entity rhs) {
+    const auto* lhs_owner = registry.try_get<mir2::ecs::InventoryOwnerComponent>(lhs);
+    const auto* rhs_owner = registry.try_get<mir2::ecs::InventoryOwnerComponent>(rhs);
+    const int lhs_slot = lhs_owner ? lhs_owner->slot_index : std::numeric_limits<int>::max();
+    const int rhs_slot = rhs_owner ? rhs_owner->slot_index : std::numeric_limits<int>::max();
+    if (lhs_slot != rhs_slot) {
+      return lhs_slot < rhs_slot;
+    }
+    return entt::to_integral(lhs) < entt::to_integral(rhs);
+  });
+  return stacks;
+}
+
+std::array<bool, kMaxInventorySlots> CollectUsedInventorySlots(entt::registry& registry,
+                                                               entt::entity owner) {
+  std::array<bool, kMaxInventorySlots> used_slots{};
+  if (owner == entt::null || !registry.valid(owner)) {
+    return used_slots;
+  }
+
+  auto view = registry.view<mir2::ecs::InventoryOwnerComponent>();
+  for (const entt::entity entity : view) {
+    const auto& owner_comp = view.get<mir2::ecs::InventoryOwnerComponent>(entity);
+    if (owner_comp.owner != owner || owner_comp.slot_index < 0 ||
+        owner_comp.slot_index >= kMaxInventorySlots) {
+      continue;
+    }
+    used_slots[static_cast<size_t>(owner_comp.slot_index)] = true;
+  }
+  return used_slots;
+}
+
+std::vector<int> CollectFreeInventorySlots(entt::registry& registry,
+                                           entt::entity owner,
+                                           size_t needed) {
+  std::vector<int> free_slots;
+  if (needed == 0) {
+    return free_slots;
+  }
+
+  auto used_slots = CollectUsedInventorySlots(registry, owner);
+  for (int slot = 0; slot < kMaxInventorySlots; ++slot) {
+    if (used_slots[static_cast<size_t>(slot)]) {
+      continue;
+    }
+    free_slots.push_back(slot);
+    if (free_slots.size() >= needed) {
+      break;
+    }
+  }
+  return free_slots;
+}
+
+bool DeductAssetsFromSender(entt::registry& registry,
+                            entt::entity sender,
+                            uint32_t gold,
+                            const std::vector<MailHandler::MailAttachmentRecord>& attachments,
+                            DeductedAssets* deducted) {
+  if (!deducted || sender == entt::null || !registry.valid(sender)) {
+    return false;
+  }
+
+  auto* attributes = registry.try_get<mir2::ecs::CharacterAttributesComponent>(sender);
+  if ((gold > 0 && attributes == nullptr) ||
+      (gold > 0 &&
+       static_cast<int64_t>(attributes->gold) < static_cast<int64_t>(gold))) {
+    return false;
+  }
+
+  std::unordered_map<uint32_t, uint32_t> required_counts;
+  required_counts.reserve(attachments.size());
+  for (const auto& attachment : attachments) {
+    if (attachment.item_id == 0 || attachment.count == 0 ||
+        attachment.count > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+      return false;
+    }
+    auto& required = required_counts[attachment.item_id];
+    if (required >
+        std::numeric_limits<uint32_t>::max() - attachment.count) {
+      return false;
+    }
+    required += attachment.count;
+  }
+
+  std::unordered_map<uint32_t, std::vector<entt::entity>> inventory_by_item;
+  inventory_by_item.reserve(required_counts.size());
+  for (const auto& [item_id, required] : required_counts) {
+    auto stacks = CollectInventoryStacks(registry, sender, item_id);
+    uint64_t available = 0;
+    for (const entt::entity entity : stacks) {
+      const auto* item = registry.try_get<mir2::ecs::ItemComponent>(entity);
+      if (!item || item->count <= 0) {
+        continue;
+      }
+      available += static_cast<uint32_t>(item->count);
+    }
+    if (available < required) {
+      return false;
+    }
+    inventory_by_item.emplace(item_id, std::move(stacks));
+  }
+
+  if (gold > 0) {
+    attributes->gold -= static_cast<int>(gold);
+    deducted->gold = gold;
+  }
+
+  deducted->inventory_deltas.clear();
+  deducted->emptied_items.clear();
+  for (const auto& [item_id, required_total] : required_counts) {
+    uint32_t remaining = required_total;
+    const auto it = inventory_by_item.find(item_id);
+    if (it == inventory_by_item.end()) {
+      RollbackDeductedAssets(registry, sender, *deducted);
+      return false;
+    }
+
+    for (const entt::entity entity : it->second) {
+      if (remaining == 0) {
+        break;
+      }
+      auto* item = registry.try_get<mir2::ecs::ItemComponent>(entity);
+      auto* owner = registry.try_get<mir2::ecs::InventoryOwnerComponent>(entity);
+      if (!item || !owner || owner->owner != sender || owner->slot_index < 0 || item->count <= 0) {
+        RollbackDeductedAssets(registry, sender, *deducted);
+        return false;
+      }
+
+      InventoryDelta delta;
+      delta.item_entity = entity;
+      delta.old_count = item->count;
+      delta.old_slot = owner->slot_index;
+      deducted->inventory_deltas.push_back(delta);
+
+      const uint32_t available = static_cast<uint32_t>(item->count);
+      const uint32_t consume = std::min<uint32_t>(available, remaining);
+      item->count -= static_cast<int>(consume);
+      remaining -= consume;
+      if (item->count <= 0) {
+        item->count = 0;
+        owner->slot_index = -1;
+        deducted->emptied_items.push_back(entity);
+      }
+    }
+
+    if (remaining != 0) {
+      RollbackDeductedAssets(registry, sender, *deducted);
+      return false;
+    }
+  }
+
+  MarkDirty(registry, sender, !deducted->inventory_deltas.empty(), deducted->gold > 0);
+  return true;
+}
+
+void RollbackDeductedAssets(entt::registry& registry,
+                            entt::entity sender,
+                            const DeductedAssets& deducted) {
+  if (sender == entt::null || !registry.valid(sender)) {
+    return;
+  }
+
+  if (deducted.gold > 0) {
+    if (auto* attributes = registry.try_get<mir2::ecs::CharacterAttributesComponent>(sender)) {
+      attributes->gold += static_cast<int>(deducted.gold);
+    }
+  }
+
+  for (auto it = deducted.inventory_deltas.rbegin(); it != deducted.inventory_deltas.rend(); ++it) {
+    if (!registry.valid(it->item_entity)) {
+      continue;
+    }
+    auto* item = registry.try_get<mir2::ecs::ItemComponent>(it->item_entity);
+    auto* owner = registry.try_get<mir2::ecs::InventoryOwnerComponent>(it->item_entity);
+    if (!item || !owner) {
+      continue;
+    }
+    item->count = it->old_count;
+    owner->slot_index = it->old_slot;
+  }
+
+  MarkDirty(registry, sender, !deducted.inventory_deltas.empty(), deducted.gold > 0);
+}
+
+void FinalizeDeductedAssets(entt::registry& registry, entt::entity sender, const DeductedAssets& deducted) {
+  for (const entt::entity item_entity : deducted.emptied_items) {
+    if (registry.valid(item_entity)) {
+      registry.destroy(item_entity);
+    }
+  }
+  if (!deducted.emptied_items.empty()) {
+    MarkDirty(registry, sender, true, false);
+  }
+}
+
+bool GrantAssetsToRecipient(entt::registry& registry,
+                            entt::entity recipient,
+                            uint32_t gold,
+                            const std::vector<MailHandler::MailAttachmentRecord>& attachments,
+                            GrantedAssets* granted) {
+  if (!granted || recipient == entt::null || !registry.valid(recipient)) {
+    return false;
+  }
+
+  size_t attachment_slots = 0;
+  for (const auto& attachment : attachments) {
+    if (attachment.item_id == 0 || attachment.count == 0 ||
+        attachment.count > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+      return false;
+    }
+    ++attachment_slots;
+  }
+
+  if (gold > 0) {
+    auto* attributes = registry.try_get<mir2::ecs::CharacterAttributesComponent>(recipient);
+    if (!attributes) {
+      return false;
+    }
+    if (static_cast<int64_t>(attributes->gold) + static_cast<int64_t>(gold) >
+        static_cast<int64_t>(std::numeric_limits<int>::max())) {
+      return false;
+    }
+    attributes->gold += static_cast<int>(gold);
+    granted->gold = gold;
+  } else {
+    granted->gold = 0;
+  }
+
+  granted->created_items.clear();
+  const auto free_slots = CollectFreeInventorySlots(registry, recipient, attachment_slots);
+  if (free_slots.size() < attachment_slots) {
+    if (granted->gold > 0) {
+      if (auto* attributes = registry.try_get<mir2::ecs::CharacterAttributesComponent>(recipient)) {
+        attributes->gold -= static_cast<int>(granted->gold);
+      }
+      granted->gold = 0;
+    }
+    return false;
+  }
+
+  size_t slot_index = 0;
+  for (const auto& attachment : attachments) {
+    const entt::entity item_entity = registry.create();
+    auto& item = registry.emplace<mir2::ecs::ItemComponent>(item_entity);
+    item.item_id = attachment.item_id;
+    item.count = static_cast<int>(attachment.count);
+    item.instance_id = static_cast<uint64_t>(entt::to_integral(item_entity));
+
+    auto& owner = registry.emplace<mir2::ecs::InventoryOwnerComponent>(item_entity);
+    owner.owner = recipient;
+    owner.slot_index = free_slots[slot_index++];
+    granted->created_items.push_back(item_entity);
+  }
+
+  MarkDirty(registry, recipient, !granted->created_items.empty(), granted->gold > 0);
+  return true;
+}
+
+void RollbackGrantedAssets(entt::registry& registry,
+                           entt::entity recipient,
+                           const GrantedAssets& granted) {
+  if (recipient == entt::null || !registry.valid(recipient)) {
+    return;
+  }
+
+  for (const entt::entity item_entity : granted.created_items) {
+    if (registry.valid(item_entity)) {
+      registry.destroy(item_entity);
+    }
+  }
+
+  if (granted.gold > 0) {
+    if (auto* attributes = registry.try_get<mir2::ecs::CharacterAttributesComponent>(recipient)) {
+      attributes->gold -= static_cast<int>(granted.gold);
+    }
+  }
+
+  MarkDirty(registry, recipient, !granted.created_items.empty(), granted.gold > 0);
+}
 
 std::string SerializeItemsJson(const std::vector<MailHandler::MailAttachmentRecord>& items) {
   nlohmann::json serialized = nlohmann::json::array();
@@ -346,17 +718,49 @@ Task<void> MailHandler::HandleSend(HandlerContext ctx,
                          ? req->expire_time()
                          : DefaultExpireTime(mail.send_time);
 
+  std::unordered_map<uint32_t, uint32_t> attachment_totals;
   if (const auto* items = req->items()) {
-    mail.items.reserve(items->size());
+    attachment_totals.reserve(items->size());
     for (const auto* item : *items) {
-      if (!item) {
-        continue;
+      if (!item || item->item_id() == 0 || item->count() == 0) {
+        co_await SendMailSendRsp(
+            ctx.client_id, false, mir2::common::ErrorCode::kMailAttachmentInvalid, 0);
+        co_return;
       }
-      MailAttachmentRecord record;
-      record.item_id = item->item_id();
-      record.count = item->count();
-      mail.items.push_back(record);
+      auto& total = attachment_totals[item->item_id()];
+      if (total > std::numeric_limits<uint32_t>::max() - item->count()) {
+        co_await SendMailSendRsp(
+            ctx.client_id, false, mir2::common::ErrorCode::kMailAttachmentInvalid, 0);
+        co_return;
+      }
+      total += item->count();
     }
+  }
+  mail.items.reserve(attachment_totals.size());
+  for (const auto& [item_id, count] : attachment_totals) {
+    MailAttachmentRecord record;
+    record.item_id = item_id;
+    record.count = count;
+    mail.items.push_back(record);
+  }
+  std::sort(mail.items.begin(), mail.items.end(), [](const MailAttachmentRecord& lhs,
+                                                     const MailAttachmentRecord& rhs) {
+    return lhs.item_id < rhs.item_id;
+  });
+
+  const auto sender_entity = ResolveEntityByCharacterId(ecs_registry_, ctx.entity, *sender_character_id);
+  if (!sender_entity.has_value()) {
+    co_await SendMailSendRsp(
+        ctx.client_id, false, mir2::common::ErrorCode::kTargetNotFound, 0);
+    co_return;
+  }
+
+  DeductedAssets deducted_assets;
+  if (!DeductAssetsFromSender(
+          ecs_registry_, *sender_entity, mail.gold, mail.items, &deducted_assets)) {
+    co_await SendMailSendRsp(
+        ctx.client_id, false, mir2::common::ErrorCode::kMailAttachmentInvalid, 0);
+    co_return;
   }
 
   if (PersistenceEnabled()) {
@@ -412,10 +816,12 @@ Task<void> MailHandler::HandleSend(HandlerContext ctx,
     }
 
     if (db_failed) {
+      RollbackDeductedAssets(ecs_registry_, *sender_entity, deducted_assets);
       co_await SendMailSendRsp(ctx.client_id, false, mir2::common::ErrorCode::kUnknown, 0);
       co_return;
     }
 
+    FinalizeDeductedAssets(ecs_registry_, *sender_entity, deducted_assets);
     co_await SendMailSendRsp(
         ctx.client_id, true, mir2::common::ErrorCode::kOk, mail.mail_id);
 
@@ -428,14 +834,26 @@ Task<void> MailHandler::HandleSend(HandlerContext ctx,
   }
 
   uint32_t unread_count = 0;
-  {
+  bool enqueue_failed = false;
+  try {
     std::lock_guard<std::mutex> lock(mailbox_mutex_);
     auto& recipient_box = mailbox_by_character_[mail.to_character_id];
     PurgeExpiredMails(&recipient_box, mail.send_time);
     recipient_box.push_back(mail);
     unread_count = CountUnread(recipient_box);
+  } catch (const std::exception&) {
+    enqueue_failed = true;
+  } catch (...) {
+    enqueue_failed = true;
   }
 
+  if (enqueue_failed) {
+    RollbackDeductedAssets(ecs_registry_, *sender_entity, deducted_assets);
+    co_await SendMailSendRsp(ctx.client_id, false, mir2::common::ErrorCode::kUnknown, 0);
+    co_return;
+  }
+
+  FinalizeDeductedAssets(ecs_registry_, *sender_entity, deducted_assets);
   co_await SendMailSendRsp(
       ctx.client_id, true, mir2::common::ErrorCode::kOk, mail.mail_id);
 
@@ -717,9 +1135,17 @@ Task<void> MailHandler::HandleClaim(HandlerContext ctx,
     co_return;
   }
 
-  uint32_t reward_gold = 0;
+  const auto character_entity = ResolveEntityByCharacterId(ecs_registry_, ctx.entity, *character_id);
+  if (!character_entity.has_value()) {
+    co_await SendMailClaimRsp(
+        ctx.client_id, false, mir2::common::ErrorCode::kTargetNotFound, req->mail_id());
+    co_return;
+  }
+
   if (PersistenceEnabled()) {
     mir2::common::ErrorCode claim_code = mir2::common::ErrorCode::kMailNotFound;
+    GrantedAssets granted_assets;
+    bool granted = false;
     try {
       const auto conn = db_pool_->Acquire();
       if (!conn) {
@@ -728,7 +1154,7 @@ Task<void> MailHandler::HandleClaim(HandlerContext ctx,
       db::PgConnectionGuard guard(*db_pool_, conn);
       pqxx::work txn(*conn);
       const pqxx::result rows = txn.exec(
-          "SELECT claimed, gold FROM mails "
+          "SELECT claimed, gold, items FROM mails "
           "WHERE id = $1 AND to_id = $2 AND expire_time > NOW() FOR UPDATE",
           pqxx::params{req->mail_id(), *character_id});
 
@@ -739,21 +1165,38 @@ Task<void> MailHandler::HandleClaim(HandlerContext ctx,
         if (row["claimed"].as<bool>(false)) {
           claim_code = mir2::common::ErrorCode::kMailAlreadyClaimed;
         } else {
-          reward_gold = row["gold"].as<uint32_t>(0);
-          txn.exec("UPDATE mails "
-                   "SET is_read = TRUE, claimed = TRUE, gold = 0, items = '[]'::jsonb "
-                   "WHERE id = $1 AND to_id = $2",
-                   pqxx::params{req->mail_id(), *character_id});
-          claim_code = mir2::common::ErrorCode::kOk;
+          const uint32_t reward_gold = row["gold"].as<uint32_t>(0);
+          const auto reward_items = ParseItemsJson(row["items"].as<std::string>("[]"));
+          if (!GrantAssetsToRecipient(
+                  ecs_registry_, *character_entity, reward_gold, reward_items, &granted_assets)) {
+            claim_code = mir2::common::ErrorCode::kMailAttachmentInvalid;
+          } else {
+            granted = true;
+            txn.exec("UPDATE mails "
+                     "SET is_read = TRUE, claimed = TRUE, gold = 0, items = '[]'::jsonb "
+                     "WHERE id = $1 AND to_id = $2",
+                     pqxx::params{req->mail_id(), *character_id});
+            claim_code = mir2::common::ErrorCode::kOk;
+          }
         }
       }
-      txn.commit();
+      if (claim_code == mir2::common::ErrorCode::kOk) {
+        txn.commit();
+      }
     } catch (const std::exception& ex) {
       SYSLOG_ERROR("MailHandler persistent claim failed character_id={} mail_id={} error={}",
                    *character_id,
                    req->mail_id(),
                    ex.what());
+      if (granted) {
+        RollbackGrantedAssets(ecs_registry_, *character_entity, granted_assets);
+        granted = false;
+      }
       claim_code = mir2::common::ErrorCode::kUnknown;
+    }
+
+    if (claim_code != mir2::common::ErrorCode::kOk && granted) {
+      RollbackGrantedAssets(ecs_registry_, *character_entity, granted_assets);
     }
 
     if (claim_code != mir2::common::ErrorCode::kOk) {
@@ -763,6 +1206,8 @@ Task<void> MailHandler::HandleClaim(HandlerContext ctx,
   } else {
     const uint64_t now_ms = NowMs();
     mir2::common::ErrorCode claim_code = mir2::common::ErrorCode::kMailNotFound;
+    GrantedAssets granted_assets;
+    bool granted = false;
     {
       std::lock_guard<std::mutex> lock(mailbox_mutex_);
       auto& box = mailbox_by_character_[*character_id];
@@ -776,25 +1221,27 @@ Task<void> MailHandler::HandleClaim(HandlerContext ctx,
       } else if (it->claimed) {
         claim_code = mir2::common::ErrorCode::kMailAlreadyClaimed;
       } else {
-        it->is_read = true;
-        it->claimed = true;
-        reward_gold = it->gold;
-        it->gold = 0;
-        it->items.clear();
-        claim_code = mir2::common::ErrorCode::kOk;
+        if (!GrantAssetsToRecipient(
+                ecs_registry_, *character_entity, it->gold, it->items, &granted_assets)) {
+          claim_code = mir2::common::ErrorCode::kMailAttachmentInvalid;
+        } else {
+          granted = true;
+          it->is_read = true;
+          it->claimed = true;
+          it->gold = 0;
+          it->items.clear();
+          claim_code = mir2::common::ErrorCode::kOk;
+        }
       }
+    }
+
+    if (claim_code != mir2::common::ErrorCode::kOk && granted) {
+      RollbackGrantedAssets(ecs_registry_, *character_entity, granted_assets);
     }
 
     if (claim_code != mir2::common::ErrorCode::kOk) {
       co_await SendMailClaimRsp(ctx.client_id, false, claim_code, req->mail_id());
       co_return;
-    }
-  }
-
-  if (reward_gold > 0 && ctx.entity != entt::null && ecs_registry_.valid(ctx.entity)) {
-    if (auto* attributes =
-            ecs_registry_.try_get<mir2::ecs::CharacterAttributesComponent>(ctx.entity)) {
-      attributes->gold += static_cast<int>(reward_gold);
     }
   }
 

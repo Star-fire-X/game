@@ -272,11 +272,12 @@ size_t MapInstance::DispatchPendingAOIEvents(size_t max_events) {
     // Drain ring events that were already queued when dispatch starts.
     const size_t initial_ring_size = pending_aoi_events_.ApproxSize();
     const size_t initial_overflow_size = overflow_aoi_events_.size();
-    size_t ring_budget = max_events;
-    if (initial_overflow_size > 0) {
-      // Reserve budget for overflow so capped dispatch cannot starve it.
-      ring_budget -= std::min(initial_overflow_size, ring_budget);
+    size_t overflow_budget = std::min(initial_overflow_size, max_events);
+    if (initial_ring_size > 0 && overflow_budget == max_events) {
+      // Keep at least one slot for ring progress under sustained overflow load.
+      --overflow_budget;
     }
+    const size_t ring_budget = max_events - overflow_budget;
 
     size_t ring_drained = 0;
     while (events.size() < ring_budget &&

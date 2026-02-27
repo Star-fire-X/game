@@ -72,7 +72,6 @@ class AccountStorageBackend final : public mir2::storage_engine::IStorageBackend
     std::string username;
     AccountData account;
     uint64_t fallback_version = 0;
-    std::vector<uint8_t> encoded_payload;
   };
 
   struct AccountCacheEntry {

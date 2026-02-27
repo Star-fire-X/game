@@ -24,7 +24,10 @@ constexpr const char* kAccountUpsertSql =
     "SET password_hash = EXCLUDED.password_hash, "
     "email = EXCLUDED.email, "
     "last_login = EXCLUDED.last_login, "
-    "banned = EXCLUDED.banned";
+    "banned = EXCLUDED.banned "
+    "RETURNING id, username, password_hash, email, "
+    "EXTRACT(EPOCH FROM created_at)::BIGINT * 1000, "
+    "EXTRACT(EPOCH FROM last_login)::BIGINT * 1000, banned";
 constexpr const char* kAccountCacheHitMetric = "storage.account_cache.hit_total";
 constexpr const char* kAccountCacheMissMetric = "storage.account_cache.miss_total";
 constexpr const char* kAccountCacheSizeMetric = "storage.account_cache.size";
@@ -268,7 +271,6 @@ AccountStorageBackend::BuildWriteBatches(const BatchItems& items,
         .username = *username,
         .account = std::move(account),
         .fallback_version = version,
-        .encoded_payload = data,
     });
   }
 
@@ -285,6 +287,8 @@ AccountStorageBackend::UpsertAccounts(const std::vector<AccountWriteItem>& items
   }
 
   const auto start = std::chrono::steady_clock::now();
+  std::vector<AccountWriteItem> canonical_items;
+  canonical_items.reserve(items.size());
   try {
     auto conn = pool_->Acquire();
     if (!conn) {
@@ -294,7 +298,7 @@ AccountStorageBackend::UpsertAccounts(const std::vector<AccountWriteItem>& items
     PgConnectionGuard guard(*pool_, conn);
     pqxx::work txn(*conn);
     for (const auto& item : items) {
-      txn.exec(
+      const pqxx::result result = txn.exec(
           kAccountUpsertSql,
           pqxx::params{
               item.username,
@@ -303,16 +307,37 @@ AccountStorageBackend::UpsertAccounts(const std::vector<AccountWriteItem>& items
               item.account.created_at,
               item.account.last_login,
               item.account.banned});
+
+      if (result.empty()) {
+        return StorageResult{
+            false,
+            "account upsert returned no rows for username '" + item.username + "'",
+            ElapsedMs(start)};
+      }
+
+      const auto& row = result[0];
+      AccountData canonical_account;
+      canonical_account.id = row[0].as<uint64_t>();
+      canonical_account.username = row[1].as<std::string>();
+      canonical_account.password_hash = row[2].as<std::string>();
+      canonical_account.email = row[3].as<std::string>("");
+      canonical_account.created_at = row[4].as<int64_t>(0);
+      canonical_account.last_login = row[5].as<int64_t>(0);
+      canonical_account.banned = row[6].as<bool>(false);
+
+      canonical_items.push_back(AccountWriteItem{
+          .username = canonical_account.username,
+          .account = std::move(canonical_account),
+          .fallback_version = item.fallback_version,
+      });
     }
     txn.commit();
   } catch (const std::exception& ex) {
     return StorageResult{false, ex.what(), ElapsedMs(start)};
   }
 
-  for (const auto& item : items) {
-    const auto payload = item.encoded_payload.empty()
-                             ? EncodeAccountData(item.account)
-                             : item.encoded_payload;
+  for (const auto& item : canonical_items) {
+    const auto payload = EncodeAccountData(item.account);
     PutCachedAccount(
         item.username,
         ResolveAccountVersion(item.account, item.fallback_version),

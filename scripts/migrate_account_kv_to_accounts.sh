@@ -195,7 +195,7 @@ SOURCE_FILE="$(mktemp)"
 trap 'rm -f "${SOURCE_FILE}"' EXIT
 
 psql_cmd -At -F $'\t' \
-  -c "SELECT key, encode(data, 'base64')
+  -c "SELECT key, regexp_replace(encode(data, 'base64'), E'[\\n\\r]+', '', 'g')
       FROM kv_store
       WHERE key LIKE 'account:username:%'
       ORDER BY key;" >"${SOURCE_FILE}"

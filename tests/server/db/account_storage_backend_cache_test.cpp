@@ -154,6 +154,29 @@ TEST_F(AccountStorageBackendCacheTest, SaveRefreshesCachedAccountValue) {
   EXPECT_EQ(third->password_hash, "$2b$12$cache.write.db_mutated");
 }
 
+TEST_F(AccountStorageBackendCacheTest, SaveCachesCanonicalDatabaseIdentityOnInsert) {
+  AccountData account;
+  account.id = 0;
+  account.username = username_;
+  account.password_hash = "$2b$12$cache.insert.canonical";
+  account.email = username_ + "@example.com";
+  account.created_at = 0;
+  account.last_login = 0;
+  account.banned = false;
+
+  const auto payload = EncodeAccountData(account);
+  auto save_result = backend_->Save(account_key_, 321u, payload);
+  ASSERT_TRUE(save_result.success) << save_result.error_message;
+
+  auto loaded = LoadDecodedAccount();
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_EQ(loaded->username, username_);
+  EXPECT_EQ(loaded->password_hash, account.password_hash);
+  EXPECT_EQ(loaded->email, account.email);
+  EXPECT_GT(loaded->id, 0u);
+  EXPECT_GT(loaded->created_at, 0);
+}
+
 TEST_F(AccountStorageBackendCacheTest, LoadAccountVersionIsNotDefaultOne) {
   UpsertRawAccount("$2b$12$cache.version.raw");
 

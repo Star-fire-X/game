@@ -299,17 +299,50 @@ mir2::common::DbResult<bool> PostgresDatabase::character_name_exists(const std::
 }
 
 mir2::common::DbResult<uint32_t> PostgresDatabase::get_next_character_id() {
-    // 使用雪花ID生成器
+    // Prefer PostgreSQL sequence when database is available so this API remains
+    // a usable uint32 allocator under normal runtime.
+    if (is_open()) {
+        try {
+            auto conn = pool_->Acquire();
+            if (!conn) {
+                return mir2::common::DbResult<uint32_t>::error(
+                    mir2::common::ErrorCode::DATABASE_ERROR,
+                    "Failed to acquire connection");
+            }
+            PgConnectionGuard guard(*pool_, conn);
+            pqxx::work txn(*conn);
+            const pqxx::result seq_result = txn.exec(
+                "SELECT nextval(pg_get_serial_sequence('characters', 'id'))");
+            txn.commit();
+
+            if (!seq_result.empty()) {
+                const uint64_t next_id =
+                    static_cast<uint64_t>(seq_result[0][0].as<int64_t>(0));
+                if (next_id == 0 ||
+                    next_id > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                    return mir2::common::DbResult<uint32_t>::error(
+                        mir2::common::ErrorCode::DATABASE_ERROR,
+                        "character id sequence exceeds uint32_t range");
+                }
+                return mir2::common::DbResult<uint32_t>::ok(
+                    static_cast<uint32_t>(next_id));
+            }
+        } catch (const std::exception&) {
+            // Fall through to compatibility generator below.
+        }
+    }
+
+    // Compatibility fallback for non-open DB paths and tests.
     auto result = generate_id("character");
     if (!result) {
-        return mir2::common::DbResult<uint32_t>::error(result.error_code, result.error_message);
-    }
-    if (result.value > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
         return mir2::common::DbResult<uint32_t>::error(
-            mir2::common::ErrorCode::DATABASE_ERROR,
-            "generated character id exceeds uint32_t range");
+            result.error_code, result.error_message);
     }
-    return mir2::common::DbResult<uint32_t>::ok(static_cast<uint32_t>(result.value));
+    uint32_t fallback_id = static_cast<uint32_t>(result.value);
+    if (fallback_id == 0) {
+        fallback_id = 1;
+    }
+    return mir2::common::DbResult<uint32_t>::ok(fallback_id);
 }
 
 } // namespace mir2::db

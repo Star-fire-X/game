@@ -36,6 +36,15 @@ mir2::config::DatabaseConfig BuildDbConfigFromEnv() {
   return cfg;
 }
 
+void EnsureCharactersTableExists(const std::shared_ptr<PgConnectionPool>& pool) {
+  auto conn = pool->Acquire();
+  ASSERT_NE(conn, nullptr);
+  PgConnectionGuard guard(*pool, conn);
+  pqxx::work txn(*conn);
+  txn.exec("CREATE TABLE IF NOT EXISTS characters (id BIGSERIAL PRIMARY KEY)");
+  txn.commit();
+}
+
 }  // namespace
 
 static_assert(
@@ -135,13 +144,13 @@ TEST(PostgresDatabaseTest, DatabaseOperationsReturnErrorWhenClosed) {
   EXPECT_EQ(create_account_result.error_code, ErrorCode::DATABASE_ERROR);
 }
 
-TEST(PostgresDatabaseTest, GetNextCharacterIdRejectsOutOfRangeSnowflake) {
+TEST(PostgresDatabaseTest, GetNextCharacterIdFallsBackWhenPoolNotReady) {
   auto pool = std::make_shared<PgConnectionPool>();
   PostgresDatabase db(pool, 3);
 
   auto result = db.get_next_character_id();
-  EXPECT_FALSE(result);
-  EXPECT_EQ(result.error_code, ErrorCode::DATABASE_ERROR);
+  ASSERT_TRUE(result);
+  EXPECT_GT(result.value, 0u);
 }
 
 TEST(PostgresDatabaseIntegrationTest, LoadAccountMissingUserDoesNotLeakConnection) {
@@ -166,5 +175,28 @@ TEST(PostgresDatabaseIntegrationTest, LoadAccountMissingUserDoesNotLeakConnectio
   // Repeat to ensure connection can be reacquired and released consistently.
   auto second = db.load_account(username);
   EXPECT_FALSE(second);
+  EXPECT_EQ(pool->InUseCount(), 0u);
+}
+
+TEST(PostgresDatabaseIntegrationTest, GetNextCharacterIdUsesDatabaseSequence) {
+  const auto db_config = BuildDbConfigFromEnv();
+  auto pool = std::make_shared<PgConnectionPool>();
+  if (!pool->Initialize(db_config)) {
+    GTEST_SKIP() << "PostgreSQL unavailable for postgres database integration test";
+  }
+  EnsureCharactersTableExists(pool);
+
+  PostgresDatabase db(pool, 8);
+  ASSERT_TRUE(db.initialize());
+
+  EXPECT_EQ(pool->InUseCount(), 0u);
+  auto first = db.get_next_character_id();
+  ASSERT_TRUE(first);
+  EXPECT_GT(first.value, 0u);
+  EXPECT_EQ(pool->InUseCount(), 0u);
+
+  auto second = db.get_next_character_id();
+  ASSERT_TRUE(second);
+  EXPECT_GT(second.value, first.value);
   EXPECT_EQ(pool->InUseCount(), 0u);
 }

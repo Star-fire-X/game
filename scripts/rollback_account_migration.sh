@@ -166,9 +166,13 @@ FAILED_COUNT=0
 while IFS= read -r username; do
   [[ -z "${username}" ]] && continue
   key="account:username:${username}"
-  payload_b64="$(psql_cmd -At \
+  if ! payload_b64="$(psql_cmd -At \
       -v key="${key}" \
-      -c "SELECT encode(data, 'base64') FROM kv_store WHERE key = :'key';" || true)"
+      -c "SELECT regexp_replace(encode(data, 'base64'), E'[\\n\\r]+', '', 'g')
+          FROM kv_store WHERE key = :'key';")"; then
+    echo "Failed to query kv payload for key '${key}', aborting rollback." >&2
+    exit 1
+  fi
 
   if [[ -z "${payload_b64}" ]]; then
     if [[ "${DRY_RUN}" == "false" ]]; then

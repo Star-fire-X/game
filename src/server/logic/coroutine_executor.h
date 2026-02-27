@@ -733,6 +733,8 @@ class CoroutineExecutor {
     state->RegisterCancellableTask(branch_task);
     if (state->IsCancellationRequested()) {
       (void)branch_task->RequestStop();
+      state->CompleteAny(index);
+      co_return;
     }
 
     std::exception_ptr exception;

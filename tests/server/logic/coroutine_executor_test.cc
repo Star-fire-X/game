@@ -405,6 +405,29 @@ Task<void> RunWhenAnyCancelLosersProbeTask(CoroutineExecutor* executor,
   co_return;
 }
 
+Task<void> RunWhenAnyImmediateWinnerTask() {
+  co_return;
+}
+
+Task<void> RunWhenAnyNonCooperativeLoserTask(std::atomic<int>* side_effect_counter) {
+  side_effect_counter->fetch_add(1, std::memory_order_relaxed);
+  co_return;
+}
+
+Task<void> RunWhenAnyCancelLosersSkipPendingProbeTask(
+    CoroutineExecutor* executor,
+    std::atomic<int>* side_effect_counter,
+    std::promise<size_t>* winner_promise) {
+  std::vector<Task<void>> tasks;
+  tasks.reserve(2);
+  tasks.push_back(RunWhenAnyImmediateWinnerTask());
+  tasks.push_back(RunWhenAnyNonCooperativeLoserTask(side_effect_counter));
+  const size_t winner = co_await executor->WhenAny(
+      std::move(tasks), {}, {.cancel_losers = true});
+  winner_promise->set_value(winner);
+  co_return;
+}
+
 Task<void> RunWhenAllOverLimitProbeTask(CoroutineExecutor* executor,
                                         std::atomic<int>* over_limit_rejected,
                                         std::promise<void>* done_promise) {
@@ -835,6 +858,35 @@ TEST_F(CoroutineExecutorTest, WhenAnyCancelLosersCancelsRemainingBranches) {
     return cancelled_counter.load(std::memory_order_relaxed) >= 2;
   }, 2s));
   EXPECT_EQ(completed_counter.load(std::memory_order_relaxed), 0);
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
+TEST_F(CoroutineExecutorTest, WhenAnyCancelLosersSkipsPendingNonCooperativeBranch) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::atomic<int> side_effect_counter{0};
+  std::promise<size_t> winner_promise;
+  auto winner_future = winner_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunWhenAnyCancelLosersSkipPendingProbeTask(
+      &executor, &side_effect_counter, &winner_promise)));
+
+  ASSERT_EQ(winner_future.wait_for(2s), std::future_status::ready);
+  EXPECT_EQ(winner_future.get(), 0u);
+
+  std::this_thread::sleep_for(50ms);
+  EXPECT_EQ(side_effect_counter.load(std::memory_order_relaxed), 0);
 
   EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
 

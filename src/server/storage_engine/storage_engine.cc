@@ -317,6 +317,14 @@ public:
                 return true;
             }
         }
+        // Keep legacy behavior: critical prefixes are sync-write keys unless
+        // explicitly carved out elsewhere.
+        for (const auto& prefix : config_.critical_key_prefixes) {
+            if (!prefix.empty() &&
+                std::string_view(key).starts_with(prefix)) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -453,13 +461,24 @@ public:
                     }
                     IncrementStorageCounter(kStrictWriteFallbackMetric);
                 } else {
-                    auto logger = spdlog::get("mir2");
-                    if (logger) {
-                        logger->warn(
-                            "StorageEngine Set rejected: outbox enqueue rejected for non-critical key={}",
-                            key);
+                    // For degraded mode without durable outbox, L2 can already be
+                    // the accepted source of truth for non-critical writes.
+                    if (!config_.enable_outbox && l2_persisted) {
+                        auto logger = spdlog::get("mir2");
+                        if (logger) {
+                            logger->warn(
+                                "StorageEngine Set accepted with L2 durability despite enqueue rejection, key={}",
+                                key);
+                        }
+                    } else {
+                        auto logger = spdlog::get("mir2");
+                        if (logger) {
+                            logger->warn(
+                                "StorageEngine Set rejected: outbox enqueue rejected for non-critical key={}",
+                                key);
+                        }
+                        return false;
                     }
-                    return false;
                 }
             }
         }
@@ -535,9 +554,18 @@ public:
                 if (!PersistToBackendSync(key, data)) {
                     IncrementStorageCounter(kStrictWriteFailMetric);
                     auto logger = spdlog::get("mir2");
+                    if (!config_.enable_outbox && l2_success) {
+                        if (logger) {
+                            logger->warn(
+                                "StorageEngine SetSync accepted with L2 durability in degraded non-outbox mode after enqueue rejection and sync compensation failure, key={}",
+                                key);
+                        }
+                        stats_.total_sets.fetch_add(1, std::memory_order_relaxed);
+                        return true;
+                    }
                     if (logger) {
                         logger->warn(
-                            "StorageEngine SetSync rejected: outbox enqueue rejected and sync compensation failed, key={}",
+                            "StorageEngine SetSync rejected: enqueue rejected and sync compensation failed, key={}",
                             key);
                     }
                     return false;

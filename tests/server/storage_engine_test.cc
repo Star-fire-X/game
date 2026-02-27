@@ -824,6 +824,71 @@ TEST(StorageEngineSetSemanticsTest, CriticalPrefixSetAutoUsesSyncPath) {
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEngineSetSemanticsTest,
+     SetSyncSucceedsWithL2DurabilityWhenQueueRejectedAndBackendCompensationFails) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path =
+        "/tmp/mir2_storage_engine_setsync_l2_durable_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+
+    StorageEngine::Config config;
+    config.l2_path = l2_path;
+    config.enable_strict_write_guarantee = false;
+    config.enable_outbox = false;
+    config.auto_sync_interval_ms = 60000;
+
+    auto backend = std::make_unique<UnhealthyBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    const std::vector<uint8_t> data = {4, 2, 4, 2};
+    EXPECT_TRUE(engine.SetSync("setsync:l2_only:key", data, Priority::NORMAL));
+
+    auto loaded = engine.Get("setsync:l2_only:key");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->data, data);
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
+}
+
+TEST(StorageEngineSetSemanticsTest,
+     SetSyncFailsWhenOutboxEnabledAndQueueRejectedAndBackendCompensationFails) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path =
+        "/tmp/mir2_storage_engine_setsync_outbox_strict_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+
+    StorageEngine::Config config;
+    config.l2_path = l2_path;
+    config.enable_strict_write_guarantee = false;
+    config.enable_outbox = true;
+    config.outbox_max_items = 1;
+    config.auto_sync_interval_ms = 60000;
+
+    auto backend = std::make_unique<UnhealthyBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    const std::vector<uint8_t> data = {4, 2, 4, 2};
+    ASSERT_TRUE(engine.SetSync("setsync:outbox:prime", data, Priority::NORMAL));
+
+    EXPECT_FALSE(engine.SetSync("setsync:outbox:full:key", data, Priority::NORMAL));
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
+}
+
 TEST(StorageEngineDurableOutboxTest, ReplaysPendingWritesAfterRestartWhenBackendRecovers) {
     if (StorageEngine::IsInitialized()) {
         StorageEngine::Shutdown();

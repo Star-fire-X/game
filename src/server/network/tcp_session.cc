@@ -77,12 +77,13 @@ void TcpSession::Close() {
     return;
   }
 
-  SessionState state = state_.load();
-  if (state == SessionState::kClosing || state == SessionState::kClosed) {
+  const SessionState state = state_.load(std::memory_order_acquire);
+  if (state == SessionState::kClosed) {
     return;
   }
-
-  state_.store(SessionState::kClosing);
+  if (state != SessionState::kClosing) {
+    state_.store(SessionState::kClosing, std::memory_order_release);
+  }
   connection_->Close();
 }
 
@@ -105,6 +106,14 @@ void TcpSession::SetAccountId(uint64_t account_id) {
 void TcpSession::Kick(mir2::common::ErrorCode reason, const std::string& text) {
   if (!connection_) {
     return;
+  }
+  const SessionState state = state_.load(std::memory_order_acquire);
+  if (state == SessionState::kClosed) {
+    return;
+  }
+  if (state != SessionState::kClosing) {
+    // Enter closing immediately so in-flight frame loops stop after current packet.
+    state_.store(SessionState::kClosing, std::memory_order_release);
   }
 
   flatbuffers::FlatBufferBuilder builder;

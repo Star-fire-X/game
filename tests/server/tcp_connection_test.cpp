@@ -200,6 +200,37 @@ TEST(TcpConnectionTest, KickWritesPacketBeforeClose) {
   EXPECT_NE(session->GetState(), TcpSession::SessionState::kActive);
 }
 
+TEST(TcpConnectionTest, KickStopsProcessingLaterFramesInSameBuffer) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(io_context, &mock_socket);
+  auto session = std::make_shared<TcpSession>(connection);
+  session->Start();
+
+  size_t handled_packets = 0;
+  session->SetMessageHandler([&](const std::shared_ptr<TcpSession>& active_session,
+                                 const Packet&) {
+    ++handled_packets;
+    if (handled_packets == 1) {
+      active_session->Kick(mir2::common::ErrorCode::kKickAdminManual, "kick-now");
+    }
+  });
+
+  const uint16_t msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+  auto first = PacketCodec::EncodeV2(msg_id, nullptr, 0, 1);
+  auto second = PacketCodec::EncodeV2(msg_id, nullptr, 0, 2);
+  first.insert(first.end(), second.begin(), second.end());
+
+  session->HandleBytes(first.data(), first.size());
+  io_context.run();
+
+  EXPECT_EQ(handled_packets, 1u);
+  const auto& writes = mock_socket->GetWrites();
+  ASSERT_EQ(writes.size(), 1u);
+  EXPECT_TRUE(mock_socket->IsClosed());
+  EXPECT_NE(session->GetState(), TcpSession::SessionState::kActive);
+}
+
 TEST(TcpConnectionTest, ConcurrentSessionSendKeepsWireSequenceMonotonic) {
   asio::io_context io_context;
   MockSocket* mock_socket = nullptr;

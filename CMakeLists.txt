@@ -401,6 +401,8 @@ option(BUILD_SERVER "Build server" ON)
 option(BUILD_DB "Build database support libraries" ON)
 option(LEGEND2_ENABLE_PROMETHEUS "Enable Prometheus metrics" OFF)
 option(LEGEND2_ENABLE_LEGACY "Enable legacy server modules" OFF)
+option(BUILD_EXPERIMENTAL_MAP_FEATURES
+       "Build experimental map modules (ChunkManager/MapEventManager)" OFF)
 set(LEGEND2_BUILD_DB OFF)
 if(BUILD_SERVER)
     # Server dependencies (v2 architecture)

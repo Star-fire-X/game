@@ -142,6 +142,7 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/character_codec_test.cc
     server/ecs/character_snapshot_codec_test.cc
     server/ecs/trade_system_test.cc
+    server/ecs/storage_system_test.cc
     server/character_entity_manager_test.cc
     server/config/map_config_loader_test.cpp
     server/config/config_manager_storage_engine_test.cc
@@ -181,6 +182,12 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/npc_ai_system_test.cpp
     server/ecs/monster_ai_system_test.cc
     server/ecs/p3_pressure_observability_test.cc
+    server/ecs/event_bus_test.cc
+    server/ecs/recovery_system_test.cc
+    server/ecs/luck_system_test.cc
+    server/ecs/monster_spawn_system_test.cc
+    server/ecs/monster_drop_system_test.cc
+    server/ecs/pk_system_test.cc
     server/guild/guild_system_test.cc
     server/chat_handler_test.cc
     server/game/item/item_effect_processor_test.cc
@@ -198,11 +205,11 @@ set(LEGEND2_TEST_SOURCES
     server/map/area_event_processor_test.cpp
     server/map/area_trigger_test.cpp
     server/map/cross_server_teleport_test.cpp
-    server/map/map_event_manager_test.cpp
     server/map/scroll_teleport_test.cpp
     server/map/scene_manager_reload_test.cpp
     server/map/map_instance_concurrency_test.cpp
     server/map/scene_manager_concurrency_test.cpp
+    server/map/map_context_service_test.cc
     server/game/map/aoi_manager_test.cc  # P0 Critical: AOI 9-grid algorithm
     server/movement_validator_test.cpp
     integration/scene_manager_test.cpp
@@ -235,6 +242,12 @@ set(LEGEND2_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/client/game/actor_data.cc
     ${CMAKE_SOURCE_DIR}/src/client/game/monster/monster_manager.cc
 )
+
+if(BUILD_EXPERIMENTAL_MAP_FEATURES)
+    list(APPEND LEGEND2_TEST_SOURCES
+        server/map/map_event_manager_test.cpp
+    )
+endif()
 
 set(LEGEND2_PQXX_TEST_SOURCES
     server/db/postgres_database_test.cpp

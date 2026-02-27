@@ -111,15 +111,17 @@ TEST(PKSystemTest, HandleRedNameDeathDropsEquippedItems) {
     const int before_count = CountEquippedItems(registry, equipment);
 
     const mir2::common::Position death_pos{10, 10};
-    const int dropped = system.handle_red_name_death(victim, death_pos);
+    system.handle_red_name_death(victim, death_pos);
 
-    EXPECT_EQ(dropped, 2);
     const int after_count = CountEquippedItems(registry, equipment);
+    const int dropped = before_count - after_count;
+    EXPECT_EQ(dropped, 2);
     EXPECT_EQ(after_count, before_count - dropped);
 
     const auto* dirty = registry.try_get<DirtyComponent>(victim);
     ASSERT_NE(dirty, nullptr);
-    EXPECT_TRUE(dirty->attributes_dirty);
+    EXPECT_TRUE(dirty->items_dirty);
+    EXPECT_TRUE(dirty->equipment_dirty);
 }
 
 TEST(PKSystemTest, UpdateDecaysPkPointsOverTime) {

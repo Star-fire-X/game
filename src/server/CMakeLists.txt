@@ -157,10 +157,8 @@ set(MIR2_SERVER_SOURCES
     game/map/door_manager.cc
     game/map/gate_manager.cc
     game/map/map_context_service.cc
-    game/map/map_event_manager.cc
     game/map/map_loader.cc
     game/map/map_instance.cc
-    game/map/chunk_manager.cc
     game/map/scene_manager.cc
     game/map/scene_manager_adapter.cc
     game/map/cross_server_teleport.cc
@@ -175,6 +173,13 @@ if(BUILD_LUA_SUPPORT)
     list(APPEND MIR2_SERVER_SOURCES
         game/npc/lua_script_engine.cc
         game/npc/lua_bindings.cc
+    )
+endif()
+
+if(BUILD_EXPERIMENTAL_MAP_FEATURES)
+    list(APPEND MIR2_SERVER_SOURCES
+        game/map/map_event_manager.cc
+        game/map/chunk_manager.cc
     )
 endif()
 

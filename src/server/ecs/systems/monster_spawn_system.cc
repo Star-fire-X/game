@@ -155,8 +155,7 @@ void MonsterSpawnSystem::SpawnMonsterAtPoint(entt::registry& registry,
     
     // 添加Transform组件
     auto& transform = registry.emplace<TransformComponent>(entity);
-    transform.x = x;
-    transform.y = y;
+    transform.position = {x, y};
     transform.map_id = spawn.map_id;
     
     // 添加AI组件

@@ -271,18 +271,29 @@ size_t MapInstance::DispatchPendingAOIEvents(size_t max_events) {
 
     // Drain ring events that were already queued when dispatch starts.
     const size_t initial_ring_size = pending_aoi_events_.ApproxSize();
+    const size_t initial_overflow_size = overflow_aoi_events_.size();
+    size_t ring_budget = max_events;
+    if (initial_overflow_size > 0) {
+      // Reserve budget for overflow so capped dispatch cannot starve it.
+      ring_budget -= std::min(initial_overflow_size, ring_budget);
+    }
+
     size_t ring_drained = 0;
-    while (events.size() < max_events &&
+    while (events.size() < ring_budget &&
            ring_drained < initial_ring_size &&
            pending_aoi_events_.TryDequeue(&event)) {
       events.push_back(event);
       ++ring_drained;
     }
 
-    // Drain overflow events next to preserve deltas that could not fit ring queue.
-    while (events.size() < max_events && !overflow_aoi_events_.empty()) {
+    // Drain overflow events that existed at dispatch start before extra ring work.
+    size_t overflow_drained = 0;
+    while (events.size() < max_events &&
+           overflow_drained < initial_overflow_size &&
+           !overflow_aoi_events_.empty()) {
       events.push_back(overflow_aoi_events_.front());
       overflow_aoi_events_.pop_front();
+      ++overflow_drained;
     }
 
     // Drain additional ring events if dispatch budget remains.
@@ -290,8 +301,9 @@ size_t MapInstance::DispatchPendingAOIEvents(size_t max_events) {
       events.push_back(event);
     }
 
-    pending_after_dispatch =
-        pending_aoi_events_.ApproxSize() + overflow_aoi_events_.size();
+    const size_t overflow_size = overflow_aoi_events_.size();
+    overflow_aoi_event_count_.store(overflow_size, std::memory_order_relaxed);
+    pending_after_dispatch = pending_aoi_events_.ApproxSize() + overflow_size;
   }
 
   monitor::Metrics::Instance().SetGauge(
@@ -546,6 +558,7 @@ void MapInstance::Clear() {
     while (pending_aoi_events_.TryDequeue(&event)) {
     }
     overflow_aoi_events_.clear();
+    overflow_aoi_event_count_.store(0, std::memory_order_relaxed);
   }
   monitor::Metrics::Instance().SetGauge(kMetricAoiPendingEvents, 0.0);
   monitor::Metrics::Instance().SetGauge(kMetricAoiDispatchBatch, 0.0);
@@ -606,9 +619,12 @@ void MapInstance::OnAOIEvent(AOIEventType event_type, uint64_t watcher_id,
   event.y = y;
 
   if (pending_aoi_events_.TryEnqueue(event)) {
+    const size_t pending_after_enqueue =
+        pending_aoi_events_.ApproxSize() +
+        overflow_aoi_event_count_.load(std::memory_order_relaxed);
     monitor::Metrics::Instance().SetGauge(
         kMetricAoiPendingEvents,
-        static_cast<double>(pending_aoi_events_.ApproxSize()));
+        static_cast<double>(pending_after_enqueue));
     return;
   }
 
@@ -619,8 +635,9 @@ void MapInstance::OnAOIEvent(AOIEventType event_type, uint64_t watcher_id,
     if (!pending_aoi_events_.TryEnqueue(event)) {
       overflow_aoi_events_.push_back(event);
     }
-    pending_after_enqueue =
-        pending_aoi_events_.ApproxSize() + overflow_aoi_events_.size();
+    const size_t overflow_size = overflow_aoi_events_.size();
+    overflow_aoi_event_count_.store(overflow_size, std::memory_order_relaxed);
+    pending_after_enqueue = pending_aoi_events_.ApproxSize() + overflow_size;
   }
   if (pending_after_enqueue > kAOIEventQueueCapacity) {
     monitor::Metrics::Instance().IncrementCounter(kMetricAoiQueueOverflowTotal);

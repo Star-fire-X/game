@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <vector>
 
 using namespace mir2::game::map;
@@ -229,6 +230,53 @@ TEST_F(MapInstanceTest, AOIQueueOverflowDoesNotDropDeltas) {
   EXPECT_EQ(dispatched_events, expected_events);
   EXPECT_EQ(delivered_events, expected_events);
   EXPECT_EQ(map_->PendingAOIEventCount(), 0u);
+}
+
+TEST_F(MapInstanceTest, AOICappedDispatchDrainsOverflowBeforeBudgetExhaustion) {
+  constexpr int32_t kWatcherCount = 64;
+  constexpr size_t kRingCapacity = 8192;
+  constexpr size_t kDispatchCap = 4096;
+  constexpr int32_t kMoveIterations = 128;
+
+  std::vector<AOIEventType> first_batch_event_types;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    (void)watcher_entity;
+    (void)target_entity;
+    (void)x;
+    (void)y;
+    first_batch_event_types.push_back(event_type);
+  });
+
+  const entt::entity mover = entt::entity{1};
+  ASSERT_TRUE(map_->AddEntity(mover, 10, 10));
+  for (int32_t i = 0; i < kWatcherCount; ++i) {
+    const entt::entity watcher = static_cast<entt::entity>(100 + i);
+    ASSERT_TRUE(map_->AddEntity(watcher, 12 + (i % 8), 12 + (i / 8)));
+  }
+
+  // Reset queue to keep only synthetic move/leave burst below.
+  map_->DispatchPendingAOIEvents();
+  first_batch_event_types.clear();
+
+  for (int32_t i = 0; i < kMoveIterations; ++i) {
+    const int32_t x = (i % 2 == 0) ? 10 : 11;
+    ASSERT_TRUE(map_->UpdateEntityPosition(mover, x, 10));
+  }
+
+  ASSERT_TRUE(map_->RemoveEntity(mover));
+  ASSERT_GT(map_->PendingAOIEventCount(), kRingCapacity);
+
+  const size_t dispatched = map_->DispatchPendingAOIEvents(kDispatchCap);
+  EXPECT_EQ(dispatched, kDispatchCap);
+  EXPECT_EQ(first_batch_event_types.size(), dispatched);
+  EXPECT_GT(std::count(first_batch_event_types.begin(),
+                       first_batch_event_types.end(),
+                       AOIEventType::kLeave),
+            0);
 }
 
 TEST_F(MapInstanceTest, AOILeaveEventUsesLeaverLatestCoordinates) {

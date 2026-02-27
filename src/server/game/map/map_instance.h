@@ -442,6 +442,7 @@ class MapInstance {
   core::concurrency::MpscRingQueue<PendingAOIEvent, kAOIEventQueueCapacity>
       pending_aoi_events_;
   std::deque<PendingAOIEvent> overflow_aoi_events_;
+  std::atomic<size_t> overflow_aoi_event_count_{0};
   mutable std::mutex aoi_dispatch_mutex_;
   mutable std::shared_mutex entity_ops_barrier_mutex_;
   static constexpr size_t kEntityOpsLockStripeCount = 64;

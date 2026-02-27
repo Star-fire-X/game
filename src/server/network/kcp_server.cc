@@ -157,6 +157,15 @@ void KcpServer::SetMessageHandler(KcpSession::MessageHandler handler) {
   }
 }
 
+void KcpServer::SetUdpSendFaultInjectEveryN(uint64_t every_n) {
+  udp_send_fault_inject_every_n_.store(every_n, std::memory_order_relaxed);
+  udp_send_attempt_count_.store(0, std::memory_order_relaxed);
+}
+
+uint64_t KcpServer::GetUdpSendFaultInjectEveryN() const {
+  return udp_send_fault_inject_every_n_.load(std::memory_order_relaxed);
+}
+
 void KcpServer::StartReceive() {
   if (!socket_.is_open()) {
     return;
@@ -358,6 +367,15 @@ void KcpServer::SendRaw(const asio::ip::udp::endpoint& endpoint,
                   error_count);
     }
   };
+
+  const uint64_t inject_every_n =
+      udp_send_fault_inject_every_n_.load(std::memory_order_relaxed);
+  const uint64_t send_attempt =
+      udp_send_attempt_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (inject_every_n > 0 && (send_attempt % inject_every_n) == 0) {
+    on_send(asio::error::operation_aborted, 0);
+    return;
+  }
 
   auto buffer = std::make_shared<UdpSendBuffer>();
   buffer->size = size;

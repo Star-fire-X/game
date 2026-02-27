@@ -58,11 +58,16 @@ struct ServerConfig {
   bool legacy_fallback_allow_auth_whitelist = true;
   bool legacy_fallback_allow_critical_msgs = true;
   bool legacy_fallback_allow_normal_msgs = false;
+  bool queue_full_fallback_non_best_effort_enabled = true;
   bool chat_batch_send_enabled = true;
   int movement_speed_violation_severity = 10;
   int movement_teleport_violation_severity = 5;
   int login_ip_rate_limit_capacity = 5;
   int login_ip_rate_limit_refill_rate = 1;
+  int login_username_rate_limit_capacity = 5;
+  int login_username_rate_limit_refill_rate = 1;
+  int login_username_rate_limit_refill_interval_seconds = 12;
+  int udp_send_fault_inject_every_n = 0;
   bool enable_network_listener = true;
   uint16_t metrics_port = 0;
 };

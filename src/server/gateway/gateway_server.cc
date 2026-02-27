@@ -161,6 +161,19 @@ bool GatewayServer::Initialize(const std::string& config_path) {
   }
   login_ip_rate_limiter_.SetConfig(login_rate_limit_config);
 
+  const int configured_udp_send_fault_inject_every_n =
+      server_config.udp_send_fault_inject_every_n;
+  const uint64_t udp_send_fault_inject_every_n =
+      configured_udp_send_fault_inject_every_n > 0
+          ? static_cast<uint64_t>(configured_udp_send_fault_inject_every_n)
+          : 0;
+  if (configured_udp_send_fault_inject_every_n < 0) {
+    SYSLOG_WARN(
+        "GatewayServer invalid udp_send_fault_inject_every_n={} (must be >= 0), "
+        "fallback to 0",
+        configured_udp_send_fault_inject_every_n);
+  }
+
   if (!app_.Initialize(server_config)) {
     SYSLOG_ERROR("GatewayServer application init failed");
     return false;
@@ -180,6 +193,20 @@ bool GatewayServer::Initialize(const std::string& config_path) {
   if (!network_->Start(server_config.bind_ip, tcp_port, udp_port, server_config.max_connections)) {
     SYSLOG_ERROR("GatewayServer network start failed");
     return false;
+  }
+
+  if (auto* kcp_server =
+          dynamic_cast<network::KcpServer*>(&network_->GetKcpServer())) {
+    kcp_server->SetUdpSendFaultInjectEveryN(udp_send_fault_inject_every_n);
+    if (udp_send_fault_inject_every_n > 0) {
+      SYSLOG_INFO("GatewayServer enabled udp_send fault injection every_n={}",
+                  udp_send_fault_inject_every_n);
+    }
+  } else if (udp_send_fault_inject_every_n > 0) {
+    SYSLOG_WARN(
+        "GatewayServer failed to apply udp_send fault injection "
+        "(every_n={}) because KcpServer implementation is not concrete",
+        udp_send_fault_inject_every_n);
   }
 
   ConnectLogicService();

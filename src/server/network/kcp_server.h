@@ -65,6 +65,9 @@ class KcpServer : public IKcpServer {
 
   void SetMessageHandler(KcpSession::MessageHandler handler) override;
 
+  void SetUdpSendFaultInjectEveryN(uint64_t every_n);
+  uint64_t GetUdpSendFaultInjectEveryN() const;
+
  private:
   void StartReceive();
   void HandleReceive(const asio::error_code& ec, std::size_t bytes);
@@ -89,6 +92,8 @@ class KcpServer : public IKcpServer {
   KcpSession::MessageHandler message_handler_;
   int64_t last_cleanup_ms_ = 0;
   std::atomic<uint64_t> udp_send_error_count_{0};
+  std::atomic<uint64_t> udp_send_attempt_count_{0};
+  std::atomic<uint64_t> udp_send_fault_inject_every_n_{0};
   std::atomic<int64_t> last_udp_send_warn_ms_{0};
 };
 

@@ -36,9 +36,14 @@ server:
   legacy_fallback_allow_auth_whitelist: true
   legacy_fallback_allow_critical_msgs: true
   legacy_fallback_allow_normal_msgs: false
+  queue_full_fallback_non_best_effort_enabled: true
   chat_batch_send_enabled: true
   movement_speed_violation_severity: 10
   movement_teleport_violation_severity: 5
+  # 登录用户名限流（令牌桶）
+  login_username_rate_limit_capacity: 5
+  login_username_rate_limit_refill_rate: 1
+  login_username_rate_limit_refill_interval_seconds: 12
 
 database:
   host: "127.0.0.1"

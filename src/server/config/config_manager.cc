@@ -164,6 +164,10 @@ bool ConfigManager::Load(const std::string& config_path) {
         server,
         "legacy_fallback_allow_normal_msgs",
         server_config_.legacy_fallback_allow_normal_msgs);
+    server_config_.queue_full_fallback_non_best_effort_enabled = ReadOrDefault(
+        server,
+        "queue_full_fallback_non_best_effort_enabled",
+        server_config_.queue_full_fallback_non_best_effort_enabled);
     server_config_.chat_batch_send_enabled = ReadOrDefault(
         server,
         "chat_batch_send_enabled",
@@ -184,6 +188,22 @@ bool ConfigManager::Load(const std::string& config_path) {
         server,
         "login_ip_rate_limit_refill_rate",
         server_config_.login_ip_rate_limit_refill_rate);
+    server_config_.login_username_rate_limit_capacity = ReadOrDefault(
+        server,
+        "login_username_rate_limit_capacity",
+        server_config_.login_username_rate_limit_capacity);
+    server_config_.login_username_rate_limit_refill_rate = ReadOrDefault(
+        server,
+        "login_username_rate_limit_refill_rate",
+        server_config_.login_username_rate_limit_refill_rate);
+    server_config_.login_username_rate_limit_refill_interval_seconds = ReadOrDefault(
+        server,
+        "login_username_rate_limit_refill_interval_seconds",
+        server_config_.login_username_rate_limit_refill_interval_seconds);
+    server_config_.udp_send_fault_inject_every_n = ReadOrDefault(
+        server,
+        "udp_send_fault_inject_every_n",
+        server_config_.udp_send_fault_inject_every_n);
     server_config_.enable_network_listener = ReadOrDefault(
         server,
         "enable_network_listener",

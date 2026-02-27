@@ -58,8 +58,17 @@ TEST(GatewayErrorHandlingTest, LoadConfig_MissingRequiredFields_ReturnsDefaults)
   const auto& config = config::ConfigManager::Instance().GetServerConfig();
   EXPECT_EQ(config.heartbeat_timeout_ms, defaults.heartbeat_timeout_ms);
   EXPECT_EQ(config.max_connections, defaults.max_connections);
+  EXPECT_EQ(config.queue_full_fallback_non_best_effort_enabled,
+            defaults.queue_full_fallback_non_best_effort_enabled);
   EXPECT_EQ(config.login_ip_rate_limit_capacity, defaults.login_ip_rate_limit_capacity);
   EXPECT_EQ(config.login_ip_rate_limit_refill_rate, defaults.login_ip_rate_limit_refill_rate);
+  EXPECT_EQ(config.login_username_rate_limit_capacity,
+            defaults.login_username_rate_limit_capacity);
+  EXPECT_EQ(config.login_username_rate_limit_refill_rate,
+            defaults.login_username_rate_limit_refill_rate);
+  EXPECT_EQ(config.login_username_rate_limit_refill_interval_seconds,
+            defaults.login_username_rate_limit_refill_interval_seconds);
+  EXPECT_EQ(config.udp_send_fault_inject_every_n, defaults.udp_send_fault_inject_every_n);
   EXPECT_EQ(config.bind_ip, defaults.bind_ip);
   EXPECT_EQ(config.chat_batch_send_enabled, defaults.chat_batch_send_enabled);
 
@@ -70,10 +79,15 @@ TEST(GatewayErrorHandlingTest, ServerConfig_DefaultLoginIpRateLimitValues) {
   config::ServerConfig defaults;
   EXPECT_EQ(defaults.login_ip_rate_limit_capacity, 5);
   EXPECT_EQ(defaults.login_ip_rate_limit_refill_rate, 1);
+  EXPECT_EQ(defaults.login_username_rate_limit_capacity, 5);
+  EXPECT_EQ(defaults.login_username_rate_limit_refill_rate, 1);
+  EXPECT_EQ(defaults.login_username_rate_limit_refill_interval_seconds, 12);
+  EXPECT_EQ(defaults.udp_send_fault_inject_every_n, 0);
   EXPECT_TRUE(defaults.legacy_fallback_enabled);
   EXPECT_TRUE(defaults.legacy_fallback_allow_auth_whitelist);
   EXPECT_TRUE(defaults.legacy_fallback_allow_critical_msgs);
   EXPECT_FALSE(defaults.legacy_fallback_allow_normal_msgs);
+  EXPECT_TRUE(defaults.queue_full_fallback_non_best_effort_enabled);
   EXPECT_TRUE(defaults.chat_batch_send_enabled);
   EXPECT_EQ(defaults.movement_speed_violation_severity, 10);
   EXPECT_EQ(defaults.movement_teleport_violation_severity, 5);
@@ -84,10 +98,15 @@ TEST(GatewayErrorHandlingTest, LoadConfig_LoginIpRateLimitFieldsParsed) {
       "server:\n"
       "  login_ip_rate_limit_capacity: 12\n"
       "  login_ip_rate_limit_refill_rate: 3\n"
+      "  login_username_rate_limit_capacity: 22\n"
+      "  login_username_rate_limit_refill_rate: 8\n"
+      "  login_username_rate_limit_refill_interval_seconds: 2\n"
+      "  udp_send_fault_inject_every_n: 77\n"
       "  legacy_fallback_enabled: false\n"
       "  legacy_fallback_allow_auth_whitelist: false\n"
       "  legacy_fallback_allow_critical_msgs: false\n"
       "  legacy_fallback_allow_normal_msgs: true\n"
+      "  queue_full_fallback_non_best_effort_enabled: false\n"
       "  chat_batch_send_enabled: false\n"
       "  movement_speed_violation_severity: 20\n"
       "  movement_teleport_violation_severity: 9\n",
@@ -97,10 +116,15 @@ TEST(GatewayErrorHandlingTest, LoadConfig_LoginIpRateLimitFieldsParsed) {
   const auto& config = config::ConfigManager::Instance().GetServerConfig();
   EXPECT_EQ(config.login_ip_rate_limit_capacity, 12);
   EXPECT_EQ(config.login_ip_rate_limit_refill_rate, 3);
+  EXPECT_EQ(config.login_username_rate_limit_capacity, 22);
+  EXPECT_EQ(config.login_username_rate_limit_refill_rate, 8);
+  EXPECT_EQ(config.login_username_rate_limit_refill_interval_seconds, 2);
+  EXPECT_EQ(config.udp_send_fault_inject_every_n, 77);
   EXPECT_FALSE(config.legacy_fallback_enabled);
   EXPECT_FALSE(config.legacy_fallback_allow_auth_whitelist);
   EXPECT_FALSE(config.legacy_fallback_allow_critical_msgs);
   EXPECT_TRUE(config.legacy_fallback_allow_normal_msgs);
+  EXPECT_FALSE(config.queue_full_fallback_non_best_effort_enabled);
   EXPECT_FALSE(config.chat_batch_send_enabled);
   EXPECT_EQ(config.movement_speed_violation_severity, 20);
   EXPECT_EQ(config.movement_teleport_violation_severity, 9);

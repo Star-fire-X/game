@@ -12,6 +12,8 @@ server:
   # 登录请求按客户端 IP 做令牌桶限流（capacity + 每秒 refill_rate）
   login_ip_rate_limit_capacity: 5
   login_ip_rate_limit_refill_rate: 1
+  # UDP 发送错误注入（每 N 次发送注入 1 次；0=关闭）
+  udp_send_fault_inject_every_n: 0
 
 database:
   host: "127.0.0.1"

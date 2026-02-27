@@ -49,7 +49,9 @@ class LoginHandler {
                ResponseSender& response_sender,
                LoginService& service,
                ClientRegistry& client_registry,
-               RoleStore& role_store);
+               RoleStore& role_store,
+               mir2::security::RateLimiter::Config rate_limit_config =
+                   mir2::security::RateLimiter::Config{5, 1, 12});
 
   Task<void> HandleMessage(HandlerContext ctx, const uint8_t* payload, size_t payload_size);
 
@@ -64,10 +66,8 @@ class LoginHandler {
   ClientRegistry& client_registry_;
   RoleStore& role_store_;
 
-  // Login rate limiter: 5 attempts per account, refills 1 per 12 seconds
-  // (effectively ~5 attempts per minute)
-  mir2::security::RateLimiter login_rate_limiter_{
-      {.capacity = 5, .refill_rate = 1, .refill_interval_seconds = 12}};
+  // Login rate limiter: per-username token bucket.
+  mir2::security::RateLimiter login_rate_limiter_;
 };
 
 }  // namespace mir2::logic

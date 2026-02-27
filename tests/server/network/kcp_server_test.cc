@@ -313,3 +313,21 @@ TEST(KcpServerTest, SendRawRecordsUdpSendErrors) {
   EXPECT_GE(server.udp_send_error_count_.load(std::memory_order_relaxed), 1u);
   server.Stop();
 }
+
+TEST(KcpServerTest, SendRawFaultInjectionIncrementsUdpSendErrors) {
+  asio::io_context io_context;
+  KcpServer server(io_context);
+  ASSERT_TRUE(server.Start("127.0.0.1", 0));
+
+  server.SetUdpSendFaultInjectEveryN(2);
+  EXPECT_EQ(server.GetUdpSendFaultInjectEveryN(), 2u);
+
+  const auto endpoint = MakeEndpoint(9005);
+  std::vector<uint8_t> payload(64, 0x5A);
+  server.SendRaw(endpoint, payload.data(), payload.size());
+  server.SendRaw(endpoint, payload.data(), payload.size());
+  RunIoContextFor(io_context, std::chrono::milliseconds(20));
+
+  EXPECT_GE(server.udp_send_error_count_.load(std::memory_order_relaxed), 1u);
+  server.Stop();
+}

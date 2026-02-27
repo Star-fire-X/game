@@ -128,12 +128,14 @@ LoginHandler::LoginHandler(CoroutineExecutor& executor,
                            ResponseSender& response_sender,
                            LoginService& service,
                            ClientRegistry& client_registry,
-                           RoleStore& role_store)
+                           RoleStore& role_store,
+                           mir2::security::RateLimiter::Config rate_limit_config)
     : executor_(executor),
       response_sender_(response_sender),
       service_(service),
       client_registry_(client_registry),
-      role_store_(role_store) {}
+      role_store_(role_store),
+      login_rate_limiter_(rate_limit_config) {}
 
 Task<void> LoginHandler::HandleMessage(HandlerContext ctx,
                                        const uint8_t* payload,

@@ -538,6 +538,36 @@ TEST_F(PlayerMailboxCausalTest, QueueFullCriticalMessageFallsBackToLegacyDispatc
   EXPECT_TRUE(WaitForCount(handled, 1));
 }
 
+TEST_F(PlayerMailboxCausalTest, QueueFullCriticalMessageDropsWhenFallbackDisabled) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->handler_registry_, nullptr);
+
+  ScopedEnv env("LEGEND2_HOT_EVENT_PIPELINE", "1");
+  server_->hot_event_pipeline_ = std::make_unique<events::HotEventPipeline>();
+  server_->hot_event_pipeline_->InitializeFromEnv();
+  server_->queue_full_fallback_non_best_effort_enabled_ = false;
+  ASSERT_TRUE(FillHotQueueToFull());
+
+  std::atomic<int> handled{0};
+  server_->handler_registry_->RegisterHandler(
+      static_cast<uint16_t>(mir2::common::MsgId::kEquipReq),
+      [&handled](HandlerContext, const uint8_t*, size_t) -> Task<void> {
+        handled.fetch_add(1, std::memory_order_relaxed);
+        co_return;
+      });
+
+  constexpr uint64_t kClientId = 30014;
+  server_->client_registry_.Track(kClientId);
+  const auto routed_payload = mir2::common::BuildRoutedMessage(
+      kClientId, static_cast<uint16_t>(mir2::common::MsgId::kEquipReq), {});
+  auto session = MakeTcpSession(io_context_, 9912);
+  ASSERT_NE(session, nullptr);
+
+  server_->HandleRoutedMessage(session, routed_payload);
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
+}
+
 TEST_F(PlayerMailboxCausalTest, QueueFullChatMessageStillDropsAsNonCritical) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->handler_registry_, nullptr);
@@ -1183,6 +1213,32 @@ TEST_F(PlayerMailboxCausalTest, ZombieScanUsesIdleAndReconcileDoubleCondition) {
   EXPECT_FALSE(server_->role_store_->GetAccountId(kZombieClient).has_value());
   EXPECT_TRUE(server_->role_store_->GetAccountId(kReconciledClient).has_value());
   EXPECT_TRUE(server_->role_store_->GetAccountId(kActiveClient).has_value());
+}
+
+TEST_F(PlayerMailboxCausalTest, ZombieScanSkipsClientWhenLastActivityIsInFuture) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  constexpr uint64_t kFutureClient = 94001;
+  server_->client_registry_.Track(kFutureClient);
+  server_->role_store_->BindClientAccount(kFutureClient, 394001);
+
+  const int64_t now_ms = network::TcpSession::NowMs();
+  server_->zombie_detection_enabled_ = true;
+  server_->zombie_scan_interval_ms_ = 1;
+  server_->zombie_idle_timeout_ms_ = 1;
+  server_->client_last_activity_ms_[kFutureClient] = now_ms + 60000;
+
+  auto done = std::make_shared<std::promise<void>>();
+  auto done_future = done->get_future();
+  asio::post(io_context_, [this, now_ms, done]() mutable {
+    server_->ScanZombieSessions(now_ms);
+    done->set_value();
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+
+  EXPECT_TRUE(server_->client_registry_.Contains(kFutureClient));
+  EXPECT_TRUE(server_->role_store_->GetAccountId(kFutureClient).has_value());
 }
 
 }  // namespace

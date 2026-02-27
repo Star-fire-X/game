@@ -370,11 +370,13 @@ void KcpServer::SendRaw(const asio::ip::udp::endpoint& endpoint,
 
   const uint64_t inject_every_n =
       udp_send_fault_inject_every_n_.load(std::memory_order_relaxed);
-  const uint64_t send_attempt =
-      udp_send_attempt_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-  if (inject_every_n > 0 && (send_attempt % inject_every_n) == 0) {
-    on_send(asio::error::operation_aborted, 0);
-    return;
+  if (inject_every_n > 0) {
+    const uint64_t send_attempt =
+        udp_send_attempt_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((send_attempt % inject_every_n) == 0) {
+      on_send(asio::error::operation_aborted, 0);
+      return;
+    }
   }
 
   auto buffer = std::make_shared<UdpSendBuffer>();

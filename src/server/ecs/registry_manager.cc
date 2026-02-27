@@ -64,10 +64,12 @@ WorldEntityCountSnapshot RegistryManager::CollectEntityCounts() const {
       continue;
     }
     std::size_t entity_count = 0;
-    const entt::registry& registry =
-        static_cast<const entt::registry&>(world->Registry());
+    const entt::registry& registry = world->Registry();
     if (const auto* entity_storage = registry.storage<entt::entity>()) {
-      entity_count = static_cast<std::size_t>(entity_storage->free_list());
+      for (const auto entity : entity_storage->each()) {
+        (void)entity;
+        ++entity_count;
+      }
     }
     snapshot.total += entity_count;
     snapshot.per_world.emplace_back(map_id, entity_count);

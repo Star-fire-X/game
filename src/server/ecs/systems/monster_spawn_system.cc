@@ -193,7 +193,7 @@ void MonsterSpawnSystem::SubscribeToDeathEvents() {
         return;
     }
 
-    event_bus_->Subscribe<events::EntityDeathEvent>(
+    death_subscription_ = event_bus_->SubscribeScoped<events::EntityDeathEvent>(
         [this](events::EntityDeathEvent& event) {
             if (!registry_ || event.entity == entt::null) {
                 return;

@@ -140,7 +140,7 @@ void PersistCriticalCharacter(entt::registry& registry,
 
 MerchantService::MerchantService(entt::registry& registry, ecs::EventBus& event_bus)
     : registry_(registry), event_bus_(event_bus) {
-    event_bus_.Subscribe<ecs::events::NpcOpenMerchantEvent>(
+    open_merchant_subscription_ = event_bus_.SubscribeScoped<ecs::events::NpcOpenMerchantEvent>(
         [this](const ecs::events::NpcOpenMerchantEvent& event) {
             if (!registry_.valid(event.player) || event.store_id == 0) {
                 return;

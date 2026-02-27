@@ -19,7 +19,7 @@ AttributeRecalcSystem::AttributeRecalcSystem(entt::registry& registry, EventBus&
       registry_(&registry),
       event_bus_(&event_bus) {
     // 订阅升级事件 → 触发重算
-    event_bus_->Subscribe<events::LevelUpEvent>(
+    level_up_subscription_ = event_bus_->SubscribeScoped<events::LevelUpEvent>(
         [this](events::LevelUpEvent& event) {
             if (registry_) {
                 RecalcAll(*registry_, event.entity);

@@ -6,6 +6,7 @@
 #ifndef MIR2_ECS_SYSTEMS_TELEPORT_SYSTEM_H_
 #define MIR2_ECS_SYSTEMS_TELEPORT_SYSTEM_H_
 
+#include "ecs/event_bus.h"
 #include "ecs/world.h"
 #include "game/ports/i_world_map_port.h"
 
@@ -15,8 +16,6 @@
 #include <queue>
 
 namespace mir2::ecs {
-
-class EventBus;
 
 struct TeleportRequest {
   entt::entity entity = entt::null;
@@ -49,6 +48,7 @@ class TeleportSystem : public System {
  private:
   game::ports::IWorldMapPort& world_map_port_;
   EventBus* event_bus_ = nullptr;
+  EventBus::Subscription teleport_request_subscription_;
   std::mutex teleport_queue_mutex_;
   std::queue<TeleportRequest> teleport_queue_;
 };

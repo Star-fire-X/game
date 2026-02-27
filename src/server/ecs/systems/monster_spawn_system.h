@@ -12,10 +12,9 @@
 #include <cstdint>
 
 #include "game/entity/monster_spawn_config.h"
+#include "ecs/event_bus.h"
 
 namespace mir2::ecs {
-
-class EventBus;
 
 /**
  * @brief 复活计时器
@@ -43,6 +42,7 @@ public:
 private:
     entt::registry* registry_ = nullptr;
     EventBus* event_bus_ = nullptr;
+    EventBus::Subscription death_subscription_;
     std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> spawn_points_;
     std::unordered_map<uint64_t, RespawnTimer> respawn_timers_;
     float elapsed_time_ = 0.0f;

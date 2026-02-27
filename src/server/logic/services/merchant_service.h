@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace mir2::ecs { class EventBus; }
+#include "ecs/event_bus.h"
 
 namespace mir2::logic {
 
@@ -37,6 +37,7 @@ public:
 private:
     entt::registry& registry_;
     ecs::EventBus& event_bus_;
+    ecs::EventBus::Subscription open_merchant_subscription_;
     std::unordered_map<uint32_t, ShopConfig> shops_;
     std::unordered_map<uint32_t, uint32_t> open_shop_by_player_id_;
 };

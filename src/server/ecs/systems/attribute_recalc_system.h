@@ -9,12 +9,11 @@
 #ifndef MIR2_SERVER_ECS_SYSTEMS_ATTRIBUTE_RECALC_SYSTEM_H_
 #define MIR2_SERVER_ECS_SYSTEMS_ATTRIBUTE_RECALC_SYSTEM_H_
 
+#include "ecs/event_bus.h"
 #include "ecs/world.h"
 #include <entt/entt.hpp>
 
 namespace mir2::ecs {
-
-class EventBus;
 
 /**
  * @brief 属性重算系统
@@ -43,6 +42,7 @@ public:
 private:
     entt::registry* registry_ = nullptr;
     EventBus* event_bus_ = nullptr;
+    EventBus::Subscription level_up_subscription_;
 };
 
 }  // namespace mir2::ecs

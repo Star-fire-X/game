@@ -13,10 +13,9 @@
 
 #include "game/entity/monster_drop_config.h"
 #include "ecs/components/party_component.h"
+#include "ecs/event_bus.h"
 
 namespace mir2::ecs {
-
-class EventBus;
 
 /**
  * @brief 怪物掉落系统
@@ -39,6 +38,7 @@ public:
 private:
     entt::registry* registry_ = nullptr;
     EventBus* event_bus_ = nullptr;
+    EventBus::Subscription death_subscription_;
     std::unordered_map<uint32_t, game::entity::MonsterDropTable> drop_tables_;
     uint32_t cached_loot_map_id_ = 1;
 

@@ -12,11 +12,8 @@
 
 #include <entt/entt.hpp>
 
+#include "ecs/event_bus.h"
 #include "logic/response_sender.h"
-
-namespace mir2::ecs {
-class EventBus;
-}  // namespace mir2::ecs
 
 namespace mir2::game::map {
 class SceneManager;
@@ -70,6 +67,7 @@ class WorldSyncBroadcastService {
   Config config_;
   int64_t next_state_sync_ms_ = 0;
   std::unordered_map<uint64_t, PendingRespawn> pending_respawns_;
+  std::vector<mir2::ecs::EventBus::Subscription> subscriptions_;
 };
 
 }  // namespace mir2::logic

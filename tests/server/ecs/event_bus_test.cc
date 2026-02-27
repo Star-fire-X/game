@@ -82,3 +82,36 @@ TEST(EventBusTest, MultiplePublishCallsDeliverMultipleTimes) {
     bus.Publish(TestEventA{2});
     EXPECT_EQ(call_count, 2);
 }
+
+TEST(EventBusTest, DeferredPublishRequiresFlush) {
+    entt::registry registry;
+    EventBus bus(registry);
+
+    int received = 0;
+    bus.Subscribe<TestEventA>([&](TestEventA& event) {
+        received = event.value;
+    });
+
+    bus.PublishDeferred(TestEventA{7});
+    EXPECT_EQ(received, 0);
+
+    bus.FlushEvents();
+    EXPECT_EQ(received, 7);
+}
+
+TEST(EventBusTest, SubscriptionUnsubscribesOnScopeExit) {
+    entt::registry registry;
+    EventBus bus(registry);
+
+    int call_count = 0;
+    {
+        auto subscription = bus.SubscribeScoped<TestEventA>([&](TestEventA&) {
+            ++call_count;
+        });
+        bus.Publish(TestEventA{1});
+        EXPECT_EQ(call_count, 1);
+    }
+
+    bus.Publish(TestEventA{2});
+    EXPECT_EQ(call_count, 1);
+}

@@ -22,7 +22,7 @@ LevelUpSystem::LevelUpSystem(entt::registry& registry, EventBus& event_bus)
     : System(SystemPriority::kLevelUp),
       registry_(&registry),
       event_bus_(&event_bus) {
-    event_bus_->Subscribe<events::EntityDeathEvent>(
+    death_subscription_ = event_bus_->SubscribeScoped<events::EntityDeathEvent>(
         [this](events::EntityDeathEvent& event) {
             OnEntityDeath(event);
         });

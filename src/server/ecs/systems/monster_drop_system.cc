@@ -330,7 +330,7 @@ void MonsterDropSystem::SubscribeToDeathEvents() {
         return;
     }
 
-    event_bus_->Subscribe<events::EntityDeathEvent>(
+    death_subscription_ = event_bus_->SubscribeScoped<events::EntityDeathEvent>(
         [this](const events::EntityDeathEvent& event) {
             OnMonsterDeath(event.entity, event.killer);
         });

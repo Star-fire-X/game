@@ -16,7 +16,7 @@ TeleportSystem::TeleportSystem(game::ports::IWorldMapPort& world_map_port, Event
       world_map_port_(world_map_port),
       event_bus_(&event_bus) {
   if (event_bus_) {
-    event_bus_->Subscribe<events::TeleportRequestEvent>(
+    teleport_request_subscription_ = event_bus_->SubscribeScoped<events::TeleportRequestEvent>(
         [this](events::TeleportRequestEvent& event) {
           RequestTeleport(TeleportRequest{
               event.entity, event.target_map_id, event.target_x, event.target_y});

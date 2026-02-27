@@ -7,13 +7,12 @@
 #define MIR2_SERVER_ECS_SYSTEMS_LEVEL_UP_SYSTEM_H_
 
 #include "ecs/components/character_components.h"
+#include "ecs/event_bus.h"
 #include "ecs/world.h"
 
 #include <unordered_map>
 
 namespace mir2::ecs {
-
-class EventBus;
 namespace events {
 struct EntityDeathEvent;
 }  // namespace events
@@ -58,6 +57,7 @@ class LevelUpSystem : public System {
 
     entt::registry* registry_ = nullptr;
     EventBus* event_bus_ = nullptr;
+    EventBus::Subscription death_subscription_;
 
     // 检测并处理升级（支持连续升级）
     static void CheckLevelUp(entt::registry& registry, entt::entity entity,

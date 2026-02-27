@@ -198,7 +198,7 @@ WorldSyncBroadcastService::WorldSyncBroadcastService(ResponseSender& response_se
       role_store_(role_store),
       scene_manager_(scene_manager),
       config_(config) {
-  event_bus.Subscribe<mir2::ecs::events::MapChangeEvent>(
+  subscriptions_.push_back(event_bus.SubscribeScoped<mir2::ecs::events::MapChangeEvent>(
       [this](mir2::ecs::events::MapChangeEvent& event) {
         auto& registry = event_bus_.Registry();
         if (event.entity == entt::null || !registry.valid(event.entity)) {
@@ -240,9 +240,9 @@ WorldSyncBroadcastService::WorldSyncBroadcastService(ResponseSender& response_se
                                                   event.new_y);
         response_sender_.Send(*client_id_opt, msg_id, payload);
         BroadcastStateSyncForEntity(event.entity);
-      });
+      }));
 
-  event_bus.Subscribe<mir2::ecs::events::BuffAppliedEvent>(
+  subscriptions_.push_back(event_bus.SubscribeScoped<mir2::ecs::events::BuffAppliedEvent>(
       [this](mir2::ecs::events::BuffAppliedEvent& event) {
         auto& registry = event_bus_.Registry();
         if (event.target == entt::null || !registry.valid(event.target)) {
@@ -286,9 +286,9 @@ WorldSyncBroadcastService::WorldSyncBroadcastService(ResponseSender& response_se
               static_cast<uint16_t>(mir2::common::MsgId::kBuffAdd),
               payload);
         }
-      });
+      }));
 
-  event_bus.Subscribe<mir2::ecs::events::BuffRemovedEvent>(
+  subscriptions_.push_back(event_bus.SubscribeScoped<mir2::ecs::events::BuffRemovedEvent>(
       [this](mir2::ecs::events::BuffRemovedEvent& event) {
         auto& registry = event_bus_.Registry();
         if (event.target == entt::null || !registry.valid(event.target)) {
@@ -316,9 +316,9 @@ WorldSyncBroadcastService::WorldSyncBroadcastService(ResponseSender& response_se
               static_cast<uint16_t>(mir2::common::MsgId::kBuffRemove),
               payload);
         }
-      });
+      }));
 
-  event_bus.Subscribe<mir2::ecs::events::EntityDeathEvent>(
+  subscriptions_.push_back(event_bus.SubscribeScoped<mir2::ecs::events::EntityDeathEvent>(
       [this](mir2::ecs::events::EntityDeathEvent& event) {
         auto& registry = event_bus_.Registry();
         if (event.entity == entt::null || !registry.valid(event.entity)) {
@@ -333,9 +333,9 @@ WorldSyncBroadcastService::WorldSyncBroadcastService(ResponseSender& response_se
         pending_respawns_[identity->id] = PendingRespawn{
             .entity = event.entity,
             .due_ms = now_ms + std::max<int64_t>(0, config_.respawn_delay_ms)};
-      });
+      }));
 
-  event_bus.Subscribe<mir2::ecs::events::EntityRespawnEvent>(
+  subscriptions_.push_back(event_bus.SubscribeScoped<mir2::ecs::events::EntityRespawnEvent>(
       [this](mir2::ecs::events::EntityRespawnEvent& event) {
         auto& registry = event_bus_.Registry();
         if (event.entity == entt::null || !registry.valid(event.entity)) {
@@ -390,7 +390,7 @@ WorldSyncBroadcastService::WorldSyncBroadcastService(ResponseSender& response_se
         }
 
         BroadcastStateSyncForEntity(event.entity);
-      });
+      }));
 }
 
 std::vector<uint64_t> WorldSyncBroadcastService::ResolveAoiRecipients(

@@ -15,6 +15,7 @@
 #include <pqxx/pqxx>
 
 #include "common/enums.h"
+#include "common/item_constants.h"
 #include "common/types/constants.h"
 #include "data/item_template.h"
 #include "ecs/components/character_components.h"
@@ -669,6 +670,103 @@ std::vector<MailHandler::MailAttachmentRecord> AggregateAttachmentCountsForDispl
   return aggregated;
 }
 
+bool HasSameMergeableState(const MailHandler::MailAttachmentRecord& lhs,
+                           const MailHandler::MailAttachmentRecord& rhs) {
+  if (lhs.item_id != rhs.item_id || lhs.has_instance_state != rhs.has_instance_state) {
+    return false;
+  }
+  if (!lhs.has_instance_state) {
+    return true;
+  }
+  return lhs.durability == rhs.durability &&
+         lhs.max_durability == rhs.max_durability &&
+         lhs.shape == rhs.shape &&
+         lhs.looks == rhs.looks &&
+         lhs.std_mode == rhs.std_mode &&
+         lhs.enhancement_level == rhs.enhancement_level &&
+         lhs.luck == rhs.luck &&
+         lhs.equip_slot == rhs.equip_slot &&
+         lhs.attack_bonus == rhs.attack_bonus &&
+         lhs.defense_bonus == rhs.defense_bonus &&
+         lhs.magic_attack_bonus == rhs.magic_attack_bonus &&
+         lhs.magic_defense_bonus == rhs.magic_defense_bonus &&
+         lhs.hp_bonus == rhs.hp_bonus &&
+         lhs.mp_bonus == rhs.mp_bonus &&
+         lhs.hit_rate_bonus == rhs.hit_rate_bonus &&
+         lhs.dodge_bonus == rhs.dodge_bonus &&
+         lhs.speed_bonus == rhs.speed_bonus &&
+         lhs.lifesteal_percent == rhs.lifesteal_percent &&
+         lhs.reflect_percent == rhs.reflect_percent &&
+         lhs.elemental_damage == rhs.elemental_damage &&
+         lhs.elemental_type == rhs.elemental_type;
+}
+
+std::vector<MailHandler::MailAttachmentRecord> AggregateTransferredAttachmentsForStorage(
+    const std::vector<MailHandler::MailAttachmentRecord>& items) {
+  std::unordered_map<uint32_t, bool> mergeable_by_item;
+  mergeable_by_item.reserve(items.size());
+
+  for (const auto& item : items) {
+    if (item.item_id == 0 || item.count == 0) {
+      continue;
+    }
+    const auto* tmpl = data::ItemTemplateManager::Instance().GetTemplate(item.item_id);
+    const bool mergeable =
+        tmpl ? tmpl->stackable : (!item.has_instance_state || item.count > 1);
+    auto [it, inserted] = mergeable_by_item.emplace(item.item_id, mergeable);
+    if (!inserted && mergeable) {
+      it->second = true;
+    }
+  }
+
+  std::vector<MailHandler::MailAttachmentRecord> aggregated;
+  aggregated.reserve(items.size());
+  for (const auto& item : items) {
+    if (item.item_id == 0 || item.count == 0) {
+      continue;
+    }
+
+    const auto mergeable_it = mergeable_by_item.find(item.item_id);
+    const bool mergeable =
+        mergeable_it != mergeable_by_item.end() && mergeable_it->second;
+    if (!mergeable) {
+      aggregated.push_back(item);
+      continue;
+    }
+
+    bool merged = false;
+    for (auto& existing : aggregated) {
+      if (!HasSameMergeableState(existing, item)) {
+        continue;
+      }
+      if (existing.count > std::numeric_limits<uint32_t>::max() - item.count) {
+        existing.count = std::numeric_limits<uint32_t>::max();
+      } else {
+        existing.count += item.count;
+      }
+      merged = true;
+      break;
+    }
+    if (!merged) {
+      aggregated.push_back(item);
+    }
+  }
+
+  std::sort(aggregated.begin(),
+            aggregated.end(),
+            [](const MailHandler::MailAttachmentRecord& lhs,
+               const MailHandler::MailAttachmentRecord& rhs) {
+              if (lhs.item_id != rhs.item_id) {
+                return lhs.item_id < rhs.item_id;
+              }
+              if (lhs.instance_id != rhs.instance_id) {
+                return lhs.instance_id < rhs.instance_id;
+              }
+              return lhs.count < rhs.count;
+            });
+  return aggregated;
+}
+
 flatbuffers::Offset<mir2::proto::MailSummary> BuildSummary(
     flatbuffers::FlatBufferBuilder& builder,
     const MailHandler::MailRecord& mail) {
@@ -972,17 +1070,7 @@ Task<void> MailHandler::HandleSend(HandlerContext ctx,
         ctx.client_id, false, mir2::common::ErrorCode::kMailAttachmentInvalid, 0);
     co_return;
   }
-  mail.items = deducted_assets.transferred_items;
-  std::sort(mail.items.begin(), mail.items.end(), [](const MailAttachmentRecord& lhs,
-                                                     const MailAttachmentRecord& rhs) {
-    if (lhs.item_id != rhs.item_id) {
-      return lhs.item_id < rhs.item_id;
-    }
-    if (lhs.instance_id != rhs.instance_id) {
-      return lhs.instance_id < rhs.instance_id;
-    }
-    return lhs.count < rhs.count;
-  });
+  mail.items = AggregateTransferredAttachmentsForStorage(deducted_assets.transferred_items);
 
   if (PersistenceEnabled()) {
     uint32_t unread_count = 0;

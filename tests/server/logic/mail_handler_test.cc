@@ -13,6 +13,7 @@
 #include <flatbuffers/flatbuffers.h>
 
 #include "common/enums.h"
+#include "common/types/constants.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/item_component.h"
 #include "logic/coroutine_executor.h"
@@ -371,6 +372,61 @@ TEST_F(MailHandlerTest, SendAndClaimMailTransfersGoldAndItems) {
   ASSERT_NE(receiver_attrs, nullptr);
   EXPECT_EQ(receiver_attrs->gold, 220);
   EXPECT_EQ(CountOwnedItem(receiver.entity, 93001), 6);
+}
+
+TEST_F(MailHandlerTest, ClaimMailSucceedsWithSingleFreeSlotForSplitStackAttachment) {
+  const auto sender = CreatePlayer(3013, 6013, "Sender", 0);
+  const auto receiver = CreatePlayer(3014, 6014, "Receiver", 0);
+
+  CreateInventoryItem(sender.entity, 1, 93201, 4);
+  CreateInventoryItem(sender.entity, 2, 93201, 3);
+
+  constexpr int kReservedFreeSlot = 7;
+  for (int slot = 0; slot < mir2::common::constants::MAX_INVENTORY_SIZE; ++slot) {
+    if (slot == kReservedFreeSlot) {
+      continue;
+    }
+    CreateInventoryItem(receiver.entity, slot, 99000 + static_cast<uint32_t>(slot), 1);
+  }
+
+  HandlerContext send_ctx;
+  send_ctx.client_id = sender.client_id;
+  send_ctx.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kMailSendReq);
+  send_ctx.entity = sender.entity;
+  Dispatch(send_ctx,
+           BuildSendReqPayload(receiver.character_id,
+                               "SplitStack",
+                               "NeedsOneSlot",
+                               0,
+                               {{93201, 6}}));
+
+  const auto send_rsp = FindLastResponse(
+      sender.client_id, static_cast<uint16_t>(mir2::common::MsgId::kMailSendRsp));
+  ASSERT_TRUE(send_rsp.has_value());
+  flatbuffers::Verifier send_verifier(send_rsp->payload.data(), send_rsp->payload.size());
+  ASSERT_TRUE(send_verifier.VerifyBuffer<mir2::proto::MailSendRsp>(nullptr));
+  const auto* send_root = flatbuffers::GetRoot<mir2::proto::MailSendRsp>(send_rsp->payload.data());
+  ASSERT_NE(send_root, nullptr);
+  ASSERT_TRUE(send_root->success());
+  const uint64_t mail_id = send_root->mail_id();
+
+  HandlerContext claim_ctx;
+  claim_ctx.client_id = receiver.client_id;
+  claim_ctx.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kMailClaimReq);
+  claim_ctx.entity = receiver.entity;
+  Dispatch(claim_ctx, BuildClaimReqPayload(mail_id));
+
+  const auto claim_rsp = FindLastResponse(
+      receiver.client_id, static_cast<uint16_t>(mir2::common::MsgId::kMailClaimRsp));
+  ASSERT_TRUE(claim_rsp.has_value());
+  flatbuffers::Verifier claim_verifier(claim_rsp->payload.data(), claim_rsp->payload.size());
+  ASSERT_TRUE(claim_verifier.VerifyBuffer<mir2::proto::MailClaimRsp>(nullptr));
+  const auto* claim_root =
+      flatbuffers::GetRoot<mir2::proto::MailClaimRsp>(claim_rsp->payload.data());
+  ASSERT_NE(claim_root, nullptr);
+  ASSERT_TRUE(claim_root->success());
+
+  EXPECT_EQ(CountOwnedItem(receiver.entity, 93201), 6);
 }
 
 TEST_F(MailHandlerTest, SendMailFailsWhenSenderAssetsInsufficient) {

@@ -356,6 +356,55 @@ Task<void> RunWhenAnyProbeTask(CoroutineExecutor* executor,
   co_return;
 }
 
+Task<void> RunWhenAnyCancellableSleepTask(CoroutineExecutor* executor,
+                                          std::chrono::milliseconds delay,
+                                          std::atomic<int>* cancelled_counter,
+                                          std::atomic<int>* completed_counter) {
+  const std::stop_token stop_token = co_await CurrentStopToken();
+  try {
+    co_await executor->SleepFor(delay, stop_token);
+    completed_counter->fetch_add(1, std::memory_order_relaxed);
+  } catch (const CancelledError&) {
+    cancelled_counter->fetch_add(1, std::memory_order_relaxed);
+  }
+  co_return;
+}
+
+Task<void> RunWhenAnyDefaultBehaviorProbeTask(CoroutineExecutor* executor,
+                                              std::atomic<int>* cancelled_counter,
+                                              std::atomic<int>* completed_counter,
+                                              std::promise<size_t>* winner_promise) {
+  using namespace std::chrono_literals;
+  std::vector<Task<void>> tasks;
+  tasks.reserve(3);
+  tasks.push_back(executor->SleepFor(10ms));
+  tasks.push_back(RunWhenAnyCancellableSleepTask(
+      executor, 400ms, cancelled_counter, completed_counter));
+  tasks.push_back(RunWhenAnyCancellableSleepTask(
+      executor, 500ms, cancelled_counter, completed_counter));
+  const size_t winner = co_await executor->WhenAny(std::move(tasks));
+  winner_promise->set_value(winner);
+  co_return;
+}
+
+Task<void> RunWhenAnyCancelLosersProbeTask(CoroutineExecutor* executor,
+                                           std::atomic<int>* cancelled_counter,
+                                           std::atomic<int>* completed_counter,
+                                           std::promise<size_t>* winner_promise) {
+  using namespace std::chrono_literals;
+  std::vector<Task<void>> tasks;
+  tasks.reserve(3);
+  tasks.push_back(executor->SleepFor(10ms));
+  tasks.push_back(RunWhenAnyCancellableSleepTask(
+      executor, 400ms, cancelled_counter, completed_counter));
+  tasks.push_back(RunWhenAnyCancellableSleepTask(
+      executor, 500ms, cancelled_counter, completed_counter));
+  const size_t winner = co_await executor->WhenAny(
+      std::move(tasks), {}, {.cancel_losers = true});
+  winner_promise->set_value(winner);
+  co_return;
+}
+
 Task<void> RunWhenAllOverLimitProbeTask(CoroutineExecutor* executor,
                                         std::atomic<int>* over_limit_rejected,
                                         std::promise<void>* done_promise) {
@@ -722,6 +771,70 @@ TEST_F(CoroutineExecutorTest, WhenAnyReturnsFirstCompletedTaskIndex) {
   ASSERT_TRUE(executor.Spawn(RunWhenAnyProbeTask(&executor, &winner_promise)));
   ASSERT_EQ(winner_future.wait_for(2s), std::future_status::ready);
   EXPECT_EQ(winner_future.get(), 1u);
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
+TEST_F(CoroutineExecutorTest, WhenAnyDefaultDoesNotCancelLosers) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::atomic<int> cancelled_counter{0};
+  std::atomic<int> completed_counter{0};
+  std::promise<size_t> winner_promise;
+  auto winner_future = winner_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunWhenAnyDefaultBehaviorProbeTask(
+      &executor, &cancelled_counter, &completed_counter, &winner_promise)));
+
+  ASSERT_EQ(winner_future.wait_for(2s), std::future_status::ready);
+  EXPECT_EQ(winner_future.get(), 0u);
+
+  EXPECT_TRUE(WaitUntil([&completed_counter]() {
+    return completed_counter.load(std::memory_order_relaxed) >= 2;
+  }, 2s));
+  EXPECT_EQ(cancelled_counter.load(std::memory_order_relaxed), 0);
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
+TEST_F(CoroutineExecutorTest, WhenAnyCancelLosersCancelsRemainingBranches) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::atomic<int> cancelled_counter{0};
+  std::atomic<int> completed_counter{0};
+  std::promise<size_t> winner_promise;
+  auto winner_future = winner_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunWhenAnyCancelLosersProbeTask(
+      &executor, &cancelled_counter, &completed_counter, &winner_promise)));
+
+  ASSERT_EQ(winner_future.wait_for(2s), std::future_status::ready);
+  EXPECT_EQ(winner_future.get(), 0u);
+
+  EXPECT_TRUE(WaitUntil([&cancelled_counter]() {
+    return cancelled_counter.load(std::memory_order_relaxed) >= 2;
+  }, 2s));
+  EXPECT_EQ(completed_counter.load(std::memory_order_relaxed), 0);
 
   EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
 

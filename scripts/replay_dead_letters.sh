@@ -19,6 +19,8 @@ Wrapper options:
 
 Replay options (forwarded to mir2_dead_letter_replay):
   --db-path <path>      RocksDB path (required)
+  --config <path>       Logic YAML config path (default: config/logic.yaml)
+  --ttl-seconds <n>     Override L2 TTL seconds
   --prefix <key_prefix> Only replay keys with this prefix
   --start-ms <ts_ms>    Include rows recorded at or after ts
   --end-ms <ts_ms>      Include rows recorded at or before ts

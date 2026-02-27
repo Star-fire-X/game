@@ -7,15 +7,19 @@
 #include <string>
 #include <string_view>
 
+#include <yaml-cpp/yaml.h>
+
 #include "storage_engine/l2/rocksdb_cache.h"
 
 namespace {
 
 struct Options {
   std::string db_path;
+  std::string config_path = "config/logic.yaml";
   std::string key_prefix;
   uint64_t start_ms = 0;
   uint64_t end_ms = std::numeric_limits<uint64_t>::max();
+  std::optional<uint32_t> ttl_seconds;
   size_t limit = 0;
   bool dry_run = false;
   bool keep_dead_letter = false;
@@ -28,6 +32,8 @@ void PrintUsage(const char* argv0) {
       << "\n"
       << "Options:\n"
       << "  --db-path <path>        RocksDB path (required)\n"
+      << "  --config <path>         Logic YAML config path (default: config/logic.yaml)\n"
+      << "  --ttl-seconds <n>       Override L2 TTL seconds (fallback: config storage_engine.l2_ttl_seconds)\n"
       << "  --prefix <key_prefix>   Only replay keys with this prefix\n"
       << "  --start-ms <ts_ms>      Include dead letters recorded at or after ts\n"
       << "  --end-ms <ts_ms>        Include dead letters recorded at or before ts\n"
@@ -81,6 +87,28 @@ bool ParseArgs(int argc, char** argv, Options* options, std::string* error) {
         return false;
       }
       options->db_path = *value;
+      continue;
+    }
+    if (arg == "--config") {
+      auto value = require_value("--config");
+      if (!value.has_value()) {
+        return false;
+      }
+      options->config_path = *value;
+      continue;
+    }
+    if (arg == "--ttl-seconds") {
+      auto value = require_value("--ttl-seconds");
+      if (!value.has_value()) {
+        return false;
+      }
+      auto parsed = ParseUint64(*value);
+      if (!parsed.has_value() ||
+          *parsed > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        *error = "invalid --ttl-seconds";
+        return false;
+      }
+      options->ttl_seconds = static_cast<uint32_t>(*parsed);
       continue;
     }
     if (arg == "--prefix") {
@@ -159,6 +187,36 @@ bool ParseArgs(int argc, char** argv, Options* options, std::string* error) {
   return true;
 }
 
+std::optional<uint32_t> ResolveTtlSeconds(const Options& options,
+                                          std::string* error) {
+  if (error == nullptr) {
+    return std::nullopt;
+  }
+
+  if (options.ttl_seconds.has_value()) {
+    return options.ttl_seconds;
+  }
+
+  try {
+    const YAML::Node root = YAML::LoadFile(options.config_path);
+    const YAML::Node storage_engine = root["storage_engine"];
+    if (storage_engine && storage_engine["l2_ttl_seconds"]) {
+      const uint64_t parsed =
+          storage_engine["l2_ttl_seconds"].as<uint64_t>();
+      if (parsed > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        *error = "storage_engine.l2_ttl_seconds exceeds int32 range";
+        return std::nullopt;
+      }
+      return static_cast<uint32_t>(parsed);
+    }
+  } catch (const YAML::Exception& ex) {
+    *error = std::string("failed to load config: ") + ex.what();
+    return std::nullopt;
+  }
+
+  return mir2::storage_engine::StorageEngine::Config{}.l2_ttl_seconds;
+}
+
 bool MatchesFilter(const mir2::storage_engine::l2::RocksDBCache::DeadLetterEntry& entry,
                    const Options& options) {
   if (!options.key_prefix.empty() &&
@@ -186,9 +244,15 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  auto ttl_seconds = ResolveTtlSeconds(options, &error);
+  if (!ttl_seconds.has_value()) {
+    std::cerr << "Error: " << error << "\n";
+    return 1;
+  }
+
   mir2::storage_engine::l2::RocksDBCache::Config config;
   config.db_path = options.db_path;
-  config.ttl_seconds = 3600;
+  config.ttl_seconds = static_cast<int32_t>(*ttl_seconds);
 
   mir2::storage_engine::l2::RocksDBCache cache(config);
   if (!cache.Initialize()) {

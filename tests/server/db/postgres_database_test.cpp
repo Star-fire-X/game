@@ -148,9 +148,13 @@ TEST(PostgresDatabaseTest, GetNextCharacterIdFallsBackWhenPoolNotReady) {
   auto pool = std::make_shared<PgConnectionPool>();
   PostgresDatabase db(pool, 3);
 
-  auto result = db.get_next_character_id();
-  ASSERT_TRUE(result);
-  EXPECT_GT(result.value, 0u);
+  auto first = db.get_next_character_id();
+  ASSERT_TRUE(first);
+  EXPECT_GT(first.value, 0u);
+
+  auto second = db.get_next_character_id();
+  ASSERT_TRUE(second);
+  EXPECT_GT(second.value, first.value);
 }
 
 TEST(PostgresDatabaseIntegrationTest, LoadAccountMissingUserDoesNotLeakConnection) {

@@ -5,6 +5,7 @@
 #include "common/types/database_types.h"
 #include "server/common/snowflake_id.h"
 #include "storage_engine/backends/postgres/pg_connection_pool.h"
+#include <atomic>
 #include <memory>
 
 namespace mir2::db {
@@ -53,8 +54,11 @@ public:
     mir2::common::DbResult<uint64_t> generate_id(const std::string& seq_name) override;
 
 private:
+    mir2::common::DbResult<uint32_t> allocate_fallback_character_id();
+
     std::shared_ptr<PgConnectionPool> pool_;
     common::SnowflakeIdGenerator id_generator_;
+    std::atomic<uint32_t> next_fallback_character_id_;
     bool initialized_;
 };
 

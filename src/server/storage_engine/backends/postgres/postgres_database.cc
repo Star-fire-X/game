@@ -1,14 +1,41 @@
 #include "storage_engine/backends/postgres/postgres_database.h"
 
+#include <chrono>
 #include <limits>
 
 #include <pqxx/pqxx>
 
 namespace mir2::db {
 
+namespace {
+
+uint32_t BuildInitialFallbackCharacterId(uint16_t worker_id) {
+    constexpr uint32_t kWorkerBits = 10;
+    constexpr uint32_t kCounterBits = 22;
+    constexpr uint32_t kCounterMask = (1u << kCounterBits) - 1u;
+
+    const uint32_t worker_prefix =
+        (static_cast<uint32_t>(worker_id) & ((1u << kWorkerBits) - 1u)) << kCounterBits;
+    const uint64_t now_seconds = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    uint32_t seed = worker_prefix | static_cast<uint32_t>(now_seconds & kCounterMask);
+    if (seed == 0) {
+        seed = 1;
+    }
+    if (seed == std::numeric_limits<uint32_t>::max()) {
+        seed -= 1;
+    }
+    return seed;
+}
+
+}  // namespace
+
 PostgresDatabase::PostgresDatabase(std::shared_ptr<PgConnectionPool> pool, uint16_t worker_id)
     : pool_(pool)
     , id_generator_(worker_id)
+    , next_fallback_character_id_(BuildInitialFallbackCharacterId(worker_id))
     , initialized_(false) {
 }
 
@@ -333,16 +360,26 @@ mir2::common::DbResult<uint32_t> PostgresDatabase::get_next_character_id() {
     }
 
     // Compatibility fallback for non-open DB paths and tests.
-    auto result = generate_id("character");
-    if (!result) {
-        return mir2::common::DbResult<uint32_t>::error(
-            result.error_code, result.error_message);
+    return allocate_fallback_character_id();
+}
+
+mir2::common::DbResult<uint32_t> PostgresDatabase::allocate_fallback_character_id() {
+    uint32_t current = next_fallback_character_id_.load(std::memory_order_relaxed);
+    while (true) {
+        if (current == 0 || current == std::numeric_limits<uint32_t>::max()) {
+            return mir2::common::DbResult<uint32_t>::error(
+                mir2::common::ErrorCode::DATABASE_ERROR,
+                "fallback character id range exhausted");
+        }
+        const uint32_t next = current + 1;
+        if (next_fallback_character_id_.compare_exchange_weak(
+                current,
+                next,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            return mir2::common::DbResult<uint32_t>::ok(current);
+        }
     }
-    uint32_t fallback_id = static_cast<uint32_t>(result.value);
-    if (fallback_id == 0) {
-        fallback_id = 1;
-    }
-    return mir2::common::DbResult<uint32_t>::ok(fallback_id);
 }
 
 } // namespace mir2::db

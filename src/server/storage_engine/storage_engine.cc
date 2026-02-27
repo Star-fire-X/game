@@ -552,7 +552,6 @@ public:
             const bool queued = async_queue_->Enqueue(key, data, priority);
             if (!queued) {
                 if (!PersistToBackendSync(key, data)) {
-                    IncrementStorageCounter(kStrictWriteFailMetric);
                     auto logger = spdlog::get("mir2");
                     if (!config_.enable_outbox && l2_success) {
                         if (logger) {
@@ -563,6 +562,7 @@ public:
                         stats_.total_sets.fetch_add(1, std::memory_order_relaxed);
                         return true;
                     }
+                    IncrementStorageCounter(kStrictWriteFailMetric);
                     if (logger) {
                         logger->warn(
                             "StorageEngine SetSync rejected: enqueue rejected and sync compensation failed, key={}",

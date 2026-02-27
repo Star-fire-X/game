@@ -1,0 +1,92 @@
+udp_send Error Curve (mir2_errors_total{reason="udp_send"} delta/sample)
+========================================================================
+    0.0s [business  ] |  0
+    1.0s [business  ] |  0
+    2.0s [business  ] |  0
+    3.0s [business  ] |  0
+    4.0s [business  ] |  0
+    5.0s [business  ] |  0
+    6.0s [business  ] |  0
+    7.0s [business  ] |  0
+    8.0s [business  ] |  0
+    9.0s [business  ] |  0
+   10.0s [business  ] |  0
+   11.0s [business  ] |  0
+   12.0s [business  ] |  0
+   13.0s [business  ] |  0
+   14.0s [business  ] |  0
+   15.0s [business  ] |  0
+   16.0s [business  ] |  0
+   17.0s [business  ] |  0
+   18.0s [business  ] |  0
+   19.0s [business  ] |  0
+   20.0s [business  ] |  0
+   21.0s [business  ] |  0
+   22.0s [business  ] |  0
+   23.0s [business  ] |  0
+   24.0s [business  ] |  0
+   25.0s [business  ] |  0
+   26.0s [business  ] |  0
+   27.0s [business  ] |  0
+   28.0s [business  ] |  0
+   29.0s [business  ] |  0
+   30.0s [business  ] |  0
+   31.0s [business  ] |  0
+   32.0s [business  ] |  0
+   33.0s [business  ] |  0
+   34.0s [business  ] |  0
+   35.0s [business  ] |  0
+   36.0s [business  ] |  0
+   37.0s [business  ] |  0
+   38.0s [business  ] |  0
+   39.0s [business  ] |  0
+   40.0s [business  ] |  0
+   41.0s [business  ] |  0
+   42.0s [business  ] |  0
+   43.1s [business  ] |  0
+   44.1s [business  ] |  0
+   45.1s [business  ] |  0
+   46.1s [business  ] |  0
+   47.1s [business  ] |  0
+   48.1s [business  ] |  0
+   49.1s [business  ] |  0
+   50.1s [business  ] |  0
+   51.1s [business  ] |  0
+   52.1s [business  ] |  0
+   53.1s [business  ] |  0
+   54.1s [business  ] |  0
+   55.1s [business  ] |  0
+   56.1s [business  ] |  0
+   57.1s [business  ] |  0
+   58.1s [business  ] |  0
+   59.1s [business  ] |  0
+   60.1s [udp_inject] |  0
+   61.1s [udp_inject] |  0
+   62.1s [udp_inject] |  0
+   63.1s [udp_inject] |  0
+   64.1s [udp_inject] |  0
+   65.1s [udp_inject] |  0
+   66.1s [udp_inject] |  0
+   67.1s [udp_inject] |  0
+   68.1s [udp_inject] |  0
+   69.1s [udp_inject] |  0
+   70.1s [udp_inject] |  0
+   71.1s [udp_inject] |  0
+   72.1s [udp_inject] |  0
+   73.1s [udp_inject] |  0
+   74.1s [udp_inject] |  0
+   75.1s [udp_inject] |  0
+   76.1s [udp_inject] |  0
+   77.1s [udp_inject] |  0
+   78.1s [udp_inject] |  0
+   79.1s [udp_inject] |  0
+   80.1s [udp_inject] |  0
+   81.1s [udp_inject] |  0
+   82.1s [udp_inject] |  0
+   83.1s [udp_inject] |  0
+   84.1s [udp_inject] |  0
+   85.1s [udp_inject] |  0
+   86.1s [udp_inject] |  0
+   87.1s [udp_inject] |  0
+   88.1s [udp_inject] |  0
+   89.1s [udp_inject] |  0

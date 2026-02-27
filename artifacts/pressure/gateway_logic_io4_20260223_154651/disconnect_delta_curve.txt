@@ -1,0 +1,32 @@
+Disconnect Peak Curve (gateway_session_unregister delta/sample)
+===============================================================
+    0.0s [business  ] |  0
+    1.0s [business  ] | ######################################## 4
+    2.0s [business  ] |  0
+    3.0s [business  ] |  0
+    4.0s [business  ] |  0
+    5.0s [business  ] |  0
+    6.0s [business  ] |  0
+    7.0s [business  ] |  0
+    8.0s [business  ] |  0
+    9.0s [business  ] |  0
+   10.0s [business  ] |  0
+   11.0s [business  ] |  0
+   12.0s [business  ] |  0
+   13.0s [business  ] |  0
+   14.0s [business  ] |  0
+   15.0s [business  ] |  0
+   16.0s [business  ] |  0
+   17.0s [business  ] |  0
+   18.0s [business  ] |  0
+   19.0s [business  ] |  0
+   20.0s [udp_inject] |  0
+   21.0s [udp_inject] | ######################################## 4
+   22.0s [udp_inject] |  0
+   23.0s [udp_inject] |  0
+   24.0s [udp_inject] |  0
+   25.0s [udp_inject] |  0
+   26.0s [udp_inject] |  0
+   27.0s [udp_inject] |  0
+   28.0s [udp_inject] |  0
+   29.0s [udp_inject] |  0

@@ -1,0 +1,7 @@
+udp_send Error Curve (mir2_errors_total{reason="udp_send"} delta/sample)
+========================================================================
+    0.0s [business  ] |  0
+    1.0s [business  ] |  0
+    2.0s [business  ] |  0
+    3.0s [business  ] |  0
+    4.0s [business  ] |  0

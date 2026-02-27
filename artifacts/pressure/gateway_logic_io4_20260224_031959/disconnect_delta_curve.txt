@@ -1,0 +1,242 @@
+Disconnect Peak Curve (gateway_session_unregister delta/sample)
+===============================================================
+    0.1s [business  ] |  0
+    1.1s [business  ] |  0
+    2.1s [business  ] |  0
+    3.1s [business  ] | #################### 128
+    4.1s [business  ] | ########## 64
+    5.1s [business  ] | ########## 64
+    6.1s [business  ] |  0
+    7.1s [business  ] | #################### 128
+    8.1s [business  ] | ################### 121
+    9.1s [business  ] | # 7
+   10.1s [business  ] | #################### 128
+   11.1s [business  ] |  0
+   12.1s [business  ] | #################### 128
+   13.1s [business  ] |  0
+   14.1s [business  ] | #################### 128
+   15.1s [business  ] |  0
+   16.1s [business  ] | #################### 128
+   17.1s [business  ] |  0
+   18.1s [business  ] |  0
+   19.1s [business  ] | #################### 128
+   20.1s [business  ] |  0
+   21.1s [business  ] |  0
+   22.1s [business  ] | #################### 128
+   23.1s [business  ] |  0
+   24.1s [business  ] | #################### 128
+   25.1s [business  ] |  0
+   26.1s [business  ] | #################### 128
+   27.1s [business  ] |  0
+   28.1s [business  ] | ############ 75
+   29.1s [business  ] | ######## 53
+   30.1s [business  ] |  0
+   31.1s [business  ] | #################### 128
+   32.1s [business  ] |  0
+   33.1s [business  ] |  0
+   34.1s [business  ] | #################### 128
+   35.1s [business  ] |  0
+   36.1s [business  ] | #################### 128
+   37.1s [business  ] |  0
+   38.1s [business  ] |  0
+   39.1s [business  ] | #################### 128
+   40.1s [business  ] |  0
+   41.1s [business  ] |  0
+   42.1s [business  ] | #################### 128
+   43.1s [business  ] |  0
+   44.1s [business  ] | #################### 128
+   45.1s [business  ] |  0
+   46.1s [business  ] | #################### 128
+   47.1s [business  ] |  0
+   48.1s [business  ] | #################### 128
+   49.1s [business  ] | ################### 121
+   50.1s [business  ] | # 7
+   51.1s [business  ] |  0
+   52.1s [business  ] | #################### 128
+   53.1s [business  ] |  0
+   54.1s [business  ] | #################### 128
+   55.2s [business  ] |  0
+   56.2s [business  ] |  0
+   57.2s [business  ] | #################### 128
+   58.2s [business  ] |  0
+   59.2s [business  ] | #################### 128
+   60.2s [business  ] |  0
+   61.2s [business  ] | #################### 128
+   62.2s [business  ] | ########## 65
+   63.2s [business  ] | ########## 63
+   64.2s [business  ] |  0
+   65.2s [business  ] | #################### 128
+   66.2s [business  ] | #################### 128
+   67.2s [business  ] |  0
+   68.2s [business  ] | #################### 125
+   69.2s [business  ] |  3
+   70.2s [business  ] |  0
+   71.2s [business  ] | #################### 128
+   72.2s [business  ] |  0
+   73.2s [business  ] | #################### 128
+   74.2s [business  ] |  0
+   75.2s [business  ] | #################### 128
+   76.2s [business  ] |  0
+   77.2s [business  ] | #################### 128
+   78.2s [business  ] |  0
+   79.2s [business  ] | #################### 128
+   80.2s [business  ] |  0
+   81.2s [business  ] | #################### 128
+   82.2s [business  ] |  0
+   83.2s [business  ] | #################### 128
+   84.2s [business  ] |  0
+   85.2s [business  ] | #################### 128
+   86.2s [business  ] |  0
+   87.2s [business  ] | #################### 128
+   88.2s [business  ] |  2
+   89.2s [business  ] | #################### 126
+   90.2s [business  ] |  0
+   91.2s [business  ] | #################### 128
+   92.2s [business  ] | ############ 80
+   93.2s [business  ] | ######## 48
+   94.2s [business  ] |  0
+   95.2s [business  ] | #################### 128
+   96.2s [business  ] |  0
+   97.2s [business  ] | #################### 128
+   98.2s [business  ] |  0
+   99.2s [business  ] | #################### 128
+  100.2s [business  ] |  0
+  101.2s [business  ] | #################### 128
+  102.2s [business  ] |  0
+  103.2s [business  ] | #################### 125
+  104.2s [business  ] |  3
+  105.2s [business  ] |  0
+  106.2s [business  ] | #################### 128
+  107.2s [business  ] | ##### 29
+  108.2s [business  ] | ############### 99
+  109.2s [business  ] | #################### 128
+  110.2s [business  ] |  0
+  111.2s [business  ] | #################### 128
+  112.2s [business  ] |  0
+  113.2s [business  ] | #################### 128
+  114.2s [business  ] |  0
+  115.2s [business  ] | #################### 128
+  116.2s [business  ] |  0
+  117.2s [business  ] |  0
+  118.2s [business  ] | #################### 128
+  119.2s [business  ] |  0
+  120.2s [business  ] | #################### 128
+  121.2s [business  ] |  0
+  122.2s [business  ] | #################### 128
+  123.2s [business  ] |  0
+  124.2s [business  ] | #################### 128
+  125.2s [business  ] |  0
+  126.2s [business  ] | #################### 128
+  127.2s [business  ] |  0
+  128.2s [business  ] | #################### 128
+  129.2s [business  ] |  0
+  130.2s [business  ] | #################### 128
+  131.2s [business  ] |  0
+  132.2s [business  ] | #################### 128
+  133.2s [business  ] |  0
+  134.2s [business  ] | #################### 128
+  135.2s [business  ] |  0
+  136.2s [business  ] | #################### 128
+  137.2s [business  ] |  0
+  138.2s [business  ] | #################### 128
+  139.2s [business  ] | ######## 49
+  140.2s [business  ] | ############ 79
+  141.2s [business  ] | #################### 125
+  142.2s [business  ] |  3
+  143.2s [business  ] | ########## 62
+  144.2s [business  ] | ########## 66
+  145.2s [business  ] | #################### 128
+  146.2s [business  ] |  0
+  147.2s [business  ] | #################### 128
+  148.2s [business  ] |  0
+  149.2s [business  ] | #################### 128
+  150.2s [business  ] |  0
+  151.2s [business  ] | #################### 125
+  152.2s [business  ] |  3
+  153.2s [business  ] | #################### 128
+  154.2s [business  ] |  0
+  155.2s [business  ] | #################### 128
+  156.2s [business  ] |  0
+  157.2s [business  ] | #################### 128
+  158.2s [business  ] |  0
+  159.2s [business  ] | #################### 128
+  160.2s [business  ] |  0
+  161.2s [business  ] | #################### 128
+  162.2s [business  ] |  0
+  163.2s [business  ] | #################### 128
+  164.2s [business  ] |  0
+  165.2s [business  ] | #################### 128
+  166.2s [business  ] |  0
+  167.2s [business  ] | #################### 125
+  168.2s [business  ] |  3
+  169.2s [business  ] | ########## 65
+  170.2s [business  ] | ########## 63
+  171.2s [business  ] |  0
+  172.2s [business  ] | #################### 128
+  173.2s [business  ] |  0
+  174.2s [business  ] | #################### 128
+  175.2s [business  ] |  0
+  176.2s [business  ] | #################### 128
+  177.2s [business  ] |  0
+  178.2s [business  ] | #################### 128
+  179.2s [business  ] |  0
+  180.2s [udp_inject] | ######################################## 256
+  181.2s [udp_inject] |  0
+  182.2s [udp_inject] |  0
+  183.2s [udp_inject] |  0
+  184.2s [udp_inject] |  0
+  185.2s [udp_inject] |  0
+  186.2s [udp_inject] |  0
+  187.2s [udp_inject] |  0
+  188.2s [udp_inject] |  0
+  189.2s [udp_inject] |  0
+  190.2s [udp_inject] |  0
+  191.2s [udp_inject] |  0
+  192.2s [udp_inject] |  0
+  193.2s [udp_inject] |  0
+  194.2s [udp_inject] |  0
+  195.2s [udp_inject] |  0
+  196.2s [udp_inject] |  0
+  197.2s [udp_inject] |  0
+  198.2s [udp_inject] |  0
+  199.2s [udp_inject] |  0
+  200.2s [udp_inject] |  0
+  201.2s [udp_inject] |  0
+  202.2s [udp_inject] |  0
+  203.2s [udp_inject] |  0
+  204.2s [udp_inject] |  0
+  205.2s [udp_inject] |  0
+  206.2s [udp_inject] |  0
+  207.2s [udp_inject] |  0
+  208.2s [udp_inject] |  0
+  209.2s [udp_inject] |  0
+  210.2s [udp_inject] |  0
+  211.2s [udp_inject] | ##### 32
+  212.2s [udp_inject] |  0
+  213.3s [udp_inject] |  0
+  214.3s [udp_inject] |  0
+  215.3s [udp_inject] |  0
+  216.3s [udp_inject] |  0
+  217.3s [udp_inject] |  0
+  218.3s [udp_inject] |  0
+  219.3s [udp_inject] |  0
+  220.3s [udp_inject] |  0
+  221.3s [udp_inject] |  0
+  222.3s [udp_inject] |  0
+  223.3s [udp_inject] |  0
+  224.3s [udp_inject] |  0
+  225.3s [udp_inject] |  0
+  226.3s [udp_inject] |  0
+  227.3s [udp_inject] |  0
+  228.3s [udp_inject] |  0
+  229.3s [udp_inject] |  0
+  230.3s [udp_inject] |  0
+  231.3s [udp_inject] |  0
+  232.3s [udp_inject] |  0
+  233.3s [udp_inject] |  0
+  234.3s [udp_inject] |  0
+  235.3s [udp_inject] |  0
+  236.3s [udp_inject] |  0
+  237.3s [udp_inject] |  0
+  238.3s [udp_inject] |  0
+  239.3s [udp_inject] |  0

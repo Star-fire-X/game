@@ -1,0 +1,94 @@
+server:
+  id: 5
+  name: "Mir2-Logic"
+  bind_ip: "127.0.0.1"
+  port: 48641
+  udp_port: 0
+  metrics_port: 9091
+  io_threads: 4
+  max_connections: 5000
+  tick_interval_ms: 50
+  heartbeat_timeout_ms: 30000
+  hot_event_max_drain_per_tick: 2048
+  hot_event_max_drain_ms_per_tick: 5
+  mailbox_player_max_high_pending: 100
+  mailbox_player_max_low_pending: 64
+  mailbox_high_priority_burst: 4
+  mailbox_overflow_kick_threshold: 3
+  mailbox_global_pending_hard_limit: 20000
+  mailbox_global_pending_soft_limit: -1
+  backpressure_pause_ms: 100
+  backpressure_signal_cooldown_ms: 100
+  mailbox_soft_backpressure_pause_ms: 100
+  mailbox_hard_backpressure_pause_ms: 300
+  mailbox_soft_backpressure_cooldown_ms: 100
+  mailbox_hard_backpressure_cooldown_ms: 25
+  coroutine_hung_threshold_ms: 5000
+  coroutine_hung_scan_interval_ms: 500
+  coroutine_dump_max_entries: 64
+  session_cleanup_on_gateway_disconnect: true
+  reconcile_cleanup_enabled: true
+  zombie_detection:
+    enabled: true
+    scan_interval_ms: 5000
+    idle_timeout_ms: 120000
+  legacy_fallback_enabled: true
+  legacy_fallback_allow_auth_whitelist: true
+  legacy_fallback_allow_critical_msgs: true
+  legacy_fallback_allow_normal_msgs: false
+  chat_batch_send_enabled: true
+  movement_speed_violation_severity: 10
+  movement_teleport_violation_severity: 5
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "mir2"
+  password: "your_password_here"
+  database: "mir2_game"
+  pool_size: 10
+
+log:
+  level: "info"
+  path: "/mnt/e/mir2-cpp/artifacts/pressure/gateway_logic_io4_20260223_144824/logic_logs"
+  max_size_mb: 100
+  max_files: 10
+
+services:
+  logic:
+    host: "127.0.0.1"
+    port: 48641
+    transport: "tcp"
+    uds_path: "/tmp/mir2_logic.sock"
+
+storage_engine:
+  l1_max_entries: 10000
+  l1_ttl_seconds: 300
+  l2_max_size_mb: 512
+  l2_path: "/var/lib/mir2/cache"
+  l2_ttl_seconds: 604800
+  auto_sync_interval_ms: 5000
+  batch_size: 100
+  sync_timeout_ms: 30000
+  queue_capacity: 10000
+  queue_worker_threads: 2
+  queue_retry_count: 3
+  queue_retry_delay_ms: 100
+  account_cache_ttl_seconds: 300
+  account_cache_max_entries: 10000
+  dead_letter_max_items: 10000
+  enable_strict_write_guarantee: true
+  critical_data_no_ttl: true
+  critical_key_prefixes: ["char:", "account:username:"]
+  sync_write_key_prefixes: ["char:"]
+  enable_outbox: true
+  outbox_replay_limit: 0
+  outbox_max_items: 200000
+  circuit_breaker_threshold: 5
+  circuit_breaker_timeout_ms: 60000
+  enable_metrics: true
+  enable_audit_log: true
+  audit_log_max_entries: 5000
+  enable_access_control: false
+  require_auth_for_reads: false
+  access_control_token: ""

@@ -1,0 +1,16 @@
+# Combat system configuration
+combat:
+  min_variance_percent: -10
+  max_variance_percent: 10
+  minimum_damage: 1
+  base_critical_chance: 0.05
+  critical_multiplier: 1.5
+  base_miss_chance: 0.05
+  default_melee_range: 1
+  respawn:
+    hp_percent: 1.0
+    mp_percent: 1.0
+    position:
+      x: 100
+      y: 100
+    map_id: 1

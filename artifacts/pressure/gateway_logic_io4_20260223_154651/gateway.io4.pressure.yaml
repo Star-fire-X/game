@@ -1,0 +1,101 @@
+server:
+  id: 1
+  name: "Mir2-Gateway"
+  bind_ip: "127.0.0.1"
+  port: 45153
+  udp_port: 46836
+  metrics_port: 47297
+  io_threads: 4
+  max_connections: 5000
+  tick_interval_ms: 50
+  heartbeat_timeout_ms: 30000
+  # 登录请求按客户端 IP 做令牌桶限流（capacity + 每秒 refill_rate）
+  login_ip_rate_limit_capacity: 5
+  login_ip_rate_limit_refill_rate: 1
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "mir2"
+  password: "mir2_password"
+  database: "mir2_game"
+  pool_size: 10
+
+log:
+  level: "info"
+  path: "/mnt/e/mir2-cpp/artifacts/pressure/gateway_logic_io4_20260223_154651/gateway_logs"
+  max_size_mb: 100
+  max_files: 10
+
+services:
+  logic:
+    host: "127.0.0.1"
+    port: 45141
+    transport: "tcp"
+    uds_path: "/tmp/mir2_logic.sock"
+
+# 消息路由表：msg_id -> 目标服务（双进程架构：所有消息路由到logic服务）
+# require_auth: 是否需要认证后才能转发
+message_routes:
+  # ========== 登录模块 ==========
+  - msg_id: 1001  # kLoginReq
+    service: logic
+    require_auth: false
+  - msg_id: 1003  # kLogout
+    service: logic
+    require_auth: true
+
+  # ========== 角色管理与社交模块 ==========
+  - msg_id: 1010  # kCreateRoleReq
+    service: logic
+    require_auth: true
+  - msg_id: 1012  # kSelectRoleReq
+    service: logic
+    require_auth: true
+  - msg_id: 1020  # kRoleListReq
+    service: logic
+    require_auth: true
+
+  - msg_id: 5001  # kChatReq
+    service: logic
+    require_auth: true
+  - msg_id: 5010  # kPrivateChat
+    service: logic
+    require_auth: true
+  - msg_id: 5020  # kGuildChat
+    service: logic
+    require_auth: true
+
+  # ========== 游戏与战斗模块 ==========
+  - msg_id: 2010  # kMoveReq
+    service: logic
+    require_auth: true
+  - msg_id: 2030  # kChangeMap
+    service: logic
+    require_auth: true
+  - msg_id: 2031  # kTeleport
+    service: logic
+    require_auth: true
+
+  - msg_id: 3001  # kAttackReq
+    service: logic
+    require_auth: true
+  - msg_id: 3010  # kSkillReq
+    service: logic
+    require_auth: true
+
+  - msg_id: 4010  # kUseItemReq
+    service: logic
+    require_auth: true
+  - msg_id: 4020  # kDropItemReq
+    service: logic
+    require_auth: true
+  - msg_id: 4030  # kPickupItemReq
+    service: logic
+    require_auth: true
+  - msg_id: 4040  # kEquipReq
+    service: logic
+    require_auth: true
+  - msg_id: 4041  # kUnequipReq
+    service: logic
+    require_auth: true

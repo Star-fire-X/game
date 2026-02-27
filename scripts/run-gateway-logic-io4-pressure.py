@@ -68,6 +68,7 @@ PROM_METRIC_RE = re.compile(
 )
 PROM_LABEL_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
 SAFE_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]+$")
+YAML_INT_RE = re.compile(r"^[-+]?[0-9]+$")
 
 
 @dataclass
@@ -224,6 +225,133 @@ def rewrite_yaml(template: Path, output: Path, updates: Dict[Tuple[str, ...], ob
         raise RuntimeError(f"failed to rewrite {template}: missing keys [{missing_text}]")
 
     output.write_text("".join(out_lines), encoding="utf-8")
+
+
+def strip_yaml_inline_comment(value: str) -> str:
+    out: List[str] = []
+    in_single = False
+    in_double = False
+    escaped = False
+
+    for ch in value:
+        if in_double:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            continue
+
+        if in_single:
+            out.append(ch)
+            if ch == "'":
+                in_single = False
+            continue
+
+        if ch == "#":
+            break
+        if ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        out.append(ch)
+
+    return "".join(out).strip()
+
+
+def parse_yaml_scalar_text(value: str) -> Optional[object]:
+    text = strip_yaml_inline_comment(value)
+    if not text:
+        return None
+
+    lowered = text.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if YAML_INT_RE.match(text):
+        try:
+            return int(text)
+        except ValueError:
+            pass
+
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+        quoted = text[0] == '"'
+        if quoted:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return text[1:-1]
+        return text[1:-1]
+
+    return text
+
+
+def read_yaml_scalar(path: Path, key_path: Tuple[str, ...]) -> Optional[object]:
+    stack: List[Tuple[int, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = YAML_KEY_RE.match(line)
+        if not match:
+            continue
+
+        indent = len(match.group(1))
+        key = match.group(2)
+        remainder = match.group(3)
+
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+
+        current_path = tuple([item[1] for item in stack] + [key])
+        value_part = remainder.strip()
+        is_mapping = value_part == "" or value_part.startswith("#")
+
+        if current_path == key_path and not is_mapping:
+            return parse_yaml_scalar_text(value_part)
+
+        if is_mapping:
+            stack.append((indent, key))
+    return None
+
+
+def resolve_seed_database_config(
+    logic_config: Path,
+    db_host_arg: str,
+    db_port_arg: int,
+    db_user_arg: str,
+    db_password_arg: str,
+    db_name_arg: str,
+) -> Tuple[str, int, str, str, str]:
+    cfg_host = read_yaml_scalar(logic_config, ("database", "host"))
+    cfg_port = read_yaml_scalar(logic_config, ("database", "port"))
+    cfg_user = read_yaml_scalar(logic_config, ("database", "user"))
+    cfg_password = read_yaml_scalar(logic_config, ("database", "password"))
+    cfg_name = read_yaml_scalar(logic_config, ("database", "database"))
+
+    seed_host = db_host_arg if db_host_arg else str(cfg_host or "127.0.0.1")
+
+    seed_port = db_port_arg
+    if seed_port <= 0:
+        if isinstance(cfg_port, int) and not isinstance(cfg_port, bool):
+            seed_port = cfg_port
+        elif cfg_port is not None:
+            try:
+                seed_port = int(str(cfg_port))
+            except (TypeError, ValueError):
+                seed_port = 5432
+        else:
+            seed_port = 5432
+    if seed_port <= 0:
+        seed_port = 5432
+
+    seed_user = db_user_arg if db_user_arg else str(cfg_user or "mir2")
+    seed_password = (
+        db_password_arg if db_password_arg else str(cfg_password or "mir2_password")
+    )
+    seed_name = db_name_arg if db_name_arg else str(cfg_name or "mir2_game")
+
+    return seed_host, seed_port, seed_user, seed_password, seed_name
 
 
 def wait_tcp_ready(host: str, port: int, timeout_sec: float) -> bool:
@@ -758,6 +886,8 @@ def seed_auth_accounts(
             docker_bin,
             "exec",
             "-i",
+            "-e",
+            f"PGPASSWORD={db_password}",
             docker_container,
             "psql",
             "-h",
@@ -906,18 +1036,18 @@ def business_load_worker(
                 else:
                     with stats_lock:
                         stats.login_failed += 1
-                    if login_result.code == ERR_RATE_LIMITED:
-                        stats.login_rate_limited += 1
-                    elif login_result.code == ERR_ACCOUNT_NOT_FOUND:
-                        stats.login_account_not_found += 1
-                    elif login_result.code == ERR_PASSWORD_WRONG:
-                        stats.login_password_wrong += 1
-                    elif login_result.code == ERR_OK:
-                        stats.login_code_ok_zero_account += 1
-                    elif login_result.code == 1:
-                        stats.login_code_unknown += 1
-                    else:
-                        stats.login_other_code += 1
+                        if login_result.code == ERR_RATE_LIMITED:
+                            stats.login_rate_limited += 1
+                        elif login_result.code == ERR_ACCOUNT_NOT_FOUND:
+                            stats.login_account_not_found += 1
+                        elif login_result.code == ERR_PASSWORD_WRONG:
+                            stats.login_password_wrong += 1
+                        elif login_result.code == ERR_OK:
+                            stats.login_code_ok_zero_account += 1
+                        elif login_result.code == 1:
+                            stats.login_code_unknown += 1
+                        else:
+                            stats.login_other_code += 1
                     retry_sleep_sec = max(
                         reconnect_pause_sec,
                         1.0 if login_result.code == ERR_RATE_LIMITED else 0.25,
@@ -1574,11 +1704,14 @@ def main() -> int:
 
     seed_mode_used = "skipped"
     if args.seed_auth_accounts and auth_account_count > 0:
-        seed_host = args.db_host if args.db_host else "127.0.0.1"
-        seed_port = args.db_port if args.db_port > 0 else 5432
-        seed_user = args.db_user if args.db_user else "mir2"
-        seed_password = args.db_password if args.db_password else "mir2_password"
-        seed_name = args.db_name if args.db_name else "mir2_game"
+        seed_host, seed_port, seed_user, seed_password, seed_name = resolve_seed_database_config(
+            generated_logic_cfg,
+            args.db_host,
+            args.db_port,
+            args.db_user,
+            args.db_password,
+            args.db_name,
+        )
 
         seed_mode_used = seed_auth_accounts(
             mode=args.seed_mode,

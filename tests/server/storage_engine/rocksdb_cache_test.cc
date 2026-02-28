@@ -416,6 +416,17 @@ TEST_F(RocksDBCacheP1Test, DeleteByPrefixRemovesOnlyMatchingTierKeys) {
           .has_value());
 }
 
+TEST_F(RocksDBCacheP1Test, UInt64PropertyReadsAggregatedAcrossColumnFamilies) {
+  ASSERT_TRUE(cache_->Set("metrics:ttl:1", MakeVersionedData(10, 1),
+                          RocksDBCache::DataTier::kTtl));
+  ASSERT_TRUE(cache_->Set("metrics:persistent:1", MakeVersionedData(11, 2),
+                          RocksDBCache::DataTier::kPersistent));
+
+  uint64_t num_keys = 0;
+  ASSERT_TRUE(cache_->GetUInt64Property("rocksdb.estimate-num-keys", &num_keys));
+  EXPECT_GT(num_keys, 0U);
+}
+
 TEST_F(RocksDBCacheP1Test, LegacyDefaultApisWriteToTtlTier) {
   const VersionedData data = MakeVersionedData(33, 9);
   ASSERT_TRUE(cache_->Set("legacy:ttl", data));

@@ -29,14 +29,18 @@ bool RocksDBCache::Initialize() {
     auto logger = spdlog::get("mir2");
 
     try {
+        constexpr size_t kDefaultLegacyWriteBufferSize = 64 * 1024 * 1024;
         const size_t data_write_buffer_size =
             config_.data_write_buffer_size > 0
                 ? config_.data_write_buffer_size
-                : config_.write_buffer_size;
+                : (config_.write_buffer_size > 0
+                       ? config_.write_buffer_size
+                       : kDefaultLegacyWriteBufferSize);
         const size_t meta_write_buffer_size =
             config_.meta_write_buffer_size > 0
                 ? config_.meta_write_buffer_size
-                : std::max<size_t>(4 * 1024 * 1024, config_.write_buffer_size / 8);
+                : std::max<size_t>(4 * 1024 * 1024,
+                                   data_write_buffer_size / 8);
         const int data_max_write_buffer_number =
             std::max(2, config_.data_max_write_buffer_number);
         const int meta_max_write_buffer_number =
@@ -1349,14 +1353,21 @@ bool RocksDBCache::GetUInt64Property(const std::string& property,
         return false;
     }
 
+    const rocksdb::Slice property_slice(property);
     uint64_t int_value = 0;
-    if (db_->GetIntProperty(property, &int_value)) {
+    // For multi-CF deployments, aggregated int properties better reflect
+    // real load than default-CF-only properties.
+    if (db_->GetAggregatedIntProperty(property_slice, &int_value)) {
+        *out = int_value;
+        return true;
+    }
+    if (db_->GetIntProperty(property_slice, &int_value)) {
         *out = int_value;
         return true;
     }
 
     std::string value;
-    if (!db_->GetProperty(property, &value)) {
+    if (!db_->GetProperty(property_slice, &value)) {
         return false;
     }
 

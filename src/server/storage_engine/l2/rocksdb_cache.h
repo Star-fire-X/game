@@ -24,8 +24,10 @@ public:
         std::string db_path = "./data/rocksdb";
         // Legacy field kept for compatibility with old callers.
         size_t write_buffer_size = 64 * 1024 * 1024;
-        size_t data_write_buffer_size = 64 * 1024 * 1024;
-        size_t meta_write_buffer_size = 8 * 1024 * 1024;
+        // 0 means "unset", fallback to legacy write_buffer_size.
+        size_t data_write_buffer_size = 0;
+        // 0 means "unset", fallback to max(4MB, data_write_buffer_size / 8).
+        size_t meta_write_buffer_size = 0;
         int data_max_write_buffer_number = 4;
         int meta_max_write_buffer_number = 2;
         size_t block_cache_size = 256 * 1024 * 1024;

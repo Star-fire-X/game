@@ -252,10 +252,54 @@ bool ConfigManager::Load(const std::string& config_path) {
         storage_engine, "l1_ttl_seconds", storage_engine_config_.l1_ttl_seconds);
     storage_engine_config_.l2_max_size_mb = ReadOrDefault(
         storage_engine, "l2_max_size_mb", storage_engine_config_.l2_max_size_mb);
+    storage_engine_config_.l2_block_cache_mb = ReadOrDefault(
+        storage_engine, "l2_block_cache_mb",
+        storage_engine_config_.l2_block_cache_mb);
+    if (!(storage_engine && storage_engine["l2_block_cache_mb"])) {
+      // Backward compatibility: keep the legacy behavior when the new key
+      // is omitted.
+      storage_engine_config_.l2_block_cache_mb =
+          storage_engine_config_.l2_max_size_mb;
+    }
+    storage_engine_config_.l2_data_write_buffer_mb = ReadOrDefault(
+        storage_engine, "l2_data_write_buffer_mb",
+        storage_engine_config_.l2_data_write_buffer_mb);
+    storage_engine_config_.l2_meta_write_buffer_mb = ReadOrDefault(
+        storage_engine, "l2_meta_write_buffer_mb",
+        storage_engine_config_.l2_meta_write_buffer_mb);
+    storage_engine_config_.l2_data_max_write_buffer_number = ReadOrDefault(
+        storage_engine, "l2_data_max_write_buffer_number",
+        storage_engine_config_.l2_data_max_write_buffer_number);
+    storage_engine_config_.l2_meta_max_write_buffer_number = ReadOrDefault(
+        storage_engine, "l2_meta_max_write_buffer_number",
+        storage_engine_config_.l2_meta_max_write_buffer_number);
+    storage_engine_config_.l2_max_background_jobs = ReadOrDefault(
+        storage_engine, "l2_max_background_jobs",
+        storage_engine_config_.l2_max_background_jobs);
+    storage_engine_config_.l2_max_background_flushes = ReadOrDefault(
+        storage_engine, "l2_max_background_flushes",
+        storage_engine_config_.l2_max_background_flushes);
+    storage_engine_config_.l2_block_size = ReadOrDefault(
+        storage_engine, "l2_block_size", storage_engine_config_.l2_block_size);
+    storage_engine_config_.l2_bloom_filter_bits_per_key = ReadOrDefault(
+        storage_engine, "l2_bloom_filter_bits_per_key",
+        storage_engine_config_.l2_bloom_filter_bits_per_key);
     storage_engine_config_.l2_path = ReadOrDefault(
         storage_engine, "l2_path", storage_engine_config_.l2_path);
     storage_engine_config_.l2_ttl_seconds = ReadOrDefault(
         storage_engine, "l2_ttl_seconds", storage_engine_config_.l2_ttl_seconds);
+    storage_engine_config_.l2_ttl_periodic_compaction_seconds = ReadOrDefault(
+        storage_engine, "l2_ttl_periodic_compaction_seconds",
+        storage_engine_config_.l2_ttl_periodic_compaction_seconds);
+    storage_engine_config_.l2_strict_ttl_reads = ReadOrDefault(
+        storage_engine, "l2_strict_ttl_reads",
+        storage_engine_config_.l2_strict_ttl_reads);
+    storage_engine_config_.l2_scan_fill_cache = ReadOrDefault(
+        storage_engine, "l2_scan_fill_cache",
+        storage_engine_config_.l2_scan_fill_cache);
+    storage_engine_config_.l2_iter_pin_data = ReadOrDefault(
+        storage_engine, "l2_iter_pin_data",
+        storage_engine_config_.l2_iter_pin_data);
     storage_engine_config_.auto_sync_interval_ms = ReadOrDefault(
         storage_engine, "auto_sync_interval_ms",
         storage_engine_config_.auto_sync_interval_ms);

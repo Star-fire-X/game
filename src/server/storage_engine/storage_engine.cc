@@ -116,9 +116,35 @@ public:
         l1_cache_ = std::make_unique<l1::MemoryCache>(l1_config);
         l2::RocksDBCache::Config l2_config;
         l2_config.db_path = config_.l2_path;
+        const uint32_t block_cache_mb =
+            config_.l2_block_cache_mb > 0
+                ? config_.l2_block_cache_mb
+                : config_.l2_max_size_mb;
         l2_config.block_cache_size =
-            static_cast<size_t>(config_.l2_max_size_mb) * 1024 * 1024;
+            static_cast<size_t>(block_cache_mb) * 1024 * 1024;
+        l2_config.data_write_buffer_size =
+            static_cast<size_t>(std::max(config_.l2_data_write_buffer_mb, 1u)) *
+            1024 * 1024;
+        l2_config.meta_write_buffer_size =
+            static_cast<size_t>(std::max(config_.l2_meta_write_buffer_mb, 1u)) *
+            1024 * 1024;
+        l2_config.data_max_write_buffer_number =
+            static_cast<int>(std::max(config_.l2_data_max_write_buffer_number, 2u));
+        l2_config.meta_max_write_buffer_number =
+            static_cast<int>(std::max(config_.l2_meta_max_write_buffer_number, 2u));
+        l2_config.max_background_jobs =
+            static_cast<int>(std::max(config_.l2_max_background_jobs, 1u));
+        l2_config.max_background_flushes =
+            static_cast<int>(std::max(config_.l2_max_background_flushes, 1u));
+        l2_config.block_size = std::max(config_.l2_block_size, 1024u);
+        l2_config.bloom_filter_bits_per_key =
+            std::max(config_.l2_bloom_filter_bits_per_key, 0.0);
         l2_config.ttl_seconds = static_cast<int32_t>(config_.l2_ttl_seconds);
+        l2_config.ttl_periodic_compaction_seconds =
+            config_.l2_ttl_periodic_compaction_seconds;
+        l2_config.strict_ttl_reads = config_.l2_strict_ttl_reads;
+        l2_config.scan_fill_cache = config_.l2_scan_fill_cache;
+        l2_config.iter_pin_data = config_.l2_iter_pin_data;
         l2_cache_ = std::make_unique<l2::RocksDBCache>(l2_config);
         if (!l2_cache_->Initialize()) {
             if (logger) {
@@ -777,23 +803,10 @@ public:
         }
 
         if (l2_cache_) {
-            std::vector<std::string> keys;
-            auto collect = [&prefix, &keys](const std::string& key,
-                                            const VersionedData&) -> bool {
-                if (std::string_view(key).starts_with(prefix)) {
-                    keys.push_back(key);
-                }
-                return true;
-            };
-            l2_cache_->ForEach(collect, l2::RocksDBCache::DataTier::kTtl);
-            l2_cache_->ForEach(collect, l2::RocksDBCache::DataTier::kPersistent);
-            std::sort(keys.begin(), keys.end());
-            keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-            for (const auto& key : keys) {
-                if (l2_cache_->Delete(key, l2::RocksDBCache::DataTier::kTtl)) {
-                    ++invalidated;
-                }
-            }
+            invalidated += l2_cache_->DeleteByPrefix(
+                prefix, l2::RocksDBCache::DataTier::kTtl);
+            invalidated += l2_cache_->DeleteByPrefix(
+                prefix, l2::RocksDBCache::DataTier::kPersistent);
         }
         return invalidated;
     }
@@ -940,6 +953,30 @@ public:
 
         size_t l1_size = l1_cache_ ? l1_cache_->GetSize() : 0;
         size_t l2_size = l2_cache_ ? l2_cache_->GetApproximateSizeBytes() : 0;
+        uint64_t l2_pending_compaction_bytes = 0;
+        uint64_t l2_running_compactions = 0;
+        uint64_t l2_running_flushes = 0;
+        uint64_t l2_block_cache_usage = 0;
+        uint64_t l2_immutable_memtables = 0;
+        bool l2_write_stopped = false;
+        if (l2_cache_) {
+            (void)l2_cache_->GetUInt64Property(
+                "rocksdb.estimate-pending-compaction-bytes",
+                &l2_pending_compaction_bytes);
+            (void)l2_cache_->GetUInt64Property("rocksdb.num-running-compactions",
+                                               &l2_running_compactions);
+            (void)l2_cache_->GetUInt64Property("rocksdb.num-running-flushes",
+                                               &l2_running_flushes);
+            (void)l2_cache_->GetUInt64Property("rocksdb.block-cache-usage",
+                                               &l2_block_cache_usage);
+            (void)l2_cache_->GetUInt64Property("rocksdb.num-immutable-mem-table",
+                                               &l2_immutable_memtables);
+            uint64_t write_stopped = 0;
+            if (l2_cache_->GetUInt64Property("rocksdb.is-write-stopped",
+                                             &write_stopped)) {
+                l2_write_stopped = write_stopped != 0;
+            }
+        }
 
         int64_t pending_syncs = async_queue_ ? async_queue_->PendingCount() : 0;
         uint32_t breaker_failures = 0;
@@ -1005,6 +1042,12 @@ public:
             .normal_priority_queue_depth = normal_priority_queue_depth,
             .outbox_depth = outbox_depth,
             .dead_letter_depth = dead_letter_depth,
+            .l2_pending_compaction_bytes = l2_pending_compaction_bytes,
+            .l2_running_compactions = l2_running_compactions,
+            .l2_running_flushes = l2_running_flushes,
+            .l2_block_cache_usage = l2_block_cache_usage,
+            .l2_immutable_memtables = l2_immutable_memtables,
+            .l2_write_stopped = l2_write_stopped,
             .total_updates = stats_.total_updates.load(std::memory_order_relaxed),
             .successful_updates = stats_.successful_updates.load(std::memory_order_relaxed),
             .update_conflicts = stats_.update_conflicts.load(std::memory_order_relaxed),

@@ -22,10 +22,22 @@ class RocksDBCache {
 public:
     struct Config {
         std::string db_path = "./data/rocksdb";
+        // Legacy field kept for compatibility with old callers.
         size_t write_buffer_size = 64 * 1024 * 1024;
+        size_t data_write_buffer_size = 64 * 1024 * 1024;
+        size_t meta_write_buffer_size = 8 * 1024 * 1024;
+        int data_max_write_buffer_number = 4;
+        int meta_max_write_buffer_number = 2;
         size_t block_cache_size = 256 * 1024 * 1024;
+        uint32_t block_size = 4096;
         int32_t ttl_seconds = 3600;
         double bloom_filter_bits_per_key = 10.0;
+        int max_background_jobs = 8;
+        int max_background_flushes = 2;
+        uint32_t ttl_periodic_compaction_seconds = 21600;
+        bool strict_ttl_reads = true;
+        bool scan_fill_cache = false;
+        bool iter_pin_data = true;
         uint64_t max_version_persist_step = 64;
     };
 
@@ -65,6 +77,9 @@ public:
     using IteratorCallback = std::function<bool(const std::string& key, const VersionedData& data)>;
     size_t ForEach(IteratorCallback cb);
     size_t ForEach(IteratorCallback cb, DataTier tier);
+    size_t DeleteByPrefix(const std::string& prefix,
+                          DataTier tier,
+                          size_t batch_size = 1024);
 
     bool UpdateMaxVersion(uint64_t version);
 
@@ -75,6 +90,7 @@ public:
     size_t GetApproximateSizeBytes() const;
 
     std::string GetDBStats();
+    bool GetUInt64Property(const std::string& property, uint64_t* out) const;
 
     struct OutboxEntry {
         uint64_t outbox_id = 0;
@@ -167,6 +183,9 @@ private:
     std::string EncodeUint64ToString(uint64_t value) const;
     bool DecodeUint64FromSlice(const rocksdb::Slice& value,
                                uint64_t* out) const;
+    rocksdb::ReadOptions BuildPointReadOptions() const;
+    rocksdb::ReadOptions BuildScanReadOptions() const;
+    bool IsStrictTtlExpired(const VersionedData& data) const;
 
     static std::string GetMaxVersionKey() {
         return "__max_version__";

@@ -56,8 +56,21 @@ public:
 
         // L2缓存配置
         uint32_t l2_max_size_mb = 512;
+        uint32_t l2_block_cache_mb = 512;
+        uint32_t l2_data_write_buffer_mb = 64;
+        uint32_t l2_meta_write_buffer_mb = 8;
+        uint32_t l2_data_max_write_buffer_number = 4;
+        uint32_t l2_meta_max_write_buffer_number = 2;
+        uint32_t l2_max_background_jobs = 8;
+        uint32_t l2_max_background_flushes = 2;
+        uint32_t l2_block_size = 4096;
+        double l2_bloom_filter_bits_per_key = 10.0;
         std::string l2_path = "/var/lib/mir2/cache";
         uint32_t l2_ttl_seconds = 604800;  // 7 days — WAL entries must survive restarts
+        uint32_t l2_ttl_periodic_compaction_seconds = 21600;
+        bool l2_strict_ttl_reads = true;
+        bool l2_scan_fill_cache = false;
+        bool l2_iter_pin_data = true;
 
         // 持久化配置
         uint32_t auto_sync_interval_ms = 5000;
@@ -394,6 +407,12 @@ public:
         size_t normal_priority_queue_depth;
         size_t outbox_depth;
         size_t dead_letter_depth;
+        uint64_t l2_pending_compaction_bytes;
+        uint64_t l2_running_compactions;
+        uint64_t l2_running_flushes;
+        uint64_t l2_block_cache_usage;
+        uint64_t l2_immutable_memtables;
+        bool l2_write_stopped;
 
         // Update操作统计
         uint64_t total_updates;

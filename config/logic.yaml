@@ -70,8 +70,21 @@ storage_engine:
   l1_max_entries: 10000
   l1_ttl_seconds: 300
   l2_max_size_mb: 512
+  l2_block_cache_mb: 512
+  l2_data_write_buffer_mb: 64
+  l2_meta_write_buffer_mb: 8
+  l2_data_max_write_buffer_number: 4
+  l2_meta_max_write_buffer_number: 2
+  l2_max_background_jobs: 8
+  l2_max_background_flushes: 2
+  l2_block_size: 4096
+  l2_bloom_filter_bits_per_key: 10.0
   l2_path: "/var/lib/mir2/cache"
   l2_ttl_seconds: 604800
+  l2_ttl_periodic_compaction_seconds: 21600
+  l2_strict_ttl_reads: true
+  l2_scan_fill_cache: false
+  l2_iter_pin_data: true
   auto_sync_interval_ms: 5000
   batch_size: 100
   sync_timeout_ms: 30000

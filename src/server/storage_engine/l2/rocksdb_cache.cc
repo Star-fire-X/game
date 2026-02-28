@@ -1,6 +1,7 @@
 #include <storage_engine/l2/rocksdb_cache.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cstdio>
 #include <limits>
@@ -28,6 +29,19 @@ bool RocksDBCache::Initialize() {
     auto logger = spdlog::get("mir2");
 
     try {
+        const size_t data_write_buffer_size =
+            config_.data_write_buffer_size > 0
+                ? config_.data_write_buffer_size
+                : config_.write_buffer_size;
+        const size_t meta_write_buffer_size =
+            config_.meta_write_buffer_size > 0
+                ? config_.meta_write_buffer_size
+                : std::max<size_t>(4 * 1024 * 1024, config_.write_buffer_size / 8);
+        const int data_max_write_buffer_number =
+            std::max(2, config_.data_max_write_buffer_number);
+        const int meta_max_write_buffer_number =
+            std::max(2, config_.meta_max_write_buffer_number);
+
         rocksdb::Options options;
         block_cache_ =
             std::shared_ptr<rocksdb::Cache>(rocksdb::NewLRUCache(
@@ -41,31 +55,44 @@ bool RocksDBCache::Initialize() {
         table_options.block_cache = block_cache_;
         table_options.cache_index_and_filter_blocks = true;
         table_options.pin_l0_filter_and_index_blocks_in_cache = true;
-        table_options.block_size = 4096;
+        table_options.block_size = std::max<uint32_t>(1024, config_.block_size);
 
         options.table_factory.reset(
             rocksdb::NewBlockBasedTableFactory(table_options));
 
         options.compression = rocksdb::kLZ4Compression;
-        options.write_buffer_size = config_.write_buffer_size;
-        options.max_write_buffer_number = 2;
-
-        options.IncreaseParallelism(std::thread::hardware_concurrency());
-        options.OptimizeLevelStyleCompaction(64 * 1024 * 1024);
+        options.IncreaseParallelism(
+            std::max(1u, std::thread::hardware_concurrency()));
+        options.OptimizeLevelStyleCompaction(data_write_buffer_size);
 
         rocksdb::DBOptions db_options(options);
         db_options.create_if_missing = true;
         db_options.create_missing_column_families = true;
-        rocksdb::ColumnFamilyOptions cf_options(options);
+        db_options.max_background_jobs = std::max(1, config_.max_background_jobs);
+        db_options.max_background_flushes =
+            std::max(1, config_.max_background_flushes);
+
+        rocksdb::ColumnFamilyOptions data_cf_options(options);
+        data_cf_options.write_buffer_size = data_write_buffer_size;
+        data_cf_options.max_write_buffer_number = data_max_write_buffer_number;
+
+        rocksdb::ColumnFamilyOptions ttl_cf_options(data_cf_options);
+        ttl_cf_options.periodic_compaction_seconds =
+            static_cast<uint64_t>(config_.ttl_periodic_compaction_seconds);
+
+        rocksdb::ColumnFamilyOptions meta_cf_options(options);
+        meta_cf_options.write_buffer_size = meta_write_buffer_size;
+        meta_cf_options.max_write_buffer_number = meta_max_write_buffer_number;
 
         std::vector<rocksdb::ColumnFamilyDescriptor> cf_descriptors;
         cf_descriptors.reserve(kColumnFamilyCount);
-        cf_descriptors.emplace_back(rocksdb::kDefaultColumnFamilyName, cf_options);
-        cf_descriptors.emplace_back(GetDataPersistentCFName(), cf_options);
-        cf_descriptors.emplace_back(GetDataTtlCFName(), cf_options);
-        cf_descriptors.emplace_back(GetOutboxCFName(), cf_options);
-        cf_descriptors.emplace_back(GetDeadLetterCFName(), cf_options);
-        cf_descriptors.emplace_back(GetMetaCFName(), cf_options);
+        cf_descriptors.emplace_back(rocksdb::kDefaultColumnFamilyName,
+                                    meta_cf_options);
+        cf_descriptors.emplace_back(GetDataPersistentCFName(), data_cf_options);
+        cf_descriptors.emplace_back(GetDataTtlCFName(), ttl_cf_options);
+        cf_descriptors.emplace_back(GetOutboxCFName(), meta_cf_options);
+        cf_descriptors.emplace_back(GetDeadLetterCFName(), meta_cf_options);
+        cf_descriptors.emplace_back(GetMetaCFName(), meta_cf_options);
 
         std::vector<int32_t> ttls{
             config_.ttl_seconds,  // default CF (current active data path)
@@ -136,10 +163,14 @@ bool RocksDBCache::Initialize() {
         if (logger) {
             logger->info(
                 "RocksDB initialized: path={}, ttl={}s, cf_count={}, "
-                "block_cache={}MB",
+                "block_cache={}MB, strict_ttl_reads={}, scan_fill_cache={}, "
+                "iter_pin_data={}",
                 config_.db_path, config_.ttl_seconds,
                 cf_handles_.size(),
-                config_.block_cache_size / (1024 * 1024));
+                config_.block_cache_size / (1024 * 1024),
+                config_.strict_ttl_reads,
+                config_.scan_fill_cache,
+                config_.iter_pin_data);
         }
 
         std::string max_version_str;
@@ -261,7 +292,7 @@ bool RocksDBCache::LoadOutboxNextId() {
     } else if (status.IsNotFound()) {
         uint64_t max_seen_id = 0;
         std::unique_ptr<rocksdb::Iterator> it(
-            db_->NewIterator(rocksdb::ReadOptions(), outbox_cf_));
+            db_->NewIterator(BuildScanReadOptions(), outbox_cf_));
         for (it->SeekToFirst(); it->Valid(); it->Next()) {
             uint64_t outbox_id = 0;
             if (ParseOutboxStorageKey(it->key(), &outbox_id) &&
@@ -302,7 +333,7 @@ bool RocksDBCache::LoadDeadLetterNextId() {
     } else if (status.IsNotFound()) {
         uint64_t max_seen_id = 0;
         std::unique_ptr<rocksdb::Iterator> it(
-            db_->NewIterator(rocksdb::ReadOptions(), dead_letter_cf_));
+            db_->NewIterator(BuildScanReadOptions(), dead_letter_cf_));
         for (it->SeekToFirst(); it->Valid(); it->Next()) {
             uint64_t dead_letter_id = 0;
             if (ParseDeadLetterStorageKey(it->key(), &dead_letter_id) &&
@@ -361,7 +392,7 @@ std::optional<VersionedData> RocksDBCache::GetFromColumnFamily(
     }
 
     rocksdb::PinnableSlice pinnable_val;
-    rocksdb::Status status = db_->Get(rocksdb::ReadOptions(), cf, key,
+    rocksdb::Status status = db_->Get(BuildPointReadOptions(), cf, key,
                                       &pinnable_val);
     if (!status.ok()) {
         if (!status.IsNotFound()) {
@@ -450,6 +481,35 @@ bool RocksDBCache::DecodeUint64FromSlice(const rocksdb::Slice& value,
     }
     std::memcpy(out, value.data(), sizeof(uint64_t));
     return true;
+}
+
+rocksdb::ReadOptions RocksDBCache::BuildPointReadOptions() const {
+    rocksdb::ReadOptions opts;
+    return opts;
+}
+
+rocksdb::ReadOptions RocksDBCache::BuildScanReadOptions() const {
+    rocksdb::ReadOptions opts;
+    opts.fill_cache = config_.scan_fill_cache;
+    opts.pin_data = config_.iter_pin_data;
+    return opts;
+}
+
+bool RocksDBCache::IsStrictTtlExpired(const VersionedData& data) const {
+    if (!config_.strict_ttl_reads || config_.ttl_seconds <= 0 ||
+        data.timestamp_ms == 0) {
+        return false;
+    }
+
+    const uint64_t now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    const uint64_t ttl_ms = static_cast<uint64_t>(config_.ttl_seconds) * 1000ULL;
+    if (now_ms < data.timestamp_ms) {
+        return false;
+    }
+    return (now_ms - data.timestamp_ms) >= ttl_ms;
 }
 
 std::string RocksDBCache::MakeOutboxStorageKey(uint64_t outbox_id) const {
@@ -782,7 +842,7 @@ size_t RocksDBCache::ReplayOutbox(
 
     size_t replayed = 0;
     std::unique_ptr<rocksdb::Iterator> it(
-        db_->NewIterator(rocksdb::ReadOptions(), outbox_cf_));
+        db_->NewIterator(BuildScanReadOptions(), outbox_cf_));
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
         if (limit > 0 && replayed >= limit) {
             break;
@@ -811,7 +871,7 @@ size_t RocksDBCache::OutboxDepth() const {
 
     size_t depth = 0;
     std::unique_ptr<rocksdb::Iterator> it(
-        db_->NewIterator(rocksdb::ReadOptions(), outbox_cf_));
+        db_->NewIterator(BuildScanReadOptions(), outbox_cf_));
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
         ++depth;
     }
@@ -887,7 +947,7 @@ size_t RocksDBCache::ReplayDeadLetter(
 
     size_t replayed = 0;
     std::unique_ptr<rocksdb::Iterator> it(
-        db_->NewIterator(rocksdb::ReadOptions(), dead_letter_cf_));
+        db_->NewIterator(BuildScanReadOptions(), dead_letter_cf_));
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
         if (limit > 0 && replayed >= limit) {
             break;
@@ -916,7 +976,7 @@ size_t RocksDBCache::DeadLetterDepth() const {
 
     size_t depth = 0;
     std::unique_ptr<rocksdb::Iterator> it(
-        db_->NewIterator(rocksdb::ReadOptions(), dead_letter_cf_));
+        db_->NewIterator(BuildScanReadOptions(), dead_letter_cf_));
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
         ++depth;
     }
@@ -936,10 +996,18 @@ std::optional<VersionedData> RocksDBCache::Get(const std::string& key,
     try {
         auto from_tier = GetFromColumnFamily(key, ResolveDataColumnFamily(tier));
         if (from_tier) {
+            if (tier == DataTier::kTtl && IsStrictTtlExpired(*from_tier)) {
+                return std::nullopt;
+            }
             return from_tier;
         }
         if (default_cf_ != nullptr) {
-            return GetFromColumnFamily(key, default_cf_);
+            auto from_default = GetFromColumnFamily(key, default_cf_);
+            if (from_default && tier == DataTier::kTtl &&
+                IsStrictTtlExpired(*from_default)) {
+                return std::nullopt;
+            }
+            return from_default;
         }
         return std::nullopt;
     } catch (const std::exception& e) {
@@ -1065,7 +1133,7 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
     size_t count = 0;
     try {
         std::unique_ptr<rocksdb::Iterator> it(
-            db_->NewIterator(rocksdb::ReadOptions(), target_cf));
+            db_->NewIterator(BuildScanReadOptions(), target_cf));
 
         for (it->SeekToFirst(); it->Valid(); it->Next()) {
             std::string key = it->key().ToString();
@@ -1077,6 +1145,9 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
 
             VersionedData data;
             if (!DeserializeVersionedData(it->value(), data)) {
+                continue;
+            }
+            if (tier == DataTier::kTtl && IsStrictTtlExpired(data)) {
                 continue;
             }
 
@@ -1093,6 +1164,74 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
     }
 
     return count;
+}
+
+size_t RocksDBCache::DeleteByPrefix(const std::string& prefix,
+                                    DataTier tier,
+                                    size_t batch_size) {
+    if (!db_ || prefix.empty()) {
+        return 0;
+    }
+
+    auto* target_cf = ResolveDataColumnFamily(tier);
+    if (target_cf == nullptr) {
+        return 0;
+    }
+
+    const size_t effective_batch_size = std::max<size_t>(1, batch_size);
+    const rocksdb::Slice prefix_slice(prefix);
+    size_t deleted = 0;
+    size_t batch_items = 0;
+    rocksdb::WriteBatch write_batch;
+    const auto scan_options = BuildScanReadOptions();
+
+    auto flush_batch = [&]() -> bool {
+        if (batch_items == 0) {
+            return true;
+        }
+        rocksdb::Status status = db_->Write(rocksdb::WriteOptions(), &write_batch);
+        if (!status.ok()) {
+            auto logger = spdlog::get("mir2");
+            if (logger) {
+                logger->error("DeleteByPrefix flush failed for prefix {}: {}",
+                              prefix, status.ToString());
+            }
+            return false;
+        }
+        batch_items = 0;
+        write_batch.Clear();
+        return true;
+    };
+
+    std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(scan_options, target_cf));
+    for (it->Seek(prefix_slice); it->Valid(); it->Next()) {
+        const rocksdb::Slice key_slice = it->key();
+        if (key_slice.size() < prefix_slice.size() ||
+            std::memcmp(key_slice.data(), prefix_slice.data(),
+                        prefix_slice.size()) != 0) {
+            break;
+        }
+
+        std::string key = key_slice.ToString();
+        write_batch.Delete(target_cf, key);
+        if (auto* peer_cf = ResolvePeerDataColumnFamily(tier); peer_cf != nullptr) {
+            write_batch.Delete(peer_cf, key);
+        }
+        if (default_cf_ != nullptr) {
+            write_batch.Delete(default_cf_, key);
+        }
+        ++deleted;
+        ++batch_items;
+
+        if (batch_items >= effective_batch_size && !flush_batch()) {
+            break;
+        }
+    }
+
+    if (!flush_batch()) {
+        return deleted - batch_items;
+    }
+    return deleted;
 }
 
 bool RocksDBCache::Delete(const std::string& key) {
@@ -1187,25 +1326,11 @@ uint64_t RocksDBCache::GetMaxVersion() const {
 }
 
 size_t RocksDBCache::GetApproximateSizeBytes() const {
-    if (!db_) {
+    uint64_t live_data_size = 0;
+    if (!GetUInt64Property("rocksdb.estimate-live-data-size", &live_data_size)) {
         return 0;
     }
-
-    uint64_t live_data_size = 0;
-    if (db_->GetIntProperty("rocksdb.estimate-live-data-size",
-                            &live_data_size)) {
-        return static_cast<size_t>(live_data_size);
-    }
-
-    std::string value;
-    if (db_->GetProperty("rocksdb.estimate-live-data-size", &value)) {
-        try {
-            return static_cast<size_t>(std::stoull(value));
-        } catch (const std::exception&) {
-            return 0;
-        }
-    }
-    return 0;
+    return static_cast<size_t>(live_data_size);
 }
 
 std::string RocksDBCache::GetDBStats() {
@@ -1216,6 +1341,31 @@ std::string RocksDBCache::GetDBStats() {
     std::string stats;
     db_->GetProperty("rocksdb.stats", &stats);
     return stats;
+}
+
+bool RocksDBCache::GetUInt64Property(const std::string& property,
+                                     uint64_t* out) const {
+    if (!db_ || out == nullptr) {
+        return false;
+    }
+
+    uint64_t int_value = 0;
+    if (db_->GetIntProperty(property, &int_value)) {
+        *out = int_value;
+        return true;
+    }
+
+    std::string value;
+    if (!db_->GetProperty(property, &value)) {
+        return false;
+    }
+
+    try {
+        *out = static_cast<uint64_t>(std::stoull(value));
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 std::vector<uint8_t> RocksDBCache::SerializeVersionedData(

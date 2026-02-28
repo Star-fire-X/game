@@ -33,7 +33,21 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
       << "storage_engine:\n"
       << "  l1_max_entries: 2048\n"
       << "  l1_ttl_seconds: 30\n"
+      << "  l2_max_size_mb: 256\n"
+      << "  l2_block_cache_mb: 192\n"
+      << "  l2_data_write_buffer_mb: 48\n"
+      << "  l2_meta_write_buffer_mb: 12\n"
+      << "  l2_data_max_write_buffer_number: 6\n"
+      << "  l2_meta_max_write_buffer_number: 3\n"
+      << "  l2_max_background_jobs: 10\n"
+      << "  l2_max_background_flushes: 4\n"
+      << "  l2_block_size: 8192\n"
+      << "  l2_bloom_filter_bits_per_key: 12.5\n"
       << "  l2_ttl_seconds: 120\n"
+      << "  l2_ttl_periodic_compaction_seconds: 3600\n"
+      << "  l2_strict_ttl_reads: false\n"
+      << "  l2_scan_fill_cache: true\n"
+      << "  l2_iter_pin_data: false\n"
       << "  queue_capacity: 4096\n"
       << "  queue_worker_threads: 3\n"
       << "  queue_retry_count: 7\n"
@@ -54,7 +68,21 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
   const auto& cfg = ConfigManager::Instance().GetStorageEngineConfig();
   EXPECT_EQ(cfg.l1_max_entries, 2048u);
   EXPECT_EQ(cfg.l1_ttl_seconds, 30u);
+  EXPECT_EQ(cfg.l2_max_size_mb, 256u);
+  EXPECT_EQ(cfg.l2_block_cache_mb, 192u);
+  EXPECT_EQ(cfg.l2_data_write_buffer_mb, 48u);
+  EXPECT_EQ(cfg.l2_meta_write_buffer_mb, 12u);
+  EXPECT_EQ(cfg.l2_data_max_write_buffer_number, 6u);
+  EXPECT_EQ(cfg.l2_meta_max_write_buffer_number, 3u);
+  EXPECT_EQ(cfg.l2_max_background_jobs, 10u);
+  EXPECT_EQ(cfg.l2_max_background_flushes, 4u);
+  EXPECT_EQ(cfg.l2_block_size, 8192u);
+  EXPECT_DOUBLE_EQ(cfg.l2_bloom_filter_bits_per_key, 12.5);
   EXPECT_EQ(cfg.l2_ttl_seconds, 120u);
+  EXPECT_EQ(cfg.l2_ttl_periodic_compaction_seconds, 3600u);
+  EXPECT_FALSE(cfg.l2_strict_ttl_reads);
+  EXPECT_TRUE(cfg.l2_scan_fill_cache);
+  EXPECT_FALSE(cfg.l2_iter_pin_data);
   EXPECT_EQ(cfg.queue_capacity, 4096u);
   EXPECT_EQ(cfg.queue_worker_threads, 3u);
   EXPECT_EQ(cfg.queue_retry_count, 7u);
@@ -71,6 +99,39 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
   EXPECT_EQ(cfg.critical_key_prefixes[2], "trade:");
   ASSERT_EQ(cfg.sync_write_key_prefixes.size(), 2u);
   EXPECT_EQ(cfg.sync_write_key_prefixes[1], "trade:");
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(ConfigManagerStorageEngineTest, UsesLegacyL2MaxSizeAsBlockCacheFallback) {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("mir2_config_storage_engine_fallback_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+       ".yaml");
+
+  std::ofstream out(path);
+  ASSERT_TRUE(out.is_open());
+  out << "server:\n"
+      << "  id: 1\n"
+      << "  name: \"test\"\n"
+      << "database:\n"
+      << "  host: \"127.0.0.1\"\n"
+      << "log:\n"
+      << "  level: \"info\"\n"
+      << "services:\n"
+      << "  logic:\n"
+      << "    host: \"127.0.0.1\"\n"
+      << "    port: 8002\n"
+      << "storage_engine:\n"
+      << "  l2_max_size_mb: 321\n";
+  out.close();
+
+  ASSERT_TRUE(ConfigManager::Instance().Load(path.string()));
+  const auto& cfg = ConfigManager::Instance().GetStorageEngineConfig();
+  EXPECT_EQ(cfg.l2_max_size_mb, 321u);
+  EXPECT_EQ(cfg.l2_block_cache_mb, 321u);
 
   std::error_code ec;
   std::filesystem::remove(path, ec);

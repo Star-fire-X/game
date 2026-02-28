@@ -347,6 +347,75 @@ TEST_F(RocksDBCacheP1Test, DataTierIsolationRoutesDataToExpectedColumnFamily) {
   EXPECT_EQ(ttl_keys[0], "tier:ttl");
 }
 
+TEST_F(RocksDBCacheP1Test, StrictTtlReadsTreatExpiredTtlEntryAsMiss) {
+  cache_.reset();
+  config_.ttl_seconds = 1;
+  config_.strict_ttl_reads = true;
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  ASSERT_TRUE(cache_->Initialize());
+
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  const VersionedData expired{
+      .version = 1,
+      .data = std::vector<uint8_t>{7},
+      .timestamp_ms = now_ms > 5000 ? now_ms - 5000 : 1};
+  ASSERT_TRUE(cache_->Set("ttl:expired", expired, RocksDBCache::DataTier::kTtl));
+  EXPECT_FALSE(
+      cache_->Get("ttl:expired", RocksDBCache::DataTier::kTtl).has_value());
+}
+
+TEST_F(RocksDBCacheP1Test, NonStrictTtlReadsCanSeeExpiredTtlEntryBeforeCompaction) {
+  cache_.reset();
+  config_.ttl_seconds = 1;
+  config_.strict_ttl_reads = false;
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  ASSERT_TRUE(cache_->Initialize());
+
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  const VersionedData expired{
+      .version = 2,
+      .data = std::vector<uint8_t>{8},
+      .timestamp_ms = now_ms > 5000 ? now_ms - 5000 : 1};
+  ASSERT_TRUE(cache_->Set("ttl:expired:legacy", expired,
+                          RocksDBCache::DataTier::kTtl));
+  auto hit = cache_->Get("ttl:expired:legacy", RocksDBCache::DataTier::kTtl);
+  ASSERT_TRUE(hit.has_value());
+  EXPECT_EQ(hit->version, 2U);
+}
+
+TEST_F(RocksDBCacheP1Test, DeleteByPrefixRemovesOnlyMatchingTierKeys) {
+  ASSERT_TRUE(cache_->Set("pref:ttl:1", MakeVersionedData(1, 1),
+                          RocksDBCache::DataTier::kTtl));
+  ASSERT_TRUE(cache_->Set("pref:ttl:2", MakeVersionedData(2, 2),
+                          RocksDBCache::DataTier::kTtl));
+  ASSERT_TRUE(cache_->Set("pref:persistent:1", MakeVersionedData(3, 3),
+                          RocksDBCache::DataTier::kPersistent));
+  ASSERT_TRUE(cache_->Set("other:ttl:1", MakeVersionedData(4, 4),
+                          RocksDBCache::DataTier::kTtl));
+
+  EXPECT_EQ(
+      cache_->DeleteByPrefix("pref:ttl:", RocksDBCache::DataTier::kTtl, 1), 2U);
+  EXPECT_FALSE(cache_->Get("pref:ttl:1", RocksDBCache::DataTier::kTtl).has_value());
+  EXPECT_FALSE(cache_->Get("pref:ttl:2", RocksDBCache::DataTier::kTtl).has_value());
+  EXPECT_TRUE(
+      cache_->Get("pref:persistent:1", RocksDBCache::DataTier::kPersistent)
+          .has_value());
+  EXPECT_TRUE(cache_->Get("other:ttl:1", RocksDBCache::DataTier::kTtl).has_value());
+
+  EXPECT_EQ(cache_->DeleteByPrefix("pref:persistent:",
+                                   RocksDBCache::DataTier::kPersistent, 2),
+            1U);
+  EXPECT_FALSE(
+      cache_->Get("pref:persistent:1", RocksDBCache::DataTier::kPersistent)
+          .has_value());
+}
+
 TEST_F(RocksDBCacheP1Test, LegacyDefaultApisWriteToTtlTier) {
   const VersionedData data = MakeVersionedData(33, 9);
   ASSERT_TRUE(cache_->Set("legacy:ttl", data));

@@ -828,8 +828,32 @@ bool LogicServer::Initialize(const std::string& config_path) {
   storage_config.l1_max_entries = loaded_storage_config.l1_max_entries;
   storage_config.l1_ttl_seconds = loaded_storage_config.l1_ttl_seconds;
   storage_config.l2_max_size_mb = loaded_storage_config.l2_max_size_mb;
+  storage_config.l2_block_cache_mb = loaded_storage_config.l2_block_cache_mb;
+  storage_config.l2_data_write_buffer_mb =
+      loaded_storage_config.l2_data_write_buffer_mb;
+  storage_config.l2_meta_write_buffer_mb =
+      loaded_storage_config.l2_meta_write_buffer_mb;
+  storage_config.l2_data_max_write_buffer_number =
+      loaded_storage_config.l2_data_max_write_buffer_number;
+  storage_config.l2_meta_max_write_buffer_number =
+      loaded_storage_config.l2_meta_max_write_buffer_number;
+  storage_config.l2_max_background_jobs =
+      loaded_storage_config.l2_max_background_jobs;
+  storage_config.l2_max_background_flushes =
+      loaded_storage_config.l2_max_background_flushes;
+  storage_config.l2_block_size = loaded_storage_config.l2_block_size;
+  storage_config.l2_bloom_filter_bits_per_key =
+      loaded_storage_config.l2_bloom_filter_bits_per_key;
   storage_config.l2_path = loaded_storage_config.l2_path;
   storage_config.l2_ttl_seconds = loaded_storage_config.l2_ttl_seconds;
+  storage_config.l2_ttl_periodic_compaction_seconds =
+      loaded_storage_config.l2_ttl_periodic_compaction_seconds;
+  storage_config.l2_strict_ttl_reads =
+      loaded_storage_config.l2_strict_ttl_reads;
+  storage_config.l2_scan_fill_cache =
+      loaded_storage_config.l2_scan_fill_cache;
+  storage_config.l2_iter_pin_data =
+      loaded_storage_config.l2_iter_pin_data;
   storage_config.auto_sync_interval_ms = loaded_storage_config.auto_sync_interval_ms;
   storage_config.batch_size = loaded_storage_config.batch_size;
   storage_config.sync_timeout_ms = loaded_storage_config.sync_timeout_ms;

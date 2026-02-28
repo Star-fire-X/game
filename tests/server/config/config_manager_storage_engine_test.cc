@@ -59,6 +59,7 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
       << "  outbox_max_items: 777\n"
       << "  enable_access_control: true\n"
       << "  require_auth_for_reads: true\n"
+      << "  enable_new_write_path: false\n"
       << "  access_control_token: \"token-xyz\"\n"
       << "  critical_key_prefixes: [\"char:\", \"account:username:\", \"trade:\"]\n"
       << "  sync_write_key_prefixes: [\"char:\", \"trade:\"]\n";
@@ -94,6 +95,7 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
   EXPECT_EQ(cfg.outbox_max_items, 777u);
   EXPECT_TRUE(cfg.enable_access_control);
   EXPECT_TRUE(cfg.require_auth_for_reads);
+  EXPECT_FALSE(cfg.enable_new_write_path);
   EXPECT_EQ(cfg.access_control_token, "token-xyz");
   ASSERT_EQ(cfg.critical_key_prefixes.size(), 3u);
   EXPECT_EQ(cfg.critical_key_prefixes[2], "trade:");

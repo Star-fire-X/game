@@ -472,6 +472,63 @@ TEST(StorageEnginePhase1ApiTest, ValidateStorageSurfacesBackendValidationFailure
     StorageEngine::Shutdown();
 }
 
+TEST_F(StorageEngineTest, BatchWriteReportsStructuredFailureReasonCode) {
+    auto& engine = StorageEngine::Instance();
+
+    std::vector<BatchWriteItem> items;
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "",
+        .value = {1},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+
+    const auto result = engine.BatchWrite(items);
+    EXPECT_EQ(result.total, 1U);
+    EXPECT_EQ(result.failed, 1U);
+    ASSERT_EQ(result.failure_reason_codes.size(), 1U);
+    EXPECT_EQ(result.failure_reason_codes[0], WriteRejectReason::kInvalidKey);
+}
+
+TEST(StorageEnginePhase1ApiTest, PutAndDeleteWithAccessHonorTokenPolicy) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext denied{
+        .principal = "bob",
+        .access_token = "bad",
+        .trusted = false,
+    };
+    const StorageEngine::AccessContext allowed{
+        .principal = "bob",
+        .access_token = "phase1-token",
+        .trusted = false,
+    };
+
+    WriteOptions options;
+    options.durability = WriteDurability::kBestEffort;
+    options.priority = Priority::NORMAL;
+    EXPECT_FALSE(engine.PutWithAccess("phase1:acl:key", {8, 8}, denied, options));
+    EXPECT_TRUE(engine.PutWithAccess("phase1:acl:key", {9, 9}, allowed, options));
+
+    DeleteOptions delete_options;
+    EXPECT_FALSE(engine.DeleteWithAccess("phase1:acl:key", denied, delete_options));
+    EXPECT_TRUE(engine.DeleteWithAccess("phase1:acl:key", allowed, delete_options));
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
     auto& engine = StorageEngine::Instance();
     ASSERT_TRUE(engine.Set("inv:one", {1}));

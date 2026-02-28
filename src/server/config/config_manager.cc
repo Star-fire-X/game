@@ -355,6 +355,9 @@ bool ConfigManager::Load(const std::string& config_path) {
     storage_engine_config_.audit_log_max_entries = ReadOrDefault(
         storage_engine, "audit_log_max_entries",
         storage_engine_config_.audit_log_max_entries);
+    storage_engine_config_.enable_new_write_path = ReadOrDefault(
+        storage_engine, "enable_new_write_path",
+        storage_engine_config_.enable_new_write_path);
     storage_engine_config_.enable_access_control = ReadOrDefault(
         storage_engine, "enable_access_control",
         storage_engine_config_.enable_access_control);

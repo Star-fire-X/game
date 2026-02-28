@@ -96,6 +96,26 @@ bool IsSensitiveStorageKey(const std::string& key) {
     return std::string_view(key).starts_with(kSensitiveAccountKeyPrefix);
 }
 
+const char* WriteRejectReasonToString(WriteRejectReason reason) {
+    switch (reason) {
+    case WriteRejectReason::kNone:
+        return "none";
+    case WriteRejectReason::kInvalidKey:
+        return "invalid_key";
+    case WriteRejectReason::kValueTooLarge:
+        return "value_too_large";
+    case WriteRejectReason::kPutFailed:
+        return "put_failed";
+    case WriteRejectReason::kDeleteFailed:
+        return "delete_failed";
+    case WriteRejectReason::kAccessDenied:
+        return "access_denied";
+    case WriteRejectReason::kNotInitialized:
+        return "not_initialized";
+    }
+    return "unknown";
+}
+
 // Lock-free fast path for StorageEngine::Instance().
 std::atomic<StorageEngine*> g_instance_ptr{nullptr};
 }  // namespace
@@ -1400,6 +1420,16 @@ public:
         return version_counter_.fetch_add(1, std::memory_order_relaxed);
     }
 
+    bool IsNewWritePathEnabled() const {
+        return config_.enable_new_write_path;
+    }
+
+    void RecordWriteRejectReason(WriteRejectReason reason) const {
+        IncrementStorageCounter(
+            std::string("storage.write.reject.") +
+            WriteRejectReasonToString(reason));
+    }
+
 private:
     void ApplyConflictBackoff(int attempt) const noexcept {
         // Exponential yielding with a small cap keeps fairness under contention
@@ -1702,19 +1732,33 @@ BatchWriteResult StorageEngine::BatchWrite(
 
     for (const auto& item : items) {
         bool ok = false;
+        WriteRejectReason reason = WriteRejectReason::kNone;
         switch (item.op) {
         case BatchWriteItem::Op::kPut:
+            if (!IsValidStorageKey(item.key)) {
+                reason = WriteRejectReason::kInvalidKey;
+                ok = false;
+                break;
+            }
+            if (item.value.size() > kMaxStorageValueSize) {
+                reason = WriteRejectReason::kValueTooLarge;
+                ok = false;
+                break;
+            }
             ok = Put(item.key, item.value, item.write_options);
             if (!ok) {
-                result.failed_keys.push_back(item.key);
-                result.failure_reasons.push_back("put_failed");
+                reason = WriteRejectReason::kPutFailed;
             }
             break;
         case BatchWriteItem::Op::kDelete:
+            if (!IsValidStorageKey(item.key)) {
+                reason = WriteRejectReason::kInvalidKey;
+                ok = false;
+                break;
+            }
             ok = Delete(item.key, item.delete_options);
             if (!ok) {
-                result.failed_keys.push_back(item.key);
-                result.failure_reasons.push_back("delete_failed");
+                reason = WriteRejectReason::kDeleteFailed;
             }
             break;
         }
@@ -1723,6 +1767,13 @@ BatchWriteResult StorageEngine::BatchWrite(
             ++result.succeeded;
         } else {
             ++result.failed;
+            result.failed_keys.push_back(item.key);
+            if (reason == WriteRejectReason::kNone) {
+                reason = WriteRejectReason::kPutFailed;
+            }
+            result.failure_reasons.push_back(WriteRejectReasonToString(reason));
+            result.failure_reason_codes.push_back(reason);
+            pimpl_->RecordWriteRejectReason(reason);
         }
     }
 
@@ -1732,6 +1783,24 @@ BatchWriteResult StorageEngine::BatchWrite(
 bool StorageEngine::Set(const std::string& key,
                         const std::vector<uint8_t>& data,
                         Priority priority) {
+    if (!pimpl_->IsNewWritePathEnabled()) {
+        if (!IsValidStorageKey(key) || data.size() > kMaxStorageValueSize) {
+            return false;
+        }
+        size_t stripe = pimpl_->GetStripe(key);
+        std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
+        VersionedData versioned{
+            pimpl_->NextVersion(),
+            data,
+            detail::GetCurrentTimeMs()
+        };
+        if (pimpl_->IsSyncWriteCriticalKey(key)) {
+            return pimpl_->SetSyncInternal(key, versioned, Priority::CRITICAL);
+        }
+        return pimpl_->SetInternal(
+            key, versioned, priority, /*enforce_sync_prefix_semantics=*/true);
+    }
+
     WriteOptions options;
     options.durability = WriteDurability::kBestEffort;
     options.priority = priority;
@@ -1742,6 +1811,21 @@ bool StorageEngine::Set(const std::string& key,
 bool StorageEngine::SetAsyncDurable(const std::string& key,
                                     const std::vector<uint8_t>& data,
                                     Priority priority) {
+    if (!pimpl_->IsNewWritePathEnabled()) {
+        if (!IsValidStorageKey(key) || data.size() > kMaxStorageValueSize) {
+            return false;
+        }
+        size_t stripe = pimpl_->GetStripe(key);
+        std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
+        VersionedData versioned{
+            pimpl_->NextVersion(),
+            data,
+            detail::GetCurrentTimeMs()
+        };
+        return pimpl_->SetInternal(
+            key, versioned, priority, /*enforce_sync_prefix_semantics=*/false);
+    }
+
     WriteOptions options;
     options.durability = WriteDurability::kDurableAsync;
     options.priority = priority;
@@ -1752,6 +1836,20 @@ bool StorageEngine::SetAsyncDurable(const std::string& key,
 bool StorageEngine::SetSync(const std::string& key,
                             const std::vector<uint8_t>& data,
                             Priority priority) {
+    if (!pimpl_->IsNewWritePathEnabled()) {
+        if (!IsValidStorageKey(key) || data.size() > kMaxStorageValueSize) {
+            return false;
+        }
+        size_t stripe = pimpl_->GetStripe(key);
+        std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
+        VersionedData versioned{
+            pimpl_->NextVersion(),
+            data,
+            detail::GetCurrentTimeMs()
+        };
+        return pimpl_->SetSyncInternal(key, versioned, priority);
+    }
+
     WriteOptions options;
     options.durability = WriteDurability::kSync;
     options.priority = priority;
@@ -1831,6 +1929,20 @@ std::vector<std::optional<VersionedData>> StorageEngine::BatchGet(
 bool StorageEngine::BatchSet(
     const std::vector<std::pair<std::string, std::vector<uint8_t>>>& kvs,
     Priority priority) {
+    if (!pimpl_->IsNewWritePathEnabled()) {
+        for (const auto& [key, value] : kvs) {
+            if (!IsValidStorageKey(key) || value.size() > kMaxStorageValueSize) {
+                return false;
+            }
+        }
+        for (const auto& [key, value] : kvs) {
+            if (!Set(key, value, priority)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::vector<BatchWriteItem> items;
     items.reserve(kvs.size());
     for (const auto& [key, value] : kvs) {
@@ -1916,6 +2028,117 @@ bool StorageEngine::SetWithAccess(const std::string& key,
         .reason = success ? "ok" : "set_failed",
     });
     return success;
+}
+
+bool StorageEngine::PutWithAccess(const std::string& key,
+                                  const std::vector<uint8_t>& data,
+                                  const AccessContext& access,
+                                  const WriteOptions& options) {
+    std::string deny_reason;
+    const bool allowed =
+        pimpl_->CheckAccessInternal(AccessOperation::kSet, key, access,
+                                    &deny_reason);
+    pimpl_->RecordAccessDecision(allowed);
+    if (!allowed) {
+        pimpl_->RecordAuditEntry(AuditEntry{
+            .timestamp_ms = detail::GetCurrentTimeMs(),
+            .principal = access.principal,
+            .operation = "put",
+            .key = key,
+            .success = false,
+            .reason = deny_reason,
+        });
+        pimpl_->RecordWriteRejectReason(WriteRejectReason::kAccessDenied);
+        return false;
+    }
+    const bool success = Put(key, data, options);
+    pimpl_->RecordAuditEntry(AuditEntry{
+        .timestamp_ms = detail::GetCurrentTimeMs(),
+        .principal = access.principal,
+        .operation = "put",
+        .key = key,
+        .success = success,
+        .reason = success ? "ok" : "put_failed",
+    });
+    return success;
+}
+
+bool StorageEngine::DeleteWithAccess(const std::string& key,
+                                     const AccessContext& access,
+                                     const DeleteOptions& options) {
+    std::string deny_reason;
+    const bool allowed = pimpl_->CheckAccessInternal(
+        AccessOperation::kInvalidate, key, access, &deny_reason);
+    pimpl_->RecordAccessDecision(allowed);
+    if (!allowed) {
+        pimpl_->RecordAuditEntry(AuditEntry{
+            .timestamp_ms = detail::GetCurrentTimeMs(),
+            .principal = access.principal,
+            .operation = "delete",
+            .key = key,
+            .success = false,
+            .reason = deny_reason,
+        });
+        pimpl_->RecordWriteRejectReason(WriteRejectReason::kAccessDenied);
+        return false;
+    }
+    const bool success = Delete(key, options);
+    pimpl_->RecordAuditEntry(AuditEntry{
+        .timestamp_ms = detail::GetCurrentTimeMs(),
+        .principal = access.principal,
+        .operation = "delete",
+        .key = key,
+        .success = success,
+        .reason = success ? "ok" : "delete_failed",
+    });
+    return success;
+}
+
+BatchWriteResult StorageEngine::BatchWriteWithAccess(
+    const std::vector<BatchWriteItem>& items,
+    const AccessContext& access) {
+    for (const auto& item : items) {
+        std::string deny_reason;
+        if (!pimpl_->CheckAccessInternal(AccessOperation::kBatchSet, item.key,
+                                         access, &deny_reason)) {
+            pimpl_->RecordAccessDecision(false);
+            pimpl_->RecordAuditEntry(AuditEntry{
+                .timestamp_ms = detail::GetCurrentTimeMs(),
+                .principal = access.principal,
+                .operation = "batch_write",
+                .key = item.key,
+                .success = false,
+                .reason = deny_reason,
+            });
+            BatchWriteResult denied;
+            denied.total = items.size();
+            denied.failed = items.size();
+            denied.failed_keys.reserve(items.size());
+            denied.failure_reasons.reserve(items.size());
+            denied.failure_reason_codes.reserve(items.size());
+            for (const auto& failed_item : items) {
+                denied.failed_keys.push_back(failed_item.key);
+                denied.failure_reasons.push_back(
+                    WriteRejectReasonToString(WriteRejectReason::kAccessDenied));
+                denied.failure_reason_codes.push_back(
+                    WriteRejectReason::kAccessDenied);
+            }
+            pimpl_->RecordWriteRejectReason(WriteRejectReason::kAccessDenied);
+            return denied;
+        }
+    }
+
+    pimpl_->RecordAccessDecision(true);
+    auto result = BatchWrite(items);
+    pimpl_->RecordAuditEntry(AuditEntry{
+        .timestamp_ms = detail::GetCurrentTimeMs(),
+        .principal = access.principal,
+        .operation = "batch_write",
+        .key = "<batch>",
+        .success = result.failed == 0,
+        .reason = result.failed == 0 ? "ok" : "batch_write_failed",
+    });
+    return result;
 }
 
 bool StorageEngine::SetSyncWithAccess(const std::string& key,

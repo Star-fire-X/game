@@ -107,6 +107,7 @@ storage_engine:
   enable_metrics: true
   enable_audit_log: true
   audit_log_max_entries: 5000
+  enable_new_write_path: true
   enable_access_control: false
   require_auth_for_reads: false
   access_control_token: ""

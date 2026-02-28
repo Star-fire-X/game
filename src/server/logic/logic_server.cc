@@ -878,6 +878,8 @@ bool LogicServer::Initialize(const std::string& config_path) {
   storage_config.enable_metrics = loaded_storage_config.enable_metrics;
   storage_config.enable_audit_log = loaded_storage_config.enable_audit_log;
   storage_config.audit_log_max_entries = loaded_storage_config.audit_log_max_entries;
+  storage_config.enable_new_write_path =
+      loaded_storage_config.enable_new_write_path;
   storage_config.enable_access_control =
       loaded_storage_config.enable_access_control;
   storage_config.require_auth_for_reads =

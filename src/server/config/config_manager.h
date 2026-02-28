@@ -160,6 +160,7 @@ struct StorageEngineConfig {
   bool enable_metrics = true;
   bool enable_audit_log = true;
   size_t audit_log_max_entries = 5000;
+  bool enable_new_write_path = true;
   bool enable_access_control = false;
   bool require_auth_for_reads = false;
   std::string access_control_token;

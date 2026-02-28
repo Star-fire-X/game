@@ -50,6 +50,16 @@ enum class WriteDurability {
     kSync = 2,
 };
 
+enum class WriteRejectReason {
+    kNone = 0,
+    kInvalidKey = 1,
+    kValueTooLarge = 2,
+    kPutFailed = 3,
+    kDeleteFailed = 4,
+    kAccessDenied = 5,
+    kNotInitialized = 6,
+};
+
 struct WriteOptions {
     WriteDurability durability = WriteDurability::kBestEffort;
     Priority priority = Priority::NORMAL;
@@ -83,6 +93,7 @@ struct BatchWriteResult {
     size_t failed = 0;
     std::vector<std::string> failed_keys;
     std::vector<std::string> failure_reasons;
+    std::vector<WriteRejectReason> failure_reason_codes;
 };
 
 struct StorageValidationReport {
@@ -146,6 +157,7 @@ public:
         bool enable_metrics = true;
         bool enable_audit_log = true;
         size_t audit_log_max_entries = 5000;
+        bool enable_new_write_path = true;
 
         // 存储接口鉴权
         bool enable_access_control = false;
@@ -395,6 +407,18 @@ public:
         const std::vector<uint8_t>& data,
         const AccessContext& access,
         Priority priority = Priority::NORMAL);
+    bool PutWithAccess(
+        const std::string& key,
+        const std::vector<uint8_t>& data,
+        const AccessContext& access,
+        const WriteOptions& options = {});
+    bool DeleteWithAccess(
+        const std::string& key,
+        const AccessContext& access,
+        const DeleteOptions& options = {});
+    BatchWriteResult BatchWriteWithAccess(
+        const std::vector<BatchWriteItem>& items,
+        const AccessContext& access);
     bool SetSyncWithAccess(
         const std::string& key,
         const std::vector<uint8_t>& data,

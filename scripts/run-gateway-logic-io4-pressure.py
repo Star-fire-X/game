@@ -250,7 +250,7 @@ def strip_yaml_inline_comment(value: str) -> str:
                 in_single = False
             continue
 
-        if ch == "#":
+        if ch == "#" and (not out or out[-1].isspace()):
             break
         if ch == "'":
             in_single = True

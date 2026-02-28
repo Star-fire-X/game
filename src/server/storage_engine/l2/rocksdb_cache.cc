@@ -1223,26 +1223,59 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
             std::vector<rocksdb::ColumnFamilyHandle*> scan_handles;
             scan_handles.reserve(kColumnFamilyCount);
             rocksdb::DB* raw_scan_db = nullptr;
-            const std::string secondary_path =
-                "/tmp/mir2_rocksdb_scan_secondary_" +
-                std::to_string(
-                    std::chrono::steady_clock::now().time_since_epoch().count()) +
-                "_" +
-                std::to_string(
-                    std::hash<std::thread::id>{}(std::this_thread::get_id()));
             std::error_code fs_ec;
+            std::filesystem::path temp_root =
+                std::filesystem::temp_directory_path(fs_ec);
+            if (fs_ec || temp_root.empty()) {
+                fs_ec.clear();
+                temp_root = std::filesystem::path(config_.db_path).parent_path();
+            }
+            if (temp_root.empty()) {
+                temp_root = ".";
+            }
+            const std::filesystem::path secondary_path =
+                temp_root /
+                ("mir2_rocksdb_scan_secondary_" +
+                 std::to_string(
+                     std::chrono::steady_clock::now().time_since_epoch().count()) +
+                 "_" +
+                 std::to_string(
+                     std::hash<std::thread::id>{}(std::this_thread::get_id())));
+
+            const auto cleanup_scan_resources = [&]() {
+                if (raw_scan_db != nullptr) {
+                    destroy_scan_handles(raw_scan_db, &scan_handles);
+                    delete raw_scan_db;
+                    raw_scan_db = nullptr;
+                } else {
+                    scan_handles.clear();
+                }
+                std::error_code cleanup_ec;
+                (void)std::filesystem::remove_all(secondary_path, cleanup_ec);
+            };
+            struct CleanupGuard {
+                const decltype(cleanup_scan_resources)* fn;
+                ~CleanupGuard() { (*fn)(); }
+            } cleanup_guard{&cleanup_scan_resources};
+
             (void)std::filesystem::remove_all(secondary_path, fs_ec);
+            fs_ec.clear();
             (void)std::filesystem::create_directories(secondary_path, fs_ec);
 
-            rocksdb::Status scan_status = rocksdb::DB::OpenAsSecondary(
-                scan_db_options, config_.db_path, secondary_path,
-                scan_descriptors, &scan_handles, &raw_scan_db);
+            rocksdb::Status scan_status;
+            if (fs_ec) {
+                scan_status = rocksdb::Status::IOError(
+                    "failed to create secondary scan directory: " +
+                    secondary_path.string() + ", error: " + fs_ec.message());
+            } else {
+                scan_status = rocksdb::DB::OpenAsSecondary(
+                    scan_db_options, config_.db_path, secondary_path.string(),
+                    scan_descriptors, &scan_handles, &raw_scan_db);
+            }
             if (scan_status.ok() && raw_scan_db != nullptr &&
                 scan_handles.size() == kColumnFamilyCount) {
-                std::unique_ptr<rocksdb::DB> scan_db(raw_scan_db);
-                raw_scan_db = nullptr;
                 const rocksdb::Status catch_up_status =
-                    scan_db->TryCatchUpWithPrimary();
+                    raw_scan_db->TryCatchUpWithPrimary();
                 if (!catch_up_status.ok()) {
                     auto logger = spdlog::get("mir2");
                     if (logger) {
@@ -1251,7 +1284,8 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
                     }
                 }
                 const uint64_t primary_seq = db_->GetLatestSequenceNumber();
-                const uint64_t secondary_seq = scan_db->GetLatestSequenceNumber();
+                const uint64_t secondary_seq =
+                    raw_scan_db->GetLatestSequenceNumber();
                 const bool scan_is_fresh = catch_up_status.ok() &&
                                            secondary_seq >= primary_seq;
                 if (scan_is_fresh) {
@@ -1259,10 +1293,8 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
                         tier == DataTier::kPersistent
                             ? scan_handles[kDataPersistentCFIndex]
                             : scan_handles[kDataTtlCFIndex];
-                    count = iterate_with(scan_db.get(), scan_target_cf,
+                    count = iterate_with(raw_scan_db, scan_target_cf,
                                          BuildScanReadOptions());
-                    destroy_scan_handles(scan_db.get(), &scan_handles);
-                    (void)std::filesystem::remove_all(secondary_path, fs_ec);
                     return count;
                 }
                 auto logger = spdlog::get("mir2");
@@ -1272,27 +1304,19 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
                         "secondary_seq={}), fallback to main DB iterator",
                         primary_seq, secondary_seq);
                 }
-                destroy_scan_handles(scan_db.get(), &scan_handles);
-                (void)std::filesystem::remove_all(secondary_path, fs_ec);
-            } else if (raw_scan_db != nullptr) {
-                destroy_scan_handles(raw_scan_db, &scan_handles);
-                delete raw_scan_db;
-                raw_scan_db = nullptr;
+            } else if (scan_status.ok()) {
+                scan_status = rocksdb::Status::InvalidArgument(
+                    "OpenAsSecondary returned unexpected state: db=" +
+                    std::string(raw_scan_db != nullptr ? "set" : "null") +
+                    ", handles=" + std::to_string(scan_handles.size()));
             }
-
-            if (raw_scan_db != nullptr) {
-                destroy_scan_handles(raw_scan_db, &scan_handles);
-                delete raw_scan_db;
-                raw_scan_db = nullptr;
-            }
-            (void)std::filesystem::remove_all(secondary_path, fs_ec);
 
             auto logger = spdlog::get("mir2");
             if (logger) {
                 logger->warn(
                     "ForEach isolated scan reader unavailable, falling back to "
-                    "main DB iterator: {}",
-                    scan_status.ToString());
+                    "main DB iterator: {}, secondary_path={}",
+                    scan_status.ToString(), secondary_path.string());
             }
         }
 

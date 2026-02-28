@@ -604,6 +604,84 @@ public:
         return true;
     }
 
+    bool DeleteInternal(const std::string& key,
+                        uint64_t version,
+                        const DeleteOptions& options) {
+        if (shutdown_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        const bool hard_delete = options.hard_delete || !options.write_tombstone;
+        bool removed_in_cache = false;
+
+        if (l1_cache_ && l1_cache_->Delete(key)) {
+            removed_in_cache = true;
+        }
+
+        if (l2_cache_ &&
+            (!circuit_breaker_ || !circuit_breaker_->IsOpen()) &&
+            l2_cache_->Delete(key, ResolveDataTier(key))) {
+            removed_in_cache = true;
+            if (circuit_breaker_) {
+                circuit_breaker_->OnSuccess();
+            }
+        } else if (l2_cache_ && circuit_breaker_) {
+            circuit_breaker_->OnFailure();
+        }
+        PublishCircuitBreakerStateGauges();
+
+        bool backend_deleted = false;
+        if (backend_) {
+            if (backend_circuit_breaker_ && backend_circuit_breaker_->IsOpen()) {
+                PublishCircuitBreakerStateGauges();
+            } else if (!backend_->IsHealthy()) {
+                if (backend_circuit_breaker_) {
+                    backend_circuit_breaker_->OnFailure();
+                    PublishCircuitBreakerStateGauges();
+                }
+            } else {
+                const auto result = backend_->Delete(key, version, hard_delete);
+                backend_deleted = result.success;
+                if (backend_circuit_breaker_) {
+                    if (backend_deleted) {
+                        backend_circuit_breaker_->OnSuccess();
+                    } else {
+                        backend_circuit_breaker_->OnFailure();
+                    }
+                    PublishCircuitBreakerStateGauges();
+                }
+            }
+        }
+
+        if (backend_ &&
+            enable_strict_write_guarantee_.load(std::memory_order_acquire) &&
+            !backend_deleted) {
+            return false;
+        }
+
+        return removed_in_cache || backend_deleted || backend_ == nullptr;
+    }
+
+    StorageValidationReport ValidateStorageInternal() {
+        StorageValidationReport report;
+        report.ok = true;
+        report.summary = "ok";
+        report.checked_keys = l1_cache_ ? l1_cache_->GetSize() : 0;
+
+        if (!backend_) {
+            report.summary = "backend_unavailable";
+            return report;
+        }
+
+        const auto validate_result = backend_->Validate();
+        if (!validate_result.success) {
+            report.ok = false;
+            report.corrupted_keys = 1;
+            report.summary = validate_result.error_message;
+        }
+        return report;
+    }
+
     // ===== Update实现 - 类型擦除版本 =====
     bool UpdateImpl(const std::string& key,
                     StorageEngine::UpdateFunction update_fn,
@@ -1569,9 +1647,9 @@ mir2::logic::Task<std::optional<VersionedData>> StorageEngine::GetAsync(
     });
 }
 
-bool StorageEngine::Set(const std::string& key,
+bool StorageEngine::Put(const std::string& key,
                         const std::vector<uint8_t>& data,
-                        Priority priority) {
+                        const WriteOptions& options) {
     if (!IsValidStorageKey(key) || data.size() > kMaxStorageValueSize) {
         return false;
     }
@@ -1583,44 +1661,102 @@ bool StorageEngine::Set(const std::string& key,
         data,
         detail::GetCurrentTimeMs()
     };
-    if (pimpl_->IsSyncWriteCriticalKey(key)) {
-        return pimpl_->SetSyncInternal(key, versioned, Priority::CRITICAL);
+
+    switch (options.durability) {
+    case WriteDurability::kSync:
+        return pimpl_->SetSyncInternal(key, versioned, options.priority);
+    case WriteDurability::kDurableAsync:
+        return pimpl_->SetInternal(
+            key, versioned, options.priority, /*enforce_sync_prefix_semantics=*/false);
+    case WriteDurability::kBestEffort:
+        if (options.bypass_sync_prefix_upgrade) {
+            return pimpl_->SetInternal(
+                key, versioned, options.priority,
+                /*enforce_sync_prefix_semantics=*/false);
+        }
+        if (pimpl_->IsSyncWriteCriticalKey(key)) {
+            return pimpl_->SetSyncInternal(key, versioned, Priority::CRITICAL);
+        }
+        return pimpl_->SetInternal(
+            key, versioned, options.priority,
+            /*enforce_sync_prefix_semantics=*/true);
     }
-    return pimpl_->SetInternal(key, versioned, priority);
+    return false;
+}
+
+bool StorageEngine::Delete(const std::string& key,
+                           const DeleteOptions& options) {
+    if (!IsValidStorageKey(key)) {
+        return false;
+    }
+    size_t stripe = pimpl_->GetStripe(key);
+    std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
+    const uint64_t delete_version = pimpl_->NextVersion();
+    return pimpl_->DeleteInternal(key, delete_version, options);
+}
+
+BatchWriteResult StorageEngine::BatchWrite(
+    const std::vector<BatchWriteItem>& items) {
+    BatchWriteResult result;
+    result.total = items.size();
+
+    for (const auto& item : items) {
+        bool ok = false;
+        switch (item.op) {
+        case BatchWriteItem::Op::kPut:
+            ok = Put(item.key, item.value, item.write_options);
+            if (!ok) {
+                result.failed_keys.push_back(item.key);
+                result.failure_reasons.push_back("put_failed");
+            }
+            break;
+        case BatchWriteItem::Op::kDelete:
+            ok = Delete(item.key, item.delete_options);
+            if (!ok) {
+                result.failed_keys.push_back(item.key);
+                result.failure_reasons.push_back("delete_failed");
+            }
+            break;
+        }
+
+        if (ok) {
+            ++result.succeeded;
+        } else {
+            ++result.failed;
+        }
+    }
+
+    return result;
+}
+
+bool StorageEngine::Set(const std::string& key,
+                        const std::vector<uint8_t>& data,
+                        Priority priority) {
+    WriteOptions options;
+    options.durability = WriteDurability::kBestEffort;
+    options.priority = priority;
+    options.bypass_sync_prefix_upgrade = false;
+    return Put(key, data, options);
 }
 
 bool StorageEngine::SetAsyncDurable(const std::string& key,
                                     const std::vector<uint8_t>& data,
                                     Priority priority) {
-    if (!IsValidStorageKey(key) || data.size() > kMaxStorageValueSize) {
-        return false;
-    }
-
-    size_t stripe = pimpl_->GetStripe(key);
-    std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
-    VersionedData versioned{
-        pimpl_->NextVersion(),
-        data,
-        detail::GetCurrentTimeMs()
-    };
-    return pimpl_->SetInternal(key, versioned, priority, false);
+    WriteOptions options;
+    options.durability = WriteDurability::kDurableAsync;
+    options.priority = priority;
+    options.bypass_sync_prefix_upgrade = true;
+    return Put(key, data, options);
 }
 
 bool StorageEngine::SetSync(const std::string& key,
                             const std::vector<uint8_t>& data,
                             Priority priority) {
-    if (!IsValidStorageKey(key) || data.size() > kMaxStorageValueSize) {
-        return false;
-    }
-    size_t stripe = pimpl_->GetStripe(key);
-    std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
-
-    VersionedData versioned{
-        pimpl_->NextVersion(),
-        data,
-        detail::GetCurrentTimeMs()
-    };
-    return pimpl_->SetSyncInternal(key, versioned, priority);
+    WriteOptions options;
+    options.durability = WriteDurability::kSync;
+    options.priority = priority;
+    options.bypass_sync_prefix_upgrade = false;
+    return Put(key, data, options);
 }
 
 bool StorageEngine::CompareAndSet(const std::string& key,
@@ -1695,18 +1831,19 @@ std::vector<std::optional<VersionedData>> StorageEngine::BatchGet(
 bool StorageEngine::BatchSet(
     const std::vector<std::pair<std::string, std::vector<uint8_t>>>& kvs,
     Priority priority) {
+    std::vector<BatchWriteItem> items;
+    items.reserve(kvs.size());
     for (const auto& [key, value] : kvs) {
-        if (!IsValidStorageKey(key) || value.size() > kMaxStorageValueSize) {
-            return false;
-        }
+        BatchWriteItem item;
+        item.op = BatchWriteItem::Op::kPut;
+        item.key = key;
+        item.value = value;
+        item.write_options.priority = priority;
+        item.write_options.durability = WriteDurability::kBestEffort;
+        items.push_back(std::move(item));
     }
-
-    for (const auto& [key, value] : kvs) {
-        if (!Set(key, value, priority)) {
-            return false;
-        }
-    }
-    return true;
+    const auto result = BatchWrite(items);
+    return result.failed == 0;
 }
 
 bool StorageEngine::BatchLoadFromDB(
@@ -2133,6 +2270,19 @@ bool StorageEngine::PerformStartupRecovery() {
         return false;
     }
     return pimpl_->PerformStartupRecoveryInternal();
+}
+
+StorageValidationReport StorageEngine::ValidateStorage() {
+    if (!pimpl_) {
+        return StorageValidationReport{
+            .ok = false,
+            .checked_keys = 0,
+            .corrupted_keys = 0,
+            .tombstone_keys = 0,
+            .summary = "storage_not_initialized",
+        };
+    }
+    return pimpl_->ValidateStorageInternal();
 }
 
 StorageEngine::HealthMetrics StorageEngine::GetHealthMetrics() const noexcept {

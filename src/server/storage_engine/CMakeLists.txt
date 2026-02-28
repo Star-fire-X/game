@@ -29,6 +29,8 @@ set(STORAGE_ENGINE_SOURCES
     utils/circuit_breaker.cc
     utils/global_hybrid_clock.h
     utils/global_hybrid_clock.cc
+    utils/phase0_gate.h
+    utils/phase0_gate.cc
 
     # Types
     types.h

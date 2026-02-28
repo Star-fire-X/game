@@ -51,6 +51,33 @@ public:
     virtual StorageResult SaveBatch(const BatchItems& items) = 0;
 
     /**
+     * @brief 删除单个实体
+     *
+     * @param key 键
+     * @param version 删除操作版本（用于防止旧版本删除覆盖新写入）
+     * @param hard_delete true=物理删除，false=逻辑删除（由后端决定具体语义）
+     */
+    virtual StorageResult Delete(const std::string& key,
+                                 uint64_t version,
+                                 bool hard_delete) {
+        (void)key;
+        (void)version;
+        (void)hard_delete;
+        return StorageResult{true, "", 0};
+    }
+
+    /**
+     * @brief 批量删除
+     */
+    virtual StorageResult DeleteBatch(
+        const std::vector<std::pair<std::string, uint64_t>>& items,
+        bool hard_delete) {
+        (void)items;
+        (void)hard_delete;
+        return StorageResult{true, "", 0};
+    }
+
+    /**
      * @brief 加载数据
      */
     virtual std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(
@@ -83,6 +110,14 @@ class IAtomicBatchStorageBackend {
 
   virtual IStorageBackend::StorageResult SaveBatchAtomic(
       const IStorageBackend::BatchItems& items) = 0;
+
+  virtual IStorageBackend::StorageResult DeleteBatchAtomic(
+      const std::vector<std::pair<std::string, uint64_t>>& items,
+      bool hard_delete) {
+    (void)items;
+    (void)hard_delete;
+    return IStorageBackend::StorageResult{true, "", 0};
+  }
 };
 
 }  // namespace mir2::storage_engine

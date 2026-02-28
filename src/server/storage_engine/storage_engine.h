@@ -44,6 +44,55 @@ enum class Priority {
     CRITICAL = 3
 };
 
+enum class WriteDurability {
+    kBestEffort = 0,
+    kDurableAsync = 1,
+    kSync = 2,
+};
+
+struct WriteOptions {
+    WriteDurability durability = WriteDurability::kBestEffort;
+    Priority priority = Priority::NORMAL;
+    bool bypass_sync_prefix_upgrade = false;
+};
+
+struct DeleteOptions {
+    // Stage1 defaults to hard delete semantics; tombstone behavior is
+    // introduced in later stages.
+    bool hard_delete = true;
+    bool write_tombstone = false;
+    Priority priority = Priority::NORMAL;
+};
+
+struct BatchWriteItem {
+    enum class Op : uint8_t {
+        kPut = 0,
+        kDelete = 1,
+    };
+
+    Op op = Op::kPut;
+    std::string key;
+    std::vector<uint8_t> value;
+    WriteOptions write_options;
+    DeleteOptions delete_options;
+};
+
+struct BatchWriteResult {
+    size_t total = 0;
+    size_t succeeded = 0;
+    size_t failed = 0;
+    std::vector<std::string> failed_keys;
+    std::vector<std::string> failure_reasons;
+};
+
+struct StorageValidationReport {
+    bool ok = false;
+    size_t checked_keys = 0;
+    size_t corrupted_keys = 0;
+    size_t tombstone_keys = 0;
+    std::string summary;
+};
+
 // ===== 核心引擎 =====
 class StorageEngine {
 public:
@@ -226,6 +275,16 @@ public:
      * 性能目标：<1ms
      * 场景：坐标更新、快照保存
      */
+    bool Put(const std::string& key,
+             const std::vector<uint8_t>& data,
+             const WriteOptions& options = {});
+
+    bool Delete(const std::string& key,
+                const DeleteOptions& options = {});
+
+    BatchWriteResult BatchWrite(
+        const std::vector<BatchWriteItem>& items);
+
     bool Set(const std::string& key,
              const std::vector<uint8_t>& data,
              Priority priority = Priority::NORMAL);
@@ -390,6 +449,8 @@ public:
      * @brief 启动恢复
      */
     bool PerformStartupRecovery();
+
+    StorageValidationReport ValidateStorage();
 
     // ============= 监控API =============
 

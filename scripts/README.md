@@ -6,6 +6,30 @@
 
 重放 Storage Engine RocksDB 死信数据到 outbox 的脚本包装器（依赖 `mir2_dead_letter_replay`）。
 
+## run-storage-phase0-gate.sh
+
+执行 StorageEngine 第0阶段发布门禁测试集，覆盖：
+
+- Phase0 门禁阈值评估逻辑（`StoragePhase0GateTest.*`）
+- 健康指标可读性（`StorageEngineTest.HealthMetrics`）
+- 启动恢复基线场景（`StorageEngineTtlIsolationTest.StartupRecoveryRepairsPersistentTierWithoutScanningTtlTier`）
+- durable outbox 恢复路径（`StorageEngineDurableOutboxTest.ReplaysPendingWritesAfterRestartWhenBackendRecovers`）
+- outbox 拒绝指标（`AsyncPersistenceQueueOutboxMetricTest.RejectedCriticalCounterIncrementsWhenOutboxFull`）
+
+### 快速示例
+
+```bash
+# 默认使用 build-wsl/bin/storage_engine_focus_tests
+./scripts/run-storage-phase0-gate.sh
+
+# 指定 build 目录
+./scripts/run-storage-phase0-gate.sh build-wsl
+
+# 临时覆盖门禁筛选器
+LEGEND2_STORAGE_PHASE0_GATE_FILTER='StoragePhase0GateTest.*' \
+  ./scripts/run-storage-phase0-gate.sh
+```
+
 ### 快速示例
 
 ```bash

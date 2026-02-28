@@ -21,6 +21,9 @@ constexpr const char* kUpsertSQL =
     "SET version = EXCLUDED.version, data = EXCLUDED.data, updated_at = NOW() "
     // Keep newest write only; callers must supply monotonic-increasing version.
     "WHERE kv_store.version < EXCLUDED.version";
+
+constexpr const char* kDeleteSQL =
+    "DELETE FROM kv_store WHERE key = $1 AND version <= $2";
 }  // namespace
 
 StorageEngineBackend::StorageEngineBackend(const config::DatabaseConfig& db_config)
@@ -109,6 +112,77 @@ mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::SaveB
     }
     txn.commit();
 
+    return StorageResult{true, "", ElapsedMs(start)};
+  } catch (const std::exception& ex) {
+    return StorageResult{false, ex.what(), ElapsedMs(start)};
+  }
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::Delete(
+    const std::string& key,
+    uint64_t version,
+    bool hard_delete) {
+  if (!IsHealthy()) {
+    return StorageResult{false, "backend not healthy", 0};
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  try {
+    auto conn = pool_->Acquire();
+    if (!conn) {
+      return StorageResult{false, "failed to acquire connection", ElapsedMs(start)};
+    }
+
+    PgConnectionGuard guard(*pool_, conn);
+    pqxx::work txn(*conn);
+    if (hard_delete) {
+      txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+    } else {
+      // Stage1 keeps physical-delete behavior for compatibility.
+      txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+    }
+    txn.commit();
+    return StorageResult{true, "", ElapsedMs(start)};
+  } catch (const std::exception& ex) {
+    return StorageResult{false, ex.what(), ElapsedMs(start)};
+  }
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::DeleteBatch(
+    const std::vector<std::pair<std::string, uint64_t>>& items,
+    bool hard_delete) {
+  return DeleteBatchAtomic(items, hard_delete);
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::DeleteBatchAtomic(
+    const std::vector<std::pair<std::string, uint64_t>>& items,
+    bool hard_delete) {
+  if (!IsHealthy()) {
+    return StorageResult{false, "backend not healthy", 0};
+  }
+
+  if (items.empty()) {
+    return StorageResult{true, "", 0};
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  try {
+    auto conn = pool_->Acquire();
+    if (!conn) {
+      return StorageResult{false, "failed to acquire connection", ElapsedMs(start)};
+    }
+
+    PgConnectionGuard guard(*pool_, conn);
+    pqxx::work txn(*conn);
+    for (const auto& [key, version] : items) {
+      if (hard_delete) {
+        txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+      } else {
+        // Stage1 keeps physical-delete behavior for compatibility.
+        txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+      }
+    }
+    txn.commit();
     return StorageResult{true, "", ElapsedMs(start)};
   } catch (const std::exception& ex) {
     return StorageResult{false, ex.what(), ElapsedMs(start)};

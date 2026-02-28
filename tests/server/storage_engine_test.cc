@@ -94,6 +94,13 @@ public:
     std::atomic<uint32_t> save_calls{0};
 };
 
+class FailingValidateBackend : public test::NoopStorageBackend {
+ public:
+  IStorageBackend::StorageResult Validate() override {
+    return IStorageBackend::StorageResult{false, "forced validate failure", 0};
+  }
+};
+
 struct DurableToggleBackendState {
     mutable std::mutex mutex;
     std::map<std::string, std::pair<uint64_t, std::vector<uint8_t>>> store;
@@ -365,6 +372,104 @@ TEST_F(StorageEngineTest, BatchSetAndBatchGetRoundTrip) {
     EXPECT_EQ(result[1]->data, (std::vector<uint8_t>{2, 2}));
     EXPECT_EQ(result[2]->data, (std::vector<uint8_t>{3, 3}));
     EXPECT_FALSE(result[3].has_value());
+}
+
+TEST_F(StorageEngineTest, PutAndDeleteRoundTrip) {
+    auto& engine = StorageEngine::Instance();
+
+    WriteOptions write_options;
+    write_options.durability = WriteDurability::kBestEffort;
+    write_options.priority = Priority::NORMAL;
+    ASSERT_TRUE(engine.Put("phase1:key", {4, 5, 6}, write_options));
+
+    auto loaded = engine.Get("phase1:key");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->data, (std::vector<uint8_t>{4, 5, 6}));
+
+    DeleteOptions delete_options;
+    EXPECT_TRUE(engine.Delete("phase1:key", delete_options));
+    EXPECT_FALSE(engine.Get("phase1:key").has_value());
+}
+
+TEST_F(StorageEngineTest, BatchWriteReturnsPerItemFailureDetails) {
+    auto& engine = StorageEngine::Instance();
+
+    std::vector<BatchWriteItem> items;
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "phase1:batch:ok",
+        .value = {1, 2, 3},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "",
+        .value = {9},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kDelete,
+        .key = "phase1:batch:missing",
+        .value = {},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+
+    const auto result = engine.BatchWrite(items);
+    EXPECT_EQ(result.total, 3U);
+    EXPECT_EQ(result.succeeded, 2U);
+    EXPECT_EQ(result.failed, 1U);
+    ASSERT_EQ(result.failed_keys.size(), 1U);
+    EXPECT_TRUE(result.failed_keys[0].empty());
+    ASSERT_EQ(result.failure_reasons.size(), 1U);
+    EXPECT_FALSE(result.failure_reasons[0].empty());
+}
+
+TEST(StorageEnginePhase1ApiTest,
+     PutBestEffortWithBypassSyncPrefixAvoidsImmediateSyncCompensation) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.l2_path = "/dev/null/mir2_storage_engine_phase1_bypass";
+    config.enable_strict_write_guarantee = false;
+    config.auto_sync_interval_ms = 60000;
+    config.sync_write_key_prefixes = {"char:"};
+
+    auto backend = std::make_unique<SaveCountingBackend>();
+    auto* backend_ptr = backend.get();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    WriteOptions options;
+    options.durability = WriteDurability::kBestEffort;
+    options.priority = Priority::NORMAL;
+    options.bypass_sync_prefix_upgrade = true;
+
+    ASSERT_TRUE(engine.Put("char:phase1:bypass", {7, 7, 7}, options));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(backend_ptr->save_calls.load(std::memory_order_relaxed), 0U);
+
+    StorageEngine::Shutdown();
+}
+
+TEST(StorageEnginePhase1ApiTest, ValidateStorageSurfacesBackendValidationFailure) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    auto backend = std::make_unique<FailingValidateBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend)));
+
+    auto& engine = StorageEngine::Instance();
+    const auto report = engine.ValidateStorage();
+    EXPECT_FALSE(report.ok);
+    EXPECT_NE(report.summary.find("forced validate failure"), std::string::npos);
+
+    StorageEngine::Shutdown();
 }
 
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {

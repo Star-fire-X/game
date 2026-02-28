@@ -31,6 +31,18 @@ class StorageEngineBackend final : public mir2::storage_engine::IStorageBackend,
 
   StorageResult SaveBatchAtomic(const BatchItems& items) override;
 
+  StorageResult Delete(const std::string& key,
+                       uint64_t version,
+                       bool hard_delete) override;
+
+  StorageResult DeleteBatch(
+      const std::vector<std::pair<std::string, uint64_t>>& items,
+      bool hard_delete) override;
+
+  StorageResult DeleteBatchAtomic(
+      const std::vector<std::pair<std::string, uint64_t>>& items,
+      bool hard_delete) override;
+
   std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(
       const std::string& key) override;
 

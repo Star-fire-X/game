@@ -27,6 +27,7 @@ set(LEGEND2_TEST_SOURCES
     server/storage_engine/async_outbox_backpressure_test.cc
     server/storage_engine/blocking_queue_test.cc
     server/storage_engine/dead_letter_persistence_test.cc
+    server/storage_engine/phase0_gate_test.cc
     server/storage_engine/rocksdb_cache_test.cc
     server/logic/coroutine_executor_test.cc
     server/logic/coroutine_executor_counter_race_test.cc
@@ -370,6 +371,7 @@ add_executable(storage_engine_focus_tests
     server/storage_engine/async_test.cc
     server/storage_engine/async_outbox_backpressure_test.cc
     server/storage_engine/dead_letter_persistence_test.cc
+    server/storage_engine/phase0_gate_test.cc
     server/storage_engine/rocksdb_cache_test.cc
     server/config/config_manager_storage_engine_test.cc
 )

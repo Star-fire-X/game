@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <type_traits>
 
 #include <entt/entt.hpp>
 
@@ -114,4 +115,9 @@ TEST(EventBusTest, SubscriptionUnsubscribesOnScopeExit) {
 
     bus.Publish(TestEventA{2});
     EXPECT_EQ(call_count, 1);
+}
+
+TEST(EventBusTest, EventBusIsNotMoveConstructibleOrAssignable) {
+    EXPECT_FALSE(std::is_move_constructible_v<EventBus>);
+    EXPECT_FALSE(std::is_move_assignable_v<EventBus>);
 }

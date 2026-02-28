@@ -59,6 +59,11 @@ class EventBus {
       : registry_(registry),
         alive_token_(std::make_shared<int>(0)) {}
 
+  EventBus(const EventBus&) = delete;
+  EventBus& operator=(const EventBus&) = delete;
+  EventBus(EventBus&&) = delete;
+  EventBus& operator=(EventBus&&) = delete;
+
   entt::registry& Registry() { return registry_; }
   const entt::registry& Registry() const { return registry_; }
 

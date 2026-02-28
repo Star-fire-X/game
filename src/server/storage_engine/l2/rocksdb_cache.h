@@ -13,6 +13,7 @@
 #include <storage_engine/storage_engine.h>
 
 #include "rocksdb/db.h"
+#include "rocksdb/statistics.h"
 #include "rocksdb/utilities/db_ttl.h"
 
 namespace mir2::storage_engine::l2 {
@@ -40,6 +41,10 @@ public:
         bool strict_ttl_reads = true;
         bool scan_fill_cache = false;
         bool iter_pin_data = true;
+        // Use a read-only no-block-cache DB handle for ForEach scans.
+        bool isolate_foreach_scan_reader = false;
+        // Enable RocksDB ticker stats (used for block-cache hit/miss observability).
+        bool enable_statistics = false;
         uint64_t max_version_persist_step = 64;
     };
 
@@ -229,6 +234,7 @@ private:
     Config config_;
     std::unique_ptr<rocksdb::DBWithTTL> db_;
     std::shared_ptr<rocksdb::Cache> block_cache_;
+    std::shared_ptr<rocksdb::Statistics> statistics_;
     std::vector<rocksdb::ColumnFamilyHandle*> cf_handles_;
     rocksdb::ColumnFamilyHandle* default_cf_ = nullptr;
     rocksdb::ColumnFamilyHandle* data_persistent_cf_ = nullptr;

@@ -1,12 +1,17 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "rocksdb/db.h"
@@ -22,6 +27,24 @@ constexpr const char* kCfOutbox = "cf_outbox";
 constexpr const char* kCfDeadLetter = "cf_dead_letter";
 constexpr const char* kCfMeta = "cf_meta";
 constexpr const char* kSchemaVersionKey = "__storage_schema_version__";
+
+std::vector<uint8_t> MakePayload(size_t bytes, uint8_t seed) {
+  std::vector<uint8_t> payload(bytes, seed);
+  for (size_t i = 0; i < bytes; ++i) {
+    payload[i] = static_cast<uint8_t>((seed + i) & 0xFF);
+  }
+  return payload;
+}
+
+bool BenchmarkOnlyEnabled() {
+  const char* env = std::getenv("LEGEND2_BENCHMARK_ONLY");
+  if (!env) {
+    return false;
+  }
+
+  const std::string value(env);
+  return value == "1" || value == "true" || value == "TRUE";
+}
 
 void DestroyHandles(rocksdb::DBWithTTL* db,
                     const std::vector<rocksdb::ColumnFamilyHandle*>& handles) {
@@ -435,6 +458,183 @@ TEST_F(RocksDBCacheP1Test, LegacyDefaultApisWriteToTtlTier) {
   EXPECT_FALSE(
       cache_->Get("legacy:ttl", RocksDBCache::DataTier::kPersistent)
           .has_value());
+}
+
+TEST_F(RocksDBCacheP1Test,
+       BenchmarkForEachScanIsolationPreservesBlockCacheHitRateVsBaseline) {
+  if (!BenchmarkOnlyEnabled()) {
+    GTEST_SKIP() << "Set LEGEND2_BENCHMARK_ONLY=1 to run benchmark tests.";
+  }
+
+  cache_.reset();
+
+  struct ScenarioResult {
+    double hit_ratio = 0.0;
+    uint64_t hit_delta = 0;
+    uint64_t miss_delta = 0;
+    size_t point_reads = 0;
+    size_t scan_rounds = 0;
+  };
+
+  auto run_scenario = [&](bool isolate_scan_reader) -> ScenarioResult {
+    ScenarioResult result;
+    RocksDBCache::Config scenario_config = config_;
+    scenario_config.db_path =
+        db_path_ + (isolate_scan_reader ? "_scan_isolated" : "_scan_baseline");
+    scenario_config.block_cache_size = 8 * 1024 * 1024;
+    scenario_config.scan_fill_cache = false;
+    scenario_config.iter_pin_data = true;
+    scenario_config.isolate_foreach_scan_reader = isolate_scan_reader;
+    scenario_config.enable_statistics = true;
+    scenario_config.data_write_buffer_size = 2 * 1024 * 1024;
+
+    std::error_code ec;
+    std::filesystem::remove_all(scenario_config.db_path, ec);
+
+    auto scenario_cache = std::make_unique<RocksDBCache>(scenario_config);
+    const bool initialized = scenario_cache->Initialize();
+    EXPECT_TRUE(initialized);
+    if (!initialized) {
+      return result;
+    }
+
+    constexpr size_t kTotalKeys = 24000;
+    constexpr size_t kHotKeys = 1024;
+    constexpr size_t kPayloadBytes = 512;
+
+    std::vector<std::string> hot_keys;
+    hot_keys.reserve(kHotKeys);
+    const uint64_t now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    for (size_t i = 0; i < kTotalKeys; ++i) {
+      const std::string key = "scan:key:" + std::to_string(i);
+      VersionedData data{
+          .version = static_cast<uint64_t>(i + 1),
+          .data = MakePayload(kPayloadBytes, static_cast<uint8_t>(i & 0xFF)),
+          .timestamp_ms = now_ms};
+      if (!scenario_cache->Set(key, data, RocksDBCache::DataTier::kTtl)) {
+        ADD_FAILURE() << "Failed to populate test key " << key;
+        return result;
+      }
+      if (i < kHotKeys) {
+        hot_keys.push_back(key);
+      }
+    }
+
+    // Reopen once so subsequent reads go through SST/block-cache path
+    // instead of mostly serving from memtable.
+    scenario_cache.reset();
+    scenario_cache = std::make_unique<RocksDBCache>(scenario_config);
+    if (!scenario_cache->Initialize()) {
+      ADD_FAILURE() << "Failed to reopen benchmark cache";
+      return result;
+    }
+
+    // Warm the hot read set into block cache.
+    for (size_t round = 0; round < 6; ++round) {
+      for (const auto& key : hot_keys) {
+        auto hit = scenario_cache->Get(key, RocksDBCache::DataTier::kTtl);
+        if (!hit.has_value()) {
+          ADD_FAILURE() << "Warm-up miss for key " << key;
+          return result;
+        }
+      }
+    }
+
+    uint64_t hit_before = 0;
+    uint64_t miss_before = 0;
+    if (!scenario_cache->GetUInt64Property("rocksdb.block-cache-hit",
+                                           &hit_before)) {
+      ADD_FAILURE() << "Failed to read rocksdb.block-cache-hit before workload";
+      return result;
+    }
+    if (!scenario_cache->GetUInt64Property("rocksdb.block-cache-miss",
+                                           &miss_before)) {
+      ADD_FAILURE() << "Failed to read rocksdb.block-cache-miss before workload";
+      return result;
+    }
+
+    std::atomic<bool> stop_scan{false};
+    std::atomic<size_t> scan_rounds{0};
+    std::thread scanner([&]() {
+      while (!stop_scan.load(std::memory_order_relaxed)) {
+        scenario_cache->ForEach(
+            [](const std::string&, const VersionedData&) { return true; },
+            RocksDBCache::DataTier::kTtl);
+        scan_rounds.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+
+    std::mt19937 rng(0xC0FFEE);
+    std::uniform_int_distribution<size_t> pick_hot_key(0, kHotKeys - 1);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    size_t point_reads = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+      const std::string& key = hot_keys[pick_hot_key(rng)];
+      auto hit = scenario_cache->Get(key, RocksDBCache::DataTier::kTtl);
+      if (!hit.has_value()) {
+        ADD_FAILURE() << "Point read miss during benchmark for key " << key;
+        break;
+      }
+      ++point_reads;
+    }
+
+    stop_scan.store(true, std::memory_order_relaxed);
+    scanner.join();
+
+    uint64_t hit_after = 0;
+    uint64_t miss_after = 0;
+    if (!scenario_cache->GetUInt64Property("rocksdb.block-cache-hit",
+                                           &hit_after)) {
+      ADD_FAILURE() << "Failed to read rocksdb.block-cache-hit after workload";
+      return result;
+    }
+    if (!scenario_cache->GetUInt64Property("rocksdb.block-cache-miss",
+                                           &miss_after)) {
+      ADD_FAILURE() << "Failed to read rocksdb.block-cache-miss after workload";
+      return result;
+    }
+
+    result.hit_delta = hit_after - hit_before;
+    result.miss_delta = miss_after - miss_before;
+    result.point_reads = point_reads;
+    result.scan_rounds = scan_rounds.load(std::memory_order_relaxed);
+    const uint64_t total = result.hit_delta + result.miss_delta;
+    if (total > 0) {
+      result.hit_ratio = static_cast<double>(result.hit_delta) /
+                         static_cast<double>(total);
+    }
+
+    std::cout << "[rocksdb_scan_bench] isolate=" << isolate_scan_reader
+              << " reads=" << result.point_reads
+              << " scans=" << result.scan_rounds
+              << " hit_delta=" << result.hit_delta
+              << " miss_delta=" << result.miss_delta
+              << " hit_ratio=" << result.hit_ratio << std::endl;
+
+    scenario_cache.reset();
+    std::filesystem::remove_all(scenario_config.db_path, ec);
+    return result;
+  };
+
+  const ScenarioResult baseline = run_scenario(false);
+  const ScenarioResult isolated = run_scenario(true);
+
+  const uint64_t baseline_total = baseline.hit_delta + baseline.miss_delta;
+  const uint64_t isolated_total = isolated.hit_delta + isolated.miss_delta;
+  ASSERT_GT(baseline.point_reads, 10000U);
+  ASSERT_GT(isolated.point_reads, 10000U);
+  ASSERT_GT(baseline_total, 1000U);
+  ASSERT_GT(isolated_total, 1000U);
+
+  // Scan isolation should not significantly worsen cache hit quality.
+  EXPECT_GE(isolated.hit_ratio, baseline.hit_ratio * 0.95)
+      << "baseline_hit_ratio=" << baseline.hit_ratio
+      << ", isolated_hit_ratio=" << isolated.hit_ratio;
 }
 
 }  // namespace

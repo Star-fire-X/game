@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 #include <thread>
 #include <utility>
@@ -11,6 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "rocksdb/filter_policy.h"
+#include "rocksdb/statistics.h"
 #include "rocksdb/table.h"
 #include "rocksdb/utilities/db_ttl.h"
 
@@ -23,6 +25,7 @@ RocksDBCache::~RocksDBCache() {
     DestroyColumnFamilies();
     db_.reset();
     block_cache_.reset();
+    statistics_.reset();
 }
 
 bool RocksDBCache::Initialize() {
@@ -68,6 +71,11 @@ bool RocksDBCache::Initialize() {
         options.IncreaseParallelism(
             std::max(1u, std::thread::hardware_concurrency()));
         options.OptimizeLevelStyleCompaction(data_write_buffer_size);
+        if (config_.enable_statistics) {
+            statistics_ = rocksdb::CreateDBStatistics();
+            statistics_->set_stats_level(rocksdb::StatsLevel::kAll);
+            options.statistics = statistics_;
+        }
 
         rocksdb::DBOptions db_options(options);
         db_options.create_if_missing = true;
@@ -168,13 +176,16 @@ bool RocksDBCache::Initialize() {
             logger->info(
                 "RocksDB initialized: path={}, ttl={}s, cf_count={}, "
                 "block_cache={}MB, strict_ttl_reads={}, scan_fill_cache={}, "
-                "iter_pin_data={}",
+                "iter_pin_data={}, isolate_foreach_scan_reader={}, "
+                "statistics_enabled={}",
                 config_.db_path, config_.ttl_seconds,
                 cf_handles_.size(),
                 config_.block_cache_size / (1024 * 1024),
                 config_.strict_ttl_reads,
                 config_.scan_fill_cache,
-                config_.iter_pin_data);
+                config_.iter_pin_data,
+                config_.isolate_foreach_scan_reader,
+                config_.enable_statistics);
         }
 
         std::string max_version_str;
@@ -495,7 +506,9 @@ rocksdb::ReadOptions RocksDBCache::BuildPointReadOptions() const {
 rocksdb::ReadOptions RocksDBCache::BuildScanReadOptions() const {
     rocksdb::ReadOptions opts;
     opts.fill_cache = config_.scan_fill_cache;
-    opts.pin_data = config_.iter_pin_data;
+    // Avoid pinning scan iterator data when scan fill-cache is disabled.
+    // This keeps long scans from perturbing hot block residency.
+    opts.pin_data = config_.scan_fill_cache ? config_.iter_pin_data : false;
     return opts;
 }
 
@@ -1134,11 +1147,12 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
         return 0;
     }
 
-    size_t count = 0;
-    try {
+    auto iterate_with = [&](rocksdb::DB* db,
+                            rocksdb::ColumnFamilyHandle* cf,
+                            const rocksdb::ReadOptions& read_options) -> size_t {
+        size_t count = 0;
         std::unique_ptr<rocksdb::Iterator> it(
-            db_->NewIterator(BuildScanReadOptions(), target_cf));
-
+            db->NewIterator(read_options, cf));
         for (it->SeekToFirst(); it->Valid(); it->Next()) {
             std::string key = it->key().ToString();
 
@@ -1160,6 +1174,129 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
                 break;
             }
         }
+        return count;
+    };
+
+    size_t count = 0;
+    try {
+        if (config_.isolate_foreach_scan_reader && !config_.scan_fill_cache) {
+            auto destroy_scan_handles =
+                [](rocksdb::DB* db,
+                   std::vector<rocksdb::ColumnFamilyHandle*>* handles) {
+                    if (db == nullptr || handles == nullptr) {
+                        return;
+                    }
+                    for (auto* handle : *handles) {
+                        if (handle != nullptr) {
+                            db->DestroyColumnFamilyHandle(handle);
+                        }
+                    }
+                    handles->clear();
+                };
+
+            rocksdb::DBOptions scan_db_options;
+            scan_db_options.create_if_missing = false;
+            scan_db_options.create_missing_column_families = false;
+            scan_db_options.max_open_files = -1;
+
+            rocksdb::BlockBasedTableOptions scan_table_options;
+            scan_table_options.no_block_cache = true;
+            scan_table_options.cache_index_and_filter_blocks = false;
+            scan_table_options.pin_l0_filter_and_index_blocks_in_cache = false;
+            scan_table_options.block_size =
+                std::max<uint32_t>(1024, config_.block_size);
+
+            rocksdb::Options scan_cf_base;
+            scan_cf_base.table_factory.reset(
+                rocksdb::NewBlockBasedTableFactory(scan_table_options));
+
+            std::vector<rocksdb::ColumnFamilyDescriptor> scan_descriptors;
+            scan_descriptors.reserve(kColumnFamilyCount);
+            scan_descriptors.emplace_back(rocksdb::kDefaultColumnFamilyName,
+                                          scan_cf_base);
+            scan_descriptors.emplace_back(GetDataPersistentCFName(), scan_cf_base);
+            scan_descriptors.emplace_back(GetDataTtlCFName(), scan_cf_base);
+            scan_descriptors.emplace_back(GetOutboxCFName(), scan_cf_base);
+            scan_descriptors.emplace_back(GetDeadLetterCFName(), scan_cf_base);
+            scan_descriptors.emplace_back(GetMetaCFName(), scan_cf_base);
+
+            std::vector<rocksdb::ColumnFamilyHandle*> scan_handles;
+            scan_handles.reserve(kColumnFamilyCount);
+            rocksdb::DB* raw_scan_db = nullptr;
+            const std::string secondary_path =
+                "/tmp/mir2_rocksdb_scan_secondary_" +
+                std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count()) +
+                "_" +
+                std::to_string(
+                    std::hash<std::thread::id>{}(std::this_thread::get_id()));
+            std::error_code fs_ec;
+            (void)std::filesystem::remove_all(secondary_path, fs_ec);
+            (void)std::filesystem::create_directories(secondary_path, fs_ec);
+
+            rocksdb::Status scan_status = rocksdb::DB::OpenAsSecondary(
+                scan_db_options, config_.db_path, secondary_path,
+                scan_descriptors, &scan_handles, &raw_scan_db);
+            if (scan_status.ok() && raw_scan_db != nullptr &&
+                scan_handles.size() == kColumnFamilyCount) {
+                std::unique_ptr<rocksdb::DB> scan_db(raw_scan_db);
+                raw_scan_db = nullptr;
+                const rocksdb::Status catch_up_status =
+                    scan_db->TryCatchUpWithPrimary();
+                if (!catch_up_status.ok()) {
+                    auto logger = spdlog::get("mir2");
+                    if (logger) {
+                        logger->warn("ForEach isolated scan catch-up failed: {}",
+                                     catch_up_status.ToString());
+                    }
+                }
+                const uint64_t primary_seq = db_->GetLatestSequenceNumber();
+                const uint64_t secondary_seq = scan_db->GetLatestSequenceNumber();
+                const bool scan_is_fresh = catch_up_status.ok() &&
+                                           secondary_seq >= primary_seq;
+                if (scan_is_fresh) {
+                    rocksdb::ColumnFamilyHandle* scan_target_cf =
+                        tier == DataTier::kPersistent
+                            ? scan_handles[kDataPersistentCFIndex]
+                            : scan_handles[kDataTtlCFIndex];
+                    count = iterate_with(scan_db.get(), scan_target_cf,
+                                         BuildScanReadOptions());
+                    destroy_scan_handles(scan_db.get(), &scan_handles);
+                    (void)std::filesystem::remove_all(secondary_path, fs_ec);
+                    return count;
+                }
+                auto logger = spdlog::get("mir2");
+                if (logger) {
+                    logger->warn(
+                        "ForEach isolated scan reader stale (primary_seq={}, "
+                        "secondary_seq={}), fallback to main DB iterator",
+                        primary_seq, secondary_seq);
+                }
+                destroy_scan_handles(scan_db.get(), &scan_handles);
+                (void)std::filesystem::remove_all(secondary_path, fs_ec);
+            } else if (raw_scan_db != nullptr) {
+                destroy_scan_handles(raw_scan_db, &scan_handles);
+                delete raw_scan_db;
+                raw_scan_db = nullptr;
+            }
+
+            if (raw_scan_db != nullptr) {
+                destroy_scan_handles(raw_scan_db, &scan_handles);
+                delete raw_scan_db;
+                raw_scan_db = nullptr;
+            }
+            (void)std::filesystem::remove_all(secondary_path, fs_ec);
+
+            auto logger = spdlog::get("mir2");
+            if (logger) {
+                logger->warn(
+                    "ForEach isolated scan reader unavailable, falling back to "
+                    "main DB iterator: {}",
+                    scan_status.ToString());
+            }
+        }
+
+        count = iterate_with(db_.get(), target_cf, BuildScanReadOptions());
     } catch (const std::exception& e) {
         auto logger = spdlog::get("mir2");
         if (logger) {
@@ -1353,16 +1490,34 @@ bool RocksDBCache::GetUInt64Property(const std::string& property,
         return false;
     }
 
+    std::optional<uint64_t> ticker_value;
+    if (statistics_ != nullptr) {
+        if (property == "rocksdb.block-cache-hit") {
+            ticker_value = statistics_->getTickerCount(rocksdb::BLOCK_CACHE_HIT);
+        }
+        if (property == "rocksdb.block-cache-miss") {
+            ticker_value = statistics_->getTickerCount(rocksdb::BLOCK_CACHE_MISS);
+        }
+    }
+
     const rocksdb::Slice property_slice(property);
     uint64_t int_value = 0;
     // For multi-CF deployments, aggregated int properties better reflect
     // real load than default-CF-only properties.
     if (db_->GetAggregatedIntProperty(property_slice, &int_value)) {
-        *out = int_value;
+        *out = ticker_value.has_value()
+                   ? std::max(*ticker_value, int_value)
+                   : int_value;
         return true;
     }
     if (db_->GetIntProperty(property_slice, &int_value)) {
-        *out = int_value;
+        *out = ticker_value.has_value()
+                   ? std::max(*ticker_value, int_value)
+                   : int_value;
+        return true;
+    }
+    if (ticker_value.has_value()) {
+        *out = *ticker_value;
         return true;
     }
 

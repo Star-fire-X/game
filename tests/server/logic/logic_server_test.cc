@@ -25,6 +25,7 @@
 
 #include <array>
 #include <atomic>
+#include <csignal>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -344,6 +345,55 @@ class LogicServerTest : public ::testing::Test {
     map_file_path_.clear();
     created_map_file_ = false;
     had_existing_map_file_ = false;
+  }
+
+  bool SetStorageEngineBoolConfig(const std::string& key, bool value) {
+    if (config_path_.empty()) {
+      return false;
+    }
+
+    std::ifstream input(config_path_, std::ios::in);
+    if (!input.is_open()) {
+      return false;
+    }
+    const std::string content(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    input.close();
+
+    const std::string key_prefix = "  " + key + ":";
+    const std::string new_line =
+        key_prefix + (value ? " true" : " false");
+
+    std::string updated = content;
+    const size_t key_pos = updated.find(key_prefix);
+    if (key_pos != std::string::npos) {
+      const size_t line_end = updated.find('\n', key_pos);
+      const size_t replace_len =
+          line_end == std::string::npos ? updated.size() - key_pos
+                                        : line_end - key_pos;
+      updated.replace(key_pos, replace_len, new_line);
+    } else {
+      const std::string section_header = "storage_engine:\n";
+      const size_t section_pos = updated.find(section_header);
+      if (section_pos == std::string::npos) {
+        return false;
+      }
+      const size_t insert_pos =
+          updated.find('\n', section_pos + section_header.size());
+      if (insert_pos == std::string::npos) {
+        return false;
+      }
+      updated.insert(insert_pos + 1, new_line + "\n");
+    }
+
+    std::ofstream output(config_path_, std::ios::out | std::ios::trunc);
+    if (!output.is_open()) {
+      return false;
+    }
+    output << updated;
+    output.flush();
+    return output.good();
   }
 
   /**
@@ -719,17 +769,47 @@ TEST_F(LogicServerTest, MetricsAreUpdatedCorrectly) {
  * @brief Test: Server handles configuration reload
  */
 TEST_F(LogicServerTest, HandlesConfigurationReload) {
-  // Note: If server doesn't support hot reload, this test
-  // would verify that the feature is not supported gracefully
-
+#if !defined(SIGUSR1)
+  GTEST_SKIP() << "SIGUSR1 not supported on this platform";
+#endif
+  ASSERT_TRUE(SetStorageEngineBoolConfig("enable_strict_write_guarantee", false));
+  ASSERT_TRUE(SetStorageEngineBoolConfig("enable_new_write_path", true));
   ASSERT_TRUE(InitializeServer());
   StartServerAsync();
 
-  // Attempt to modify config (if supported)
-  std::this_thread::sleep_for(100ms);
+  auto& engine = storage_engine::StorageEngine::Instance();
+
+  const std::string before_key = "logic:reload:before:key";
+  const std::vector<std::pair<std::string, std::vector<uint8_t>>> before_batch = {
+      {before_key, {1, 2, 3}},
+      {"", {9}},
+  };
+  EXPECT_FALSE(engine.BatchSet(before_batch));
+  EXPECT_TRUE(engine.Get(before_key).has_value());
+
+  ASSERT_TRUE(SetStorageEngineBoolConfig("enable_new_write_path", false));
+  std::raise(SIGUSR1);
+
+  bool switched = false;
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  uint32_t attempt = 0;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const std::string key =
+        "logic:reload:after:key:" + std::to_string(attempt++);
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>> batch = {
+        {key, {4, 5, 6}},
+        {"", {8}},
+    };
+    EXPECT_FALSE(engine.BatchSet(batch));
+    if (!engine.Get(key).has_value()) {
+      switched = true;
+      break;
+    }
+    std::this_thread::sleep_for(50ms);
+  }
+  EXPECT_TRUE(switched);
 
   ShutdownServer();
-  SUCCEED();
 }
 
 }  // namespace

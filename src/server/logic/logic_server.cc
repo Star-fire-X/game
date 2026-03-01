@@ -3328,6 +3328,7 @@ bool LogicServer::ReloadStorageRuntimeConfig() {
   runtime.circuit_breaker_timeout_ms = loaded.circuit_breaker_timeout_ms;
   runtime.enable_metrics = loaded.enable_metrics;
   runtime.enable_strict_write_guarantee = loaded.enable_strict_write_guarantee;
+  runtime.enable_new_write_path = loaded.enable_new_write_path;
   runtime.enable_access_control = loaded.enable_access_control;
   runtime.require_auth_for_reads = loaded.require_auth_for_reads;
   runtime.access_control_token = loaded.access_control_token;
@@ -3336,7 +3337,7 @@ bool LogicServer::ReloadStorageRuntimeConfig() {
       storage_engine::StorageEngine::Instance().ApplyRuntimeConfig(runtime);
   if (applied) {
     SYSLOG_INFO(
-        "LogicServer reloaded storage runtime config: l1_ttl={} sync_ms={} batch={} retry={} retry_delay_ms={} metrics={} strict_write={} access_control={} auth_reads={}",
+        "LogicServer reloaded storage runtime config: l1_ttl={} sync_ms={} batch={} retry={} retry_delay_ms={} metrics={} strict_write={} new_write_path={} access_control={} auth_reads={}",
         loaded.l1_ttl_seconds,
         loaded.auto_sync_interval_ms,
         loaded.batch_size,
@@ -3344,6 +3345,7 @@ bool LogicServer::ReloadStorageRuntimeConfig() {
         loaded.queue_retry_delay_ms,
         loaded.enable_metrics,
         loaded.enable_strict_write_guarantee,
+        loaded.enable_new_write_path,
         loaded.enable_access_control,
         loaded.require_auth_for_reads);
   } else {

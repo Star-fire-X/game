@@ -886,6 +886,56 @@ TEST(StorageEnginePhase1ApiTest,
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEnginePhase1ApiTest,
+     BatchSetWithAccessEmitsItemAuditForWriteStageFailure) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+    config.enable_new_write_path = true;
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext allowed{
+        .principal = "bob",
+        .access_token = "phase1-token",
+        .trusted = false,
+    };
+
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>> kvs = {
+        {"phase1:acl:batchset:audit:ok", {1, 2, 3}},
+        {"phase1:acl:batchset:audit:oversize",
+         std::vector<uint8_t>(4 * 1024 * 1024 + 1, 0xCD)},
+    };
+
+    EXPECT_FALSE(engine.BatchSetWithAccess(kvs, allowed, Priority::NORMAL));
+
+    auto loaded = engine.Get("phase1:acl:batchset:audit:ok");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->data, (std::vector<uint8_t>{1, 2, 3}));
+
+    const auto audit = engine.GetRecentAuditEntries(64);
+    bool has_item_failure = false;
+    for (const auto& entry : audit) {
+        if (entry.operation == "batch_set" &&
+            entry.key == "phase1:acl:batchset:audit:oversize" &&
+            !entry.success &&
+            entry.reason == "value_too_large") {
+            has_item_failure = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(has_item_failure);
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
     auto& engine = StorageEngine::Instance();
     ASSERT_TRUE(engine.Set("inv:one", {1}));

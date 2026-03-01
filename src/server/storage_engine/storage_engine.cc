@@ -2492,6 +2492,22 @@ bool StorageEngine::BatchSetWithAccess(
 
     const auto result = BatchWriteWithAccess(items, access);
     const bool success = result.failed == 0;
+    if (!success) {
+        for (size_t i = 0; i < result.failed_keys.size(); ++i) {
+            const std::string& failed_key = result.failed_keys[i];
+            const std::string reason =
+                i < result.failure_reasons.size() ? result.failure_reasons[i]
+                                                  : "batch_set_failed";
+            pimpl_->RecordAuditEntry(AuditEntry{
+                .timestamp_ms = detail::GetCurrentTimeMs(),
+                .principal = access.principal,
+                .operation = "batch_set",
+                .key = failed_key,
+                .success = false,
+                .reason = reason,
+            });
+        }
+    }
     pimpl_->RecordAuditEntry(AuditEntry{
         .timestamp_ms = detail::GetCurrentTimeMs(),
         .principal = access.principal,

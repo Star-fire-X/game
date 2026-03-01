@@ -116,6 +116,13 @@ const char* WriteRejectReasonToString(WriteRejectReason reason) {
     return "unknown";
 }
 
+WriteRejectReason DenyReasonToWriteRejectReason(const std::string& deny_reason) {
+    if (deny_reason == "invalid_key") {
+        return WriteRejectReason::kInvalidKey;
+    }
+    return WriteRejectReason::kAccessDenied;
+}
+
 // Lock-free fast path for StorageEngine::Instance().
 std::atomic<StorageEngine*> g_instance_ptr{nullptr};
 }  // namespace
@@ -2105,11 +2112,25 @@ bool StorageEngine::DeleteWithAccess(const std::string& key,
 BatchWriteResult StorageEngine::BatchWriteWithAccess(
     const std::vector<BatchWriteItem>& items,
     const AccessContext& access) {
+    BatchWriteResult result;
+    result.total = items.size();
+
+    std::vector<BatchWriteItem> authorized_items;
+    authorized_items.reserve(items.size());
+
     for (const auto& item : items) {
         std::string deny_reason;
-        if (!pimpl_->CheckAccessInternal(AccessOperation::kBatchSet, item.key,
-                                         access, &deny_reason)) {
-            pimpl_->RecordAccessDecision(false);
+        const bool allowed = pimpl_->CheckAccessInternal(
+            AccessOperation::kBatchSet, item.key, access, &deny_reason);
+        pimpl_->RecordAccessDecision(allowed);
+        if (!allowed) {
+            const WriteRejectReason reason =
+                DenyReasonToWriteRejectReason(deny_reason);
+            ++result.failed;
+            result.failed_keys.push_back(item.key);
+            result.failure_reasons.push_back(WriteRejectReasonToString(reason));
+            result.failure_reason_codes.push_back(reason);
+            pimpl_->RecordWriteRejectReason(reason);
             pimpl_->RecordAuditEntry(AuditEntry{
                 .timestamp_ms = detail::GetCurrentTimeMs(),
                 .principal = access.principal,
@@ -2118,26 +2139,27 @@ BatchWriteResult StorageEngine::BatchWriteWithAccess(
                 .success = false,
                 .reason = deny_reason,
             });
-            BatchWriteResult denied;
-            denied.total = items.size();
-            denied.failed = items.size();
-            denied.failed_keys.reserve(items.size());
-            denied.failure_reasons.reserve(items.size());
-            denied.failure_reason_codes.reserve(items.size());
-            for (const auto& failed_item : items) {
-                denied.failed_keys.push_back(failed_item.key);
-                denied.failure_reasons.push_back(
-                    WriteRejectReasonToString(WriteRejectReason::kAccessDenied));
-                denied.failure_reason_codes.push_back(
-                    WriteRejectReason::kAccessDenied);
-            }
-            pimpl_->RecordWriteRejectReason(WriteRejectReason::kAccessDenied);
-            return denied;
+            continue;
         }
+
+        authorized_items.push_back(item);
     }
 
-    pimpl_->RecordAccessDecision(true);
-    auto result = BatchWrite(items);
+    if (!authorized_items.empty()) {
+        auto authorized_result = BatchWrite(authorized_items);
+        result.succeeded += authorized_result.succeeded;
+        result.failed += authorized_result.failed;
+        result.failed_keys.insert(result.failed_keys.end(),
+                                  authorized_result.failed_keys.begin(),
+                                  authorized_result.failed_keys.end());
+        result.failure_reasons.insert(result.failure_reasons.end(),
+                                      authorized_result.failure_reasons.begin(),
+                                      authorized_result.failure_reasons.end());
+        result.failure_reason_codes.insert(result.failure_reason_codes.end(),
+                                           authorized_result.failure_reason_codes.begin(),
+                                           authorized_result.failure_reason_codes.end());
+    }
+
     pimpl_->RecordAuditEntry(AuditEntry{
         .timestamp_ms = detail::GetCurrentTimeMs(),
         .principal = access.principal,

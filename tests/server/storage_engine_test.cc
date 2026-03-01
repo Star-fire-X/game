@@ -529,6 +529,66 @@ TEST(StorageEnginePhase1ApiTest, PutAndDeleteWithAccessHonorTokenPolicy) {
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEnginePhase1ApiTest,
+     BatchWriteWithAccessAllowsAuthorizedItemsAndReportsPerItemFailure) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext allowed{
+        .principal = "bob",
+        .access_token = "phase1-token",
+        .trusted = false,
+    };
+
+    std::vector<BatchWriteItem> items;
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "phase1:acl:batch:ok",
+        .value = {1, 2, 3},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "",
+        .value = {9},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kDelete,
+        .key = "phase1:acl:batch:missing",
+        .value = {},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+
+    const auto result = engine.BatchWriteWithAccess(items, allowed);
+    EXPECT_EQ(result.total, 3U);
+    EXPECT_EQ(result.succeeded, 2U);
+    EXPECT_EQ(result.failed, 1U);
+    ASSERT_EQ(result.failed_keys.size(), 1U);
+    EXPECT_TRUE(result.failed_keys[0].empty());
+    ASSERT_EQ(result.failure_reason_codes.size(), 1U);
+    EXPECT_EQ(result.failure_reason_codes[0], WriteRejectReason::kInvalidKey);
+
+    auto loaded = engine.Get("phase1:acl:batch:ok");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->data, (std::vector<uint8_t>{1, 2, 3}));
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
     auto& engine = StorageEngine::Instance();
     ASSERT_TRUE(engine.Set("inv:one", {1}));

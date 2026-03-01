@@ -198,6 +198,8 @@ public:
         enable_metrics_.store(config_.enable_metrics, std::memory_order_release);
         enable_strict_write_guarantee_.store(
             config_.enable_strict_write_guarantee, std::memory_order_release);
+        enable_new_write_path_.store(
+            config_.enable_new_write_path, std::memory_order_release);
         enable_access_control_.store(
             config_.enable_access_control, std::memory_order_release);
         require_auth_for_reads_.store(
@@ -923,6 +925,11 @@ public:
             enable_strict_write_guarantee_.store(
                 *cfg.enable_strict_write_guarantee, std::memory_order_release);
         }
+        if (cfg.enable_new_write_path.has_value()) {
+            config_.enable_new_write_path = *cfg.enable_new_write_path;
+            enable_new_write_path_.store(
+                *cfg.enable_new_write_path, std::memory_order_release);
+        }
         if (cfg.enable_access_control.has_value()) {
             config_.enable_access_control = *cfg.enable_access_control;
             enable_access_control_.store(
@@ -1421,7 +1428,7 @@ public:
     }
 
     bool IsNewWritePathEnabled() const {
-        return config_.enable_new_write_path;
+        return enable_new_write_path_.load(std::memory_order_acquire);
     }
 
     void RecordWriteRejectReason(WriteRejectReason reason) const {
@@ -1531,6 +1538,7 @@ private:
     std::atomic<uint64_t> version_counter_{1};
     std::atomic<bool> enable_metrics_{true};
     std::atomic<bool> enable_strict_write_guarantee_{true};
+    std::atomic<bool> enable_new_write_path_{true};
     std::atomic<bool> enable_access_control_{false};
     std::atomic<bool> require_auth_for_reads_{false};
     mutable std::shared_mutex access_control_mutex_;

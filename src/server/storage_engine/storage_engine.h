@@ -175,6 +175,7 @@ public:
         std::optional<uint32_t> circuit_breaker_timeout_ms;
         std::optional<bool> enable_metrics;
         std::optional<bool> enable_strict_write_guarantee;
+        std::optional<bool> enable_new_write_path;
         std::optional<bool> enable_access_control;
         std::optional<bool> require_auth_for_reads;
         std::optional<std::string> access_control_token;

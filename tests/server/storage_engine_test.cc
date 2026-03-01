@@ -957,6 +957,45 @@ TEST(StorageEngineSetSemanticsTest, RuntimeConfigCanDisableStrictWriteGuarantee)
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEngineSetSemanticsTest,
+     RuntimeConfigCanDisableNewWritePathAndRestoreLegacyBatchSetBehavior) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.l2_path = "/dev/null/mir2_storage_engine_runtime_new_write_path";
+    config.enable_strict_write_guarantee = false;
+    config.enable_new_write_path = true;
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> kvs_new_path = {
+        {"runtime:newpath:good", {1, 2, 3}},
+        {"", {9}},
+    };
+    EXPECT_FALSE(engine.BatchSet(kvs_new_path));
+    auto new_path_good = engine.Get("runtime:newpath:good");
+    ASSERT_TRUE(new_path_good.has_value());
+    EXPECT_EQ(new_path_good->data, (std::vector<uint8_t>{1, 2, 3}));
+
+    StorageEngine::RuntimeTunableConfig runtime_cfg;
+    runtime_cfg.enable_new_write_path = false;
+    ASSERT_TRUE(engine.ApplyRuntimeConfig(runtime_cfg));
+
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> kvs_legacy_path = {
+        {"runtime:legacy:good", {4, 5, 6}},
+        {"", {8}},
+    };
+    EXPECT_FALSE(engine.BatchSet(kvs_legacy_path));
+    EXPECT_FALSE(engine.Get("runtime:legacy:good").has_value());
+
+    StorageEngine::Shutdown();
+}
+
 TEST(StorageEngineSetSemanticsTest, CriticalPrefixSetAutoUsesSyncPath) {
     if (StorageEngine::IsInitialized()) {
         StorageEngine::Shutdown();

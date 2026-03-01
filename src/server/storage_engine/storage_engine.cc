@@ -2296,6 +2296,14 @@ bool StorageEngine::BatchSetWithAccess(
                     .success = false,
                     .reason = deny_reason,
                 });
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_set",
+                    .key = "<batch>",
+                    .success = false,
+                    .reason = "batch_set_failed",
+                });
                 return false;
             }
         }

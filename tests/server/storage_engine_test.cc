@@ -827,6 +827,65 @@ TEST(StorageEnginePhase1ApiTest,
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEnginePhase1ApiTest,
+     BatchWriteWithAccessEmitsItemAuditForWriteStageFailure) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+    config.enable_new_write_path = true;
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext allowed{
+        .principal = "bob",
+        .access_token = "phase1-token",
+        .trusted = false,
+    };
+
+    std::vector<BatchWriteItem> items;
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "phase1:acl:audit:ok",
+        .value = {1, 2, 3},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "phase1:acl:audit:oversize",
+        .value = std::vector<uint8_t>(4 * 1024 * 1024 + 1, 0xAB),
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+
+    const auto result = engine.BatchWriteWithAccess(items, allowed);
+    EXPECT_EQ(result.total, 2U);
+    EXPECT_EQ(result.succeeded, 1U);
+    EXPECT_EQ(result.failed, 1U);
+
+    const auto audit = engine.GetRecentAuditEntries(64);
+    bool has_item_failure = false;
+    for (const auto& entry : audit) {
+        if (entry.operation == "batch_write" &&
+            entry.key == "phase1:acl:audit:oversize" &&
+            !entry.success &&
+            entry.reason == "value_too_large") {
+            has_item_failure = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(has_item_failure);
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
     auto& engine = StorageEngine::Instance();
     ASSERT_TRUE(engine.Set("inv:one", {1}));

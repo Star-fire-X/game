@@ -2191,6 +2191,20 @@ BatchWriteResult StorageEngine::BatchWriteWithAccess(
         }
 
         auto result = BatchWrite(items);
+        for (size_t i = 0; i < result.failed_keys.size(); ++i) {
+            const std::string& failed_key = result.failed_keys[i];
+            const std::string reason =
+                i < result.failure_reasons.size() ? result.failure_reasons[i]
+                                                  : "batch_write_failed";
+            pimpl_->RecordAuditEntry(AuditEntry{
+                .timestamp_ms = detail::GetCurrentTimeMs(),
+                .principal = access.principal,
+                .operation = "batch_write",
+                .key = failed_key,
+                .success = false,
+                .reason = reason,
+            });
+        }
         pimpl_->RecordAuditEntry(AuditEntry{
             .timestamp_ms = detail::GetCurrentTimeMs(),
             .principal = access.principal,
@@ -2237,6 +2251,21 @@ BatchWriteResult StorageEngine::BatchWriteWithAccess(
 
     if (!authorized_items.empty()) {
         auto authorized_result = BatchWrite(authorized_items);
+        for (size_t i = 0; i < authorized_result.failed_keys.size(); ++i) {
+            const std::string& failed_key = authorized_result.failed_keys[i];
+            const std::string reason =
+                i < authorized_result.failure_reasons.size()
+                    ? authorized_result.failure_reasons[i]
+                    : "batch_write_failed";
+            pimpl_->RecordAuditEntry(AuditEntry{
+                .timestamp_ms = detail::GetCurrentTimeMs(),
+                .principal = access.principal,
+                .operation = "batch_write",
+                .key = failed_key,
+                .success = false,
+                .reason = reason,
+            });
+        }
         result.succeeded += authorized_result.succeeded;
         result.failed += authorized_result.failed;
         result.failed_keys.insert(result.failed_keys.end(),

@@ -2227,6 +2227,46 @@ std::optional<VersionedData> StorageEngine::LoadFromDBWithAccess(
 std::vector<std::optional<VersionedData>> StorageEngine::BatchGetWithAccess(
     const std::vector<std::string>& keys,
     const AccessContext& access) {
+    if (!pimpl_->IsNewWritePathEnabled()) {
+        for (const auto& key : keys) {
+            std::string deny_reason;
+            const bool allowed = pimpl_->CheckAccessInternal(
+                AccessOperation::kBatchGet, key, access, &deny_reason);
+            pimpl_->RecordAccessDecision(allowed);
+            if (!allowed) {
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_get",
+                    .key = key,
+                    .success = false,
+                    .reason = deny_reason,
+                });
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_get",
+                    .key = "<batch>",
+                    .success = false,
+                    .reason = "batch_get_failed",
+                });
+                return std::vector<std::optional<VersionedData>>(
+                    keys.size(), std::nullopt);
+            }
+        }
+
+        auto result = BatchGet(keys);
+        pimpl_->RecordAuditEntry(AuditEntry{
+            .timestamp_ms = detail::GetCurrentTimeMs(),
+            .principal = access.principal,
+            .operation = "batch_get",
+            .key = "<batch>",
+            .success = true,
+            .reason = "ok",
+        });
+        return result;
+    }
+
     std::vector<std::optional<VersionedData>> result(keys.size(), std::nullopt);
     std::vector<std::string> allowed_keys;
     std::vector<size_t> allowed_indices;

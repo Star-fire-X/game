@@ -743,6 +743,43 @@ TEST(StorageEnginePhase1ApiTest,
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEnginePhase1ApiTest,
+     BatchGetWithAccessRespectsLegacyPathWhenNewWritePathDisabled) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+    config.enable_new_write_path = false;
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext allowed{
+        .principal = "bob",
+        .access_token = "phase1-token",
+        .trusted = false,
+    };
+
+    WriteOptions options;
+    options.durability = WriteDurability::kBestEffort;
+    options.priority = Priority::NORMAL;
+    ASSERT_TRUE(engine.PutWithAccess("phase1:acl:legacy:batchget:ok", {2, 2, 2},
+                                     allowed, options));
+
+    const auto result = engine.BatchGetWithAccess(
+        {"phase1:acl:legacy:batchget:ok", ""}, allowed);
+    ASSERT_EQ(result.size(), 2U);
+    EXPECT_FALSE(result[0].has_value());
+    EXPECT_FALSE(result[1].has_value());
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
     auto& engine = StorageEngine::Instance();
     ASSERT_TRUE(engine.Set("inv:one", {1}));

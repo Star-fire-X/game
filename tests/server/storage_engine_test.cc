@@ -780,6 +780,53 @@ TEST(StorageEnginePhase1ApiTest,
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEnginePhase1ApiTest,
+     BatchWriteWithAccessRespectsLegacyPathWhenNewWritePathDisabled) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+    config.enable_new_write_path = false;
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext allowed{
+        .principal = "bob",
+        .access_token = "phase1-token",
+        .trusted = false,
+    };
+
+    std::vector<BatchWriteItem> items;
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "phase1:acl:legacy:batchwrite:ok",
+        .value = {3, 3, 3},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+    items.push_back(BatchWriteItem{
+        .op = BatchWriteItem::Op::kPut,
+        .key = "",
+        .value = {9},
+        .write_options = WriteOptions{},
+        .delete_options = DeleteOptions{},
+    });
+
+    const auto result = engine.BatchWriteWithAccess(items, allowed);
+    EXPECT_EQ(result.total, 2U);
+    EXPECT_EQ(result.succeeded, 0U);
+    EXPECT_EQ(result.failed, 2U);
+    EXPECT_FALSE(engine.Get("phase1:acl:legacy:batchwrite:ok").has_value());
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
     auto& engine = StorageEngine::Instance();
     ASSERT_TRUE(engine.Set("inv:one", {1}));

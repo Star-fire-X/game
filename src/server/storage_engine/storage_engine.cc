@@ -2112,6 +2112,96 @@ bool StorageEngine::DeleteWithAccess(const std::string& key,
 BatchWriteResult StorageEngine::BatchWriteWithAccess(
     const std::vector<BatchWriteItem>& items,
     const AccessContext& access) {
+    if (!pimpl_->IsNewWritePathEnabled()) {
+        for (const auto& item : items) {
+            std::string deny_reason;
+            const bool allowed = pimpl_->CheckAccessInternal(
+                AccessOperation::kBatchSet, item.key, access, &deny_reason);
+            pimpl_->RecordAccessDecision(allowed);
+            if (!allowed) {
+                const WriteRejectReason reason =
+                    DenyReasonToWriteRejectReason(deny_reason);
+                BatchWriteResult denied;
+                denied.total = items.size();
+                denied.failed = items.size();
+                denied.failed_keys.reserve(items.size());
+                denied.failure_reasons.reserve(items.size());
+                denied.failure_reason_codes.reserve(items.size());
+                for (const auto& failed_item : items) {
+                    denied.failed_keys.push_back(failed_item.key);
+                    denied.failure_reasons.push_back(
+                        WriteRejectReasonToString(reason));
+                    denied.failure_reason_codes.push_back(reason);
+                }
+                pimpl_->RecordWriteRejectReason(reason);
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_write",
+                    .key = item.key,
+                    .success = false,
+                    .reason = deny_reason,
+                });
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_write",
+                    .key = "<batch>",
+                    .success = false,
+                    .reason = "batch_write_failed",
+                });
+                return denied;
+            }
+            if (item.op == BatchWriteItem::Op::kPut &&
+                item.value.size() > kMaxStorageValueSize) {
+                BatchWriteResult denied;
+                denied.total = items.size();
+                denied.failed = items.size();
+                denied.failed_keys.reserve(items.size());
+                denied.failure_reasons.reserve(items.size());
+                denied.failure_reason_codes.reserve(items.size());
+                for (const auto& failed_item : items) {
+                    denied.failed_keys.push_back(failed_item.key);
+                    denied.failure_reasons.push_back(
+                        WriteRejectReasonToString(
+                            WriteRejectReason::kValueTooLarge));
+                    denied.failure_reason_codes.push_back(
+                        WriteRejectReason::kValueTooLarge);
+                }
+                pimpl_->RecordWriteRejectReason(
+                    WriteRejectReason::kValueTooLarge);
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_write",
+                    .key = item.key,
+                    .success = false,
+                    .reason = "value_too_large",
+                });
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_write",
+                    .key = "<batch>",
+                    .success = false,
+                    .reason = "batch_write_failed",
+                });
+                return denied;
+            }
+        }
+
+        auto result = BatchWrite(items);
+        pimpl_->RecordAuditEntry(AuditEntry{
+            .timestamp_ms = detail::GetCurrentTimeMs(),
+            .principal = access.principal,
+            .operation = "batch_write",
+            .key = "<batch>",
+            .success = result.failed == 0,
+            .reason = result.failed == 0 ? "ok" : "batch_write_failed",
+        });
+        return result;
+    }
+
     BatchWriteResult result;
     result.total = items.size();
 

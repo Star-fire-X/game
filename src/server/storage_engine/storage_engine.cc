@@ -2261,25 +2261,20 @@ bool StorageEngine::BatchSetWithAccess(
     const std::vector<std::pair<std::string, std::vector<uint8_t>>>& kvs,
     const AccessContext& access,
     Priority priority) {
+    std::vector<BatchWriteItem> items;
+    items.reserve(kvs.size());
     for (const auto& [key, value] : kvs) {
-        (void)value;
-        std::string deny_reason;
-        if (!pimpl_->CheckAccessInternal(AccessOperation::kBatchSet, key, access,
-                                         &deny_reason)) {
-            pimpl_->RecordAccessDecision(false);
-            pimpl_->RecordAuditEntry(AuditEntry{
-                .timestamp_ms = detail::GetCurrentTimeMs(),
-                .principal = access.principal,
-                .operation = "batch_set",
-                .key = key,
-                .success = false,
-                .reason = deny_reason,
-            });
-            return false;
-        }
+        BatchWriteItem item;
+        item.op = BatchWriteItem::Op::kPut;
+        item.key = key;
+        item.value = value;
+        item.write_options.priority = priority;
+        item.write_options.durability = WriteDurability::kBestEffort;
+        items.push_back(std::move(item));
     }
-    pimpl_->RecordAccessDecision(true);
-    const bool success = BatchSet(kvs, priority);
+
+    const auto result = BatchWriteWithAccess(items, access);
+    const bool success = result.failed == 0;
     pimpl_->RecordAuditEntry(AuditEntry{
         .timestamp_ms = detail::GetCurrentTimeMs(),
         .principal = access.principal,

@@ -662,6 +662,51 @@ TEST(StorageEnginePhase1ApiTest,
 }
 
 TEST(StorageEnginePhase1ApiTest,
+     BatchGetWithAccessUsesFailedSummaryWhenAllKeysDenied) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+    config.enable_new_write_path = true;
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext denied{
+        .principal = "eve",
+        .access_token = "wrong-token",
+        .trusted = false,
+    };
+
+    const auto result = engine.BatchGetWithAccess(
+        {"phase1:acl:batchget:denied:a", "phase1:acl:batchget:denied:b"},
+        denied);
+    ASSERT_EQ(result.size(), 2U);
+    EXPECT_FALSE(result[0].has_value());
+    EXPECT_FALSE(result[1].has_value());
+
+    const auto audit = engine.GetRecentAuditEntries(32);
+    bool has_failed_batch_summary = false;
+    for (const auto& entry : audit) {
+        if (entry.operation == "batch_get" &&
+            entry.key == "<batch>" &&
+            !entry.success &&
+            entry.reason == "batch_get_failed") {
+            has_failed_batch_summary = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(has_failed_batch_summary);
+
+    StorageEngine::Shutdown();
+}
+
+TEST(StorageEnginePhase1ApiTest,
      BatchSetWithAccessRespectsLegacyPathWhenNewWritePathDisabled) {
     if (StorageEngine::IsInitialized()) {
         StorageEngine::Shutdown();

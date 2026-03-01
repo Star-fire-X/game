@@ -2424,13 +2424,20 @@ std::vector<std::optional<VersionedData>> StorageEngine::BatchGetWithAccess(
         }
     }
 
+    std::string batch_reason = "ok";
+    if (denied_count == keys.size() && !keys.empty()) {
+        batch_reason = "batch_get_failed";
+    } else if (denied_count > 0) {
+        batch_reason = "batch_get_partial_denied";
+    }
+
     pimpl_->RecordAuditEntry(AuditEntry{
         .timestamp_ms = detail::GetCurrentTimeMs(),
         .principal = access.principal,
         .operation = "batch_get",
         .key = "<batch>",
         .success = denied_count == 0,
-        .reason = denied_count == 0 ? "ok" : "batch_get_partial_denied",
+        .reason = batch_reason,
     });
     return result;
 }

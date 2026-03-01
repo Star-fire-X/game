@@ -2227,11 +2227,21 @@ std::optional<VersionedData> StorageEngine::LoadFromDBWithAccess(
 std::vector<std::optional<VersionedData>> StorageEngine::BatchGetWithAccess(
     const std::vector<std::string>& keys,
     const AccessContext& access) {
-    for (const auto& key : keys) {
+    std::vector<std::optional<VersionedData>> result(keys.size(), std::nullopt);
+    std::vector<std::string> allowed_keys;
+    std::vector<size_t> allowed_indices;
+    allowed_keys.reserve(keys.size());
+    allowed_indices.reserve(keys.size());
+    size_t denied_count = 0;
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& key = keys[i];
         std::string deny_reason;
-        if (!pimpl_->CheckAccessInternal(AccessOperation::kBatchGet, key, access,
-                                         &deny_reason)) {
-            pimpl_->RecordAccessDecision(false);
+        const bool allowed = pimpl_->CheckAccessInternal(
+            AccessOperation::kBatchGet, key, access, &deny_reason);
+        pimpl_->RecordAccessDecision(allowed);
+        if (!allowed) {
+            ++denied_count;
             pimpl_->RecordAuditEntry(AuditEntry{
                 .timestamp_ms = detail::GetCurrentTimeMs(),
                 .principal = access.principal,
@@ -2240,19 +2250,28 @@ std::vector<std::optional<VersionedData>> StorageEngine::BatchGetWithAccess(
                 .success = false,
                 .reason = deny_reason,
             });
-            return std::vector<std::optional<VersionedData>>(keys.size(),
-                                                             std::nullopt);
+            continue;
+        }
+
+        allowed_keys.push_back(key);
+        allowed_indices.push_back(i);
+    }
+
+    if (!allowed_keys.empty()) {
+        auto allowed_results = BatchGet(allowed_keys);
+        for (size_t i = 0; i < allowed_results.size() && i < allowed_indices.size();
+             ++i) {
+            result[allowed_indices[i]] = std::move(allowed_results[i]);
         }
     }
-    pimpl_->RecordAccessDecision(true);
-    auto result = BatchGet(keys);
+
     pimpl_->RecordAuditEntry(AuditEntry{
         .timestamp_ms = detail::GetCurrentTimeMs(),
         .principal = access.principal,
         .operation = "batch_get",
         .key = "<batch>",
-        .success = true,
-        .reason = "ok",
+        .success = denied_count == 0,
+        .reason = denied_count == 0 ? "ok" : "batch_get_partial_denied",
     });
     return result;
 }

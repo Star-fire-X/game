@@ -624,6 +624,43 @@ TEST(StorageEnginePhase1ApiTest,
     StorageEngine::Shutdown();
 }
 
+TEST(StorageEnginePhase1ApiTest,
+     BatchGetWithAccessReturnsPerItemResultsWhenInvalidKeyPresent) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_access_control = true;
+    config.require_auth_for_reads = true;
+    config.access_control_token = "phase1-token";
+
+    auto backend = std::make_unique<test::NoopStorageBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const StorageEngine::AccessContext allowed{
+        .principal = "bob",
+        .access_token = "phase1-token",
+        .trusted = false,
+    };
+
+    WriteOptions options;
+    options.durability = WriteDurability::kBestEffort;
+    options.priority = Priority::NORMAL;
+    ASSERT_TRUE(engine.PutWithAccess("phase1:acl:batchget:ok", {5, 5, 5},
+                                     allowed, options));
+
+    const auto result = engine.BatchGetWithAccess(
+        {"phase1:acl:batchget:ok", ""}, allowed);
+    ASSERT_EQ(result.size(), 2U);
+    ASSERT_TRUE(result[0].has_value());
+    EXPECT_EQ(result[0]->data, (std::vector<uint8_t>{5, 5, 5}));
+    EXPECT_FALSE(result[1].has_value());
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, InvalidateAndInvalidateByPrefix) {
     auto& engine = StorageEngine::Instance();
     ASSERT_TRUE(engine.Set("inv:one", {1}));

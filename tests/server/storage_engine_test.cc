@@ -101,6 +101,43 @@ class FailingValidateBackend : public test::NoopStorageBackend {
   }
 };
 
+class FailingDeleteBackend : public test::NoopStorageBackend {
+ public:
+  IStorageBackend::StorageResult Delete(const std::string&,
+                                        uint64_t,
+                                        bool) override {
+    return IStorageBackend::StorageResult{
+        false, "forced delete failure", 0};
+  }
+};
+
+class MinimalNoDeleteBackend final : public IStorageBackend {
+ public:
+  StorageResult Save(const std::string&,
+                     uint64_t,
+                     const std::vector<uint8_t>&) override {
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult SaveBatch(
+      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>&) override {
+    return StorageResult{true, "", 0};
+  }
+
+  std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(
+      const std::string&) override {
+    return std::nullopt;
+  }
+
+  std::optional<std::map<std::string, std::pair<uint64_t, std::vector<uint8_t>>>> LoadAll()
+      override {
+    return std::nullopt;
+  }
+
+  StorageResult Validate() override { return StorageResult{true, "", 0}; }
+  bool IsHealthy() const override { return true; }
+};
+
 struct DurableToggleBackendState {
     mutable std::mutex mutex;
     std::map<std::string, std::pair<uint64_t, std::vector<uint8_t>>> store;
@@ -391,6 +428,32 @@ TEST_F(StorageEngineTest, PutAndDeleteRoundTrip) {
     EXPECT_FALSE(engine.Get("phase1:key").has_value());
 }
 
+TEST(StorageEngineDeleteSemanticsTest,
+     DeleteFailureDoesNotEvictCachedValueWhenStrictWriteEnabled) {
+    if (StorageEngine::IsInitialized()) {
+        StorageEngine::Shutdown();
+    }
+
+    StorageEngine::Config config;
+    config.enable_strict_write_guarantee = true;
+    auto backend = std::make_unique<FailingDeleteBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+    auto& engine = StorageEngine::Instance();
+
+    const std::vector<uint8_t> data = {4, 5, 6};
+    ASSERT_TRUE(engine.Set("delete:strict:retain", data));
+    ASSERT_TRUE(engine.Get("delete:strict:retain").has_value());
+
+    DeleteOptions options;
+    EXPECT_FALSE(engine.Delete("delete:strict:retain", options));
+
+    auto after = engine.Get("delete:strict:retain");
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->data, data);
+
+    StorageEngine::Shutdown();
+}
+
 TEST_F(StorageEngineTest, BatchWriteReturnsPerItemFailureDetails) {
     auto& engine = StorageEngine::Instance();
 
@@ -425,6 +488,13 @@ TEST_F(StorageEngineTest, BatchWriteReturnsPerItemFailureDetails) {
     EXPECT_TRUE(result.failed_keys[0].empty());
     ASSERT_EQ(result.failure_reasons.size(), 1U);
     EXPECT_FALSE(result.failure_reasons[0].empty());
+}
+
+TEST(StorageBackendInterfaceTest, DefaultDeleteReturnsUnsupportedResult) {
+    MinimalNoDeleteBackend backend;
+    const auto result = backend.Delete("iface:delete", 1, true);
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.error_message.find("unsupported"), std::string::npos);
 }
 
 TEST(StorageEnginePhase1ApiTest,

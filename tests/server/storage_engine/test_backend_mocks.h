@@ -26,6 +26,18 @@ class NoopStorageBackend : public IStorageBackend {
     return StorageResult{true, "", 0};
   }
 
+  StorageResult Delete(const std::string&,
+                       uint64_t,
+                       bool) override {
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult DeleteBatch(
+      const std::vector<std::pair<std::string, uint64_t>>&,
+      bool) override {
+    return StorageResult{true, "", 0};
+  }
+
   std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(
       const std::string&) override {
     return std::nullopt;

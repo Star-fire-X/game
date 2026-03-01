@@ -31,6 +31,8 @@ constexpr const char* kAccountUpsertSql =
 constexpr const char* kAccountCacheHitMetric = "storage.account_cache.hit_total";
 constexpr const char* kAccountCacheMissMetric = "storage.account_cache.miss_total";
 constexpr const char* kAccountCacheSizeMetric = "storage.account_cache.size";
+constexpr const char* kAccountDeleteSql =
+    "DELETE FROM accounts WHERE username = $1";
 
 int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
   const auto elapsed = std::chrono::steady_clock::now() - start;
@@ -186,6 +188,108 @@ mir2::storage_engine::IStorageBackend::StorageResult AccountStorageBackend::Save
     return atomic_kv_backend->SaveBatchAtomic(non_account_items);
   }
   return kv_backend_->SaveBatch(non_account_items);
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult AccountStorageBackend::Delete(
+    const std::string& key,
+    uint64_t version,
+    bool hard_delete) {
+  if (!kv_backend_) {
+    return StorageResult{false, "kv backend unavailable", 0};
+  }
+
+  const auto username = ParseAccountStorageKey(key);
+  if (!username) {
+    return kv_backend_->Delete(key, version, hard_delete);
+  }
+
+  if (!initialized_ || !pool_ || !pool_->IsReady()) {
+    return StorageResult{false, "account pool not ready", 0};
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  try {
+    auto conn = pool_->Acquire();
+    if (!conn) {
+      return StorageResult{false, "failed to acquire connection", ElapsedMs(start)};
+    }
+
+    PgConnectionGuard guard(*pool_, conn);
+    pqxx::work txn(*conn);
+    txn.exec(kAccountDeleteSql, pqxx::params{*username});
+    txn.commit();
+    InvalidateCachedAccount(*username);
+    return StorageResult{true, "", ElapsedMs(start)};
+  } catch (const std::exception& ex) {
+    return StorageResult{false, ex.what(), ElapsedMs(start)};
+  }
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult AccountStorageBackend::DeleteBatch(
+    const std::vector<std::pair<std::string, uint64_t>>& items,
+    bool hard_delete) {
+  return DeleteBatchAtomic(items, hard_delete);
+}
+
+mir2::storage_engine::IStorageBackend::StorageResult
+AccountStorageBackend::DeleteBatchAtomic(
+    const std::vector<std::pair<std::string, uint64_t>>& items,
+    bool hard_delete) {
+  if (!kv_backend_) {
+    return StorageResult{false, "kv backend unavailable", 0};
+  }
+  if (items.empty()) {
+    return StorageResult{true, "", 0};
+  }
+
+  std::vector<std::string> account_usernames;
+  std::vector<std::pair<std::string, uint64_t>> non_account_items;
+  account_usernames.reserve(items.size());
+  non_account_items.reserve(items.size());
+  for (const auto& [key, version] : items) {
+    const auto username = ParseAccountStorageKey(key);
+    if (username) {
+      account_usernames.push_back(*username);
+    } else {
+      non_account_items.push_back({key, version});
+    }
+  }
+
+  if (!account_usernames.empty() && !non_account_items.empty()) {
+    return StorageResult{false, "cross-store atomic batch unsupported", 0};
+  }
+
+  if (!account_usernames.empty()) {
+    if (!initialized_ || !pool_ || !pool_->IsReady()) {
+      return StorageResult{false, "account pool not ready", 0};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    try {
+      auto conn = pool_->Acquire();
+      if (!conn) {
+        return StorageResult{false, "failed to acquire connection", ElapsedMs(start)};
+      }
+      PgConnectionGuard guard(*pool_, conn);
+      pqxx::work txn(*conn);
+      for (const auto& username : account_usernames) {
+        txn.exec(kAccountDeleteSql, pqxx::params{username});
+      }
+      txn.commit();
+      for (const auto& username : account_usernames) {
+        InvalidateCachedAccount(username);
+      }
+      return StorageResult{true, "", ElapsedMs(start)};
+    } catch (const std::exception& ex) {
+      return StorageResult{false, ex.what(), ElapsedMs(start)};
+    }
+  }
+
+  auto* atomic_kv_backend =
+      dynamic_cast<mir2::storage_engine::IAtomicBatchStorageBackend*>(kv_backend_.get());
+  if (atomic_kv_backend != nullptr) {
+    return atomic_kv_backend->DeleteBatchAtomic(non_account_items, hard_delete);
+  }
+  return kv_backend_->DeleteBatch(non_account_items, hard_delete);
 }
 
 std::optional<std::pair<uint64_t, std::vector<uint8_t>>> AccountStorageBackend::Load(

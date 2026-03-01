@@ -641,23 +641,9 @@ public:
         }
 
         const bool hard_delete = options.hard_delete || !options.write_tombstone;
-        bool removed_in_cache = false;
-
-        if (l1_cache_ && l1_cache_->Delete(key)) {
-            removed_in_cache = true;
+        if (async_queue_) {
+            async_queue_->CancelPendingForKey(key, version);
         }
-
-        if (l2_cache_ &&
-            (!circuit_breaker_ || !circuit_breaker_->IsOpen()) &&
-            l2_cache_->Delete(key, ResolveDataTier(key))) {
-            removed_in_cache = true;
-            if (circuit_breaker_) {
-                circuit_breaker_->OnSuccess();
-            }
-        } else if (l2_cache_ && circuit_breaker_) {
-            circuit_breaker_->OnFailure();
-        }
-        PublishCircuitBreakerStateGauges();
 
         bool backend_deleted = false;
         if (backend_) {
@@ -687,6 +673,23 @@ public:
             !backend_deleted) {
             return false;
         }
+
+        bool removed_in_cache = false;
+        if (l1_cache_ && l1_cache_->Delete(key)) {
+            removed_in_cache = true;
+        }
+
+        if (l2_cache_ &&
+            (!circuit_breaker_ || !circuit_breaker_->IsOpen()) &&
+            l2_cache_->Delete(key, ResolveDataTier(key))) {
+            removed_in_cache = true;
+            if (circuit_breaker_) {
+                circuit_breaker_->OnSuccess();
+            }
+        } else if (l2_cache_ && circuit_breaker_) {
+            circuit_breaker_->OnFailure();
+        }
+        PublishCircuitBreakerStateGauges();
 
         return removed_in_cache || backend_deleted || backend_ == nullptr;
     }

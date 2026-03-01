@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -59,6 +60,10 @@ public:
 
     bool Enqueue(const std::string& key, const VersionedData& data,
                  Priority priority);
+
+    // Cancel pending writes for one key and register a delete barrier so
+    // stale versions (<= delete_version) are dropped before backend persist.
+    size_t CancelPendingForKey(const std::string& key, uint64_t delete_version);
 
     bool FlushAll(uint32_t timeout_ms = 5000);
 
@@ -146,6 +151,8 @@ private:
     void RecordDeadLetter(const PersistenceItem& item,
                           uint32_t attempts,
                           const std::string& error_message);
+    void RegisterDeleteBarrier(const std::string& key, uint64_t delete_version);
+    bool IsBlockedByDeleteBarrier(const PersistenceItem& item) const;
     void IncrementMetricCounter(const std::string& name, uint64_t delta = 1) const;
 
     IStorageBackend* backend_ = nullptr;
@@ -170,6 +177,8 @@ private:
     std::atomic<size_t> dead_letter_depth_cached_{0};
     mutable std::mutex dead_letter_mutex_;
     std::deque<DeadLetterEntry> dead_letter_queue_;
+    mutable std::mutex delete_barrier_mutex_;
+    std::unordered_map<std::string, uint64_t> delete_barriers_;
 
     struct Statistics {
         std::atomic<uint64_t> enqueued_total{0};

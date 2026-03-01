@@ -193,6 +193,49 @@ bool AsyncPersistenceQueue::Enqueue(const std::string& key,
     return EnqueueItem(item, priority, true);
 }
 
+size_t AsyncPersistenceQueue::CancelPendingForKey(
+    const std::string& key,
+    uint64_t delete_version) {
+    if (key.empty()) {
+        return 0;
+    }
+
+    RegisterDeleteBarrier(key, delete_version);
+
+    size_t canceled = 0;
+    auto consume_removed = [this, &canceled](std::vector<PersistenceItem>&& removed) {
+        for (const auto& item : removed) {
+            if (!AckDurableOutboxItem(item.durable_outbox_id)) {
+                auto logger = spdlog::get("mir2");
+                if (logger) {
+                    logger->warn(
+                        "CancelPendingForKey: failed to ack outbox id={} key={}",
+                        item.durable_outbox_id,
+                        item.key);
+                }
+            }
+            ++canceled;
+        }
+    };
+
+    if (high_priority_queue_) {
+        consume_removed(high_priority_queue_->RemoveIf(
+            [&key](const PersistenceItem& item) { return item.key == key; }));
+    }
+    if (normal_priority_queue_) {
+        consume_removed(normal_priority_queue_->RemoveIf(
+            [&key](const PersistenceItem& item) { return item.key == key; }));
+    }
+
+    if (canceled > 0) {
+        pending_items_.fetch_sub(static_cast<uint64_t>(canceled),
+                                 std::memory_order_acq_rel);
+        RefreshQueueDepthMetrics();
+        NotifyFlushCompletionIfDrained();
+    }
+    return canceled;
+}
+
 bool AsyncPersistenceQueue::EnqueueItem(const PersistenceItem& item,
                                         Priority priority,
                                         bool count_as_enqueued) {
@@ -380,6 +423,18 @@ void AsyncPersistenceQueue::HighPriorityWorker() {
             continue;
         }
 
+        if (IsBlockedByDeleteBarrier(item.value())) {
+            if (!AckDurableOutboxItem(item->durable_outbox_id) && logger) {
+                logger->warn(
+                    "HighPriorityWorker: Ack durable outbox failed for canceled item id={}",
+                    item->durable_outbox_id);
+            }
+            pending_items_.fetch_sub(1, std::memory_order_acq_rel);
+            RefreshQueueDepthMetrics();
+            NotifyFlushCompletionIfDrained();
+            continue;
+        }
+
         uint32_t attempts = 0;
         std::string error_message;
         if (PersistSingleItem(item.value(), &attempts, &error_message)) {
@@ -407,6 +462,13 @@ void AsyncPersistenceQueue::HighPriorityWorker() {
         auto item = high_priority_queue_->Pop(0);
         if (!item) {
             break;
+        }
+
+        if (IsBlockedByDeleteBarrier(item.value())) {
+            AckDurableOutboxItem(item->durable_outbox_id);
+            pending_items_.fetch_sub(1, std::memory_order_acq_rel);
+            RefreshQueueDepthMetrics();
+            continue;
         }
 
         uint32_t attempts = 0;
@@ -437,10 +499,32 @@ void AsyncPersistenceQueue::NormalBatchWorker() {
             return;
         }
 
+        std::vector<PersistenceItem> active_items;
+        active_items.reserve(items.size());
+        for (const auto& item : items) {
+            if (IsBlockedByDeleteBarrier(item)) {
+                if (!AckDurableOutboxItem(item.durable_outbox_id) && logger) {
+                    logger->warn(
+                        "NormalBatchWorker: Ack durable outbox failed for canceled item id={}",
+                        item.durable_outbox_id);
+                }
+                continue;
+            }
+            active_items.push_back(item);
+        }
+
+        if (active_items.empty()) {
+            pending_items_.fetch_sub(static_cast<uint64_t>(items.size()),
+                                     std::memory_order_acq_rel);
+            RefreshQueueDepthMetrics();
+            NotifyFlushCompletionIfDrained();
+            return;
+        }
+
         uint32_t attempts = 0;
         std::string error_message;
-        if (PersistBatch(items, &attempts, &error_message)) {
-            for (const auto& persisted_item : items) {
+        if (PersistBatch(active_items, &attempts, &error_message)) {
+            for (const auto& persisted_item : active_items) {
                 if (!AckDurableOutboxItem(persisted_item.durable_outbox_id) &&
                     logger) {
                     logger->warn(
@@ -448,18 +532,18 @@ void AsyncPersistenceQueue::NormalBatchWorker() {
                         persisted_item.durable_outbox_id);
                 }
             }
-            stats_.persisted_success.fetch_add(items.size(),
+            stats_.persisted_success.fetch_add(active_items.size(),
                                                std::memory_order_relaxed);
         } else {
-            stats_.persisted_failed.fetch_add(items.size(),
+            stats_.persisted_failed.fetch_add(active_items.size(),
                                               std::memory_order_relaxed);
-            for (const auto& failed_item : items) {
+            for (const auto& failed_item : active_items) {
                 RecordDeadLetter(failed_item, attempts, error_message);
             }
             if (logger) {
                 logger->warn(
                     "NormalBatchWorker: Batch persist failed, {} items attempts={} err='{}'",
-                    items.size(), attempts, error_message);
+                    active_items.size(), attempts, error_message);
             }
         }
 
@@ -532,6 +616,25 @@ void AsyncPersistenceQueue::NormalBatchWorker() {
     }
 
     NotifyFlushCompletionIfDrained();
+}
+
+void AsyncPersistenceQueue::RegisterDeleteBarrier(const std::string& key,
+                                                  uint64_t delete_version) {
+    std::lock_guard<std::mutex> lock(delete_barrier_mutex_);
+    auto [it, inserted] = delete_barriers_.try_emplace(key, delete_version);
+    if (!inserted && it->second < delete_version) {
+        it->second = delete_version;
+    }
+}
+
+bool AsyncPersistenceQueue::IsBlockedByDeleteBarrier(
+    const PersistenceItem& item) const {
+    std::lock_guard<std::mutex> lock(delete_barrier_mutex_);
+    auto it = delete_barriers_.find(item.key);
+    if (it == delete_barriers_.end()) {
+        return false;
+    }
+    return item.version <= it->second;
 }
 
 bool AsyncPersistenceQueue::IsFlushDrained() const {

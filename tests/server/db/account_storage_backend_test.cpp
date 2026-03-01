@@ -67,6 +67,25 @@ class CountingKvBackend : public mir2::storage_engine::IStorageBackend {
     return StorageResult{true, "", 0};
   }
 
+  StorageResult Delete(const std::string& key,
+                       uint64_t version,
+                       bool hard_delete) override {
+    ++delete_calls;
+    last_deleted_key = key;
+    last_deleted_version = version;
+    last_deleted_hard_delete = hard_delete;
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult DeleteBatch(
+      const std::vector<std::pair<std::string, uint64_t>>& items,
+      bool hard_delete) override {
+    ++delete_batch_calls;
+    last_delete_batch_count = items.size();
+    last_delete_batch_hard_delete = hard_delete;
+    return StorageResult{true, "", 0};
+  }
+
   std::optional<std::pair<uint64_t, std::vector<uint8_t>>> Load(
       const std::string& key) override {
     ++load_calls;
@@ -88,11 +107,18 @@ class CountingKvBackend : public mir2::storage_engine::IStorageBackend {
   uint32_t load_calls = 0;
   uint32_t save_calls = 0;
   uint32_t save_batch_calls = 0;
+  uint32_t delete_calls = 0;
+  uint32_t delete_batch_calls = 0;
   size_t last_save_batch_count = 0;
+  size_t last_delete_batch_count = 0;
   std::string last_loaded_key;
   std::string last_saved_key;
+  std::string last_deleted_key;
   uint64_t last_saved_version = 0;
+  uint64_t last_deleted_version = 0;
   std::vector<uint8_t> last_saved_data;
+  bool last_deleted_hard_delete = true;
+  bool last_delete_batch_hard_delete = true;
   std::optional<std::pair<uint64_t, std::vector<uint8_t>>> load_result;
 };
 
@@ -223,6 +249,32 @@ TEST(AccountStorageBackendTest, SaveBatchAtomicUsesKvAtomicWhenSupported) {
   EXPECT_EQ(kv_ptr->save_batch_atomic_calls, 1u);
   EXPECT_EQ(kv_ptr->last_save_batch_atomic_count, 2u);
   EXPECT_EQ(kv_ptr->save_batch_calls, 0u);
+}
+
+TEST(AccountStorageBackendTest, DeleteDelegatesNonAccountKeyToKvBackend) {
+  config::DatabaseConfig db_config;
+  auto kv_backend = std::make_unique<CountingKvBackend>();
+  auto* kv_ptr = kv_backend.get();
+  AccountStorageBackend backend(std::move(kv_backend), db_config, nullptr);
+
+  auto result = backend.Delete("player:7:gold", 77u, true);
+  ASSERT_TRUE(result.success);
+  EXPECT_EQ(kv_ptr->delete_calls, 1u);
+  EXPECT_EQ(kv_ptr->last_deleted_key, "player:7:gold");
+  EXPECT_EQ(kv_ptr->last_deleted_version, 77u);
+  EXPECT_TRUE(kv_ptr->last_deleted_hard_delete);
+}
+
+TEST(AccountStorageBackendTest, DeleteAccountKeyFailsWhenPoolNotReady) {
+  config::DatabaseConfig db_config;
+  auto kv_backend = std::make_unique<CountingKvBackend>();
+  auto* kv_ptr = kv_backend.get();
+  AccountStorageBackend backend(std::move(kv_backend), db_config, nullptr);
+
+  auto result = backend.Delete(BuildAccountStorageKey("delete_no_pool"), 88u, true);
+  EXPECT_FALSE(result.success);
+  EXPECT_EQ(result.error_message, "account pool not ready");
+  EXPECT_EQ(kv_ptr->delete_calls, 0u);
 }
 
 TEST(AccountStorageBackendIntegrationTest, SaveAndLoadAccountAreConsistentInAccountsTable) {

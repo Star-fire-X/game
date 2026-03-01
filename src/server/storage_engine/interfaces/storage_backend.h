@@ -63,7 +63,7 @@ public:
         (void)key;
         (void)version;
         (void)hard_delete;
-        return StorageResult{true, "", 0};
+        return StorageResult{false, "delete unsupported", 0};
     }
 
     /**
@@ -74,7 +74,7 @@ public:
         bool hard_delete) {
         (void)items;
         (void)hard_delete;
-        return StorageResult{true, "", 0};
+        return StorageResult{false, "delete_batch unsupported", 0};
     }
 
     /**
@@ -116,7 +116,7 @@ class IAtomicBatchStorageBackend {
       bool hard_delete) {
     (void)items;
     (void)hard_delete;
-    return IStorageBackend::StorageResult{true, "", 0};
+    return IStorageBackend::StorageResult{false, "delete_batch_atomic unsupported", 0};
   }
 };
 

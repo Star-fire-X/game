@@ -135,6 +135,71 @@ class AtomicBatchCountingBackend : public test::NoopStorageBackend,
   std::atomic<uint32_t> save_batch_atomic_calls{0};
 };
 
+class QueueBlockingBackend : public test::NoopStorageBackend {
+ public:
+  void SetBlockingKey(std::string key) {
+    std::lock_guard<std::mutex> lock(block_mutex_);
+    blocking_key_ = std::move(key);
+    allow_blocked_save_ = false;
+    block_entered_ = false;
+  }
+
+  bool WaitUntilBlocked(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(block_mutex_);
+    return block_cv_.wait_for(lock, timeout, [this] { return block_entered_; });
+  }
+
+  void Unblock() {
+    std::lock_guard<std::mutex> lock(block_mutex_);
+    allow_blocked_save_ = true;
+    unblock_cv_.notify_all();
+  }
+
+  StorageResult SaveBatch(
+      const std::vector<std::tuple<std::string, uint64_t, std::vector<uint8_t>>>& items)
+      override {
+    for (const auto& [key, version, data] : items) {
+      (void)version;
+      MaybeBlockOnKey(key);
+      std::lock_guard<std::mutex> lock(store_mutex_);
+      saved_[key] = data;
+    }
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult Save(const std::string& key,
+                     uint64_t version,
+                     const std::vector<uint8_t>& data) override {
+    return SaveBatch({std::make_tuple(key, version, data)});
+  }
+
+  bool HasSavedKey(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(store_mutex_);
+    return saved_.find(key) != saved_.end();
+  }
+
+ private:
+  void MaybeBlockOnKey(const std::string& key) {
+    std::unique_lock<std::mutex> lock(block_mutex_);
+    if (blocking_key_.empty() || key != blocking_key_) {
+      return;
+    }
+    block_entered_ = true;
+    block_cv_.notify_all();
+    unblock_cv_.wait(lock, [this] { return allow_blocked_save_; });
+  }
+
+  mutable std::mutex store_mutex_;
+  std::map<std::string, std::vector<uint8_t>> saved_;
+
+  std::mutex block_mutex_;
+  std::condition_variable block_cv_;
+  std::condition_variable unblock_cv_;
+  std::string blocking_key_;
+  bool allow_blocked_save_ = false;
+  bool block_entered_ = false;
+};
+
 mir2::logic::Task<void> RunLoadFromDBAsyncTask(
     StorageEngine* engine,
     mir2::logic::CoroutineExecutor* executor,
@@ -361,6 +426,39 @@ TEST(AsyncPersistenceQueueP1TailTest, BatchWorkerUsesAtomicBatchSaveWhenSupporte
 
   EXPECT_GT(backend.save_batch_atomic_calls.load(std::memory_order_relaxed), 0U);
   EXPECT_EQ(backend.save_batch_calls.load(std::memory_order_relaxed), 0U);
+}
+
+TEST(AsyncPersistenceQueueP1TailTest, CancelPendingForKeyDropsQueuedWrite) {
+  QueueBlockingBackend backend;
+  backend.SetBlockingKey("cancel:blocker");
+
+  persistence::AsyncPersistenceQueue::Config queue_config;
+  queue_config.worker_threads = 2;
+  queue_config.batch_size = 1;
+  queue_config.batch_interval_ms = 1;
+  queue_config.retry_count = 0;
+  queue_config.retry_delay_ms = 0;
+
+  persistence::AsyncPersistenceQueue queue(&backend, queue_config);
+
+  ASSERT_TRUE(queue.Enqueue(
+      "cancel:blocker",
+      VersionedData{1, std::vector<uint8_t>{1}, 1},
+      Priority::NORMAL));
+  ASSERT_TRUE(backend.WaitUntilBlocked(std::chrono::milliseconds(2000)));
+
+  ASSERT_TRUE(queue.Enqueue(
+      "cancel:target",
+      VersionedData{2, std::vector<uint8_t>{2}, 2},
+      Priority::NORMAL));
+
+  const size_t canceled =
+      queue.CancelPendingForKey("cancel:target", /*delete_version=*/10);
+  EXPECT_EQ(canceled, 1U);
+
+  backend.Unblock();
+  ASSERT_TRUE(queue.FlushAll(5000));
+  EXPECT_FALSE(backend.HasSavedKey("cancel:target"));
 }
 
 }  // namespace mir2::storage_engine

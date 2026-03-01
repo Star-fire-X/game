@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 namespace mir2::storage_engine::persistence {
 
@@ -65,6 +66,25 @@ public:
 
     size_t Size() const {
         return queue_size_.load(std::memory_order_acquire);
+    }
+
+    template <typename Predicate>
+    std::vector<T> RemoveIf(Predicate predicate) {
+        std::vector<T> removed;
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto it = queue_.begin();
+        while (it != queue_.end()) {
+            if (predicate(*it)) {
+                removed.push_back(std::move(*it));
+                it = queue_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!removed.empty()) {
+            queue_size_.fetch_sub(removed.size(), std::memory_order_release);
+        }
+        return removed;
     }
 
     void Clear() {

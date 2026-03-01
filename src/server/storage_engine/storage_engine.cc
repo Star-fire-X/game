@@ -2280,6 +2280,37 @@ bool StorageEngine::BatchSetWithAccess(
     const std::vector<std::pair<std::string, std::vector<uint8_t>>>& kvs,
     const AccessContext& access,
     Priority priority) {
+    if (!pimpl_->IsNewWritePathEnabled()) {
+        for (const auto& [key, value] : kvs) {
+            (void)value;
+            std::string deny_reason;
+            const bool allowed = pimpl_->CheckAccessInternal(
+                AccessOperation::kBatchSet, key, access, &deny_reason);
+            pimpl_->RecordAccessDecision(allowed);
+            if (!allowed) {
+                pimpl_->RecordAuditEntry(AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = access.principal,
+                    .operation = "batch_set",
+                    .key = key,
+                    .success = false,
+                    .reason = deny_reason,
+                });
+                return false;
+            }
+        }
+        const bool success = BatchSet(kvs, priority);
+        pimpl_->RecordAuditEntry(AuditEntry{
+            .timestamp_ms = detail::GetCurrentTimeMs(),
+            .principal = access.principal,
+            .operation = "batch_set",
+            .key = "<batch>",
+            .success = success,
+            .reason = success ? "ok" : "batch_set_failed",
+        });
+        return success;
+    }
+
     std::vector<BatchWriteItem> items;
     items.reserve(kvs.size());
     for (const auto& [key, value] : kvs) {

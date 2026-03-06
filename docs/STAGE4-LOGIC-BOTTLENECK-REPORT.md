@@ -2,7 +2,16 @@
 
 Generated: 2026-03-04 22:45:21
 
-Final Verdict: **FALSIFIED**
+Final Verdict: **INCONCLUSIVE**
+
+> This file records a smoke-scale Stage 4 dry run, not a release-gate benchmark.
+> The run used `warmup/sample/cooldown=0/1/0`, `repeats=1`, `swarm_clients=8`,
+> and `qps_scale=0.020`. Because the Prometheus health signals that Stage 4
+> depends on (`tick_p99`, mailbox utilization, queue slope, overflow, and
+> disconnect rates) remained missing or zeroed during the loaded steps, the
+> workload ceilings below are observational only and the final classification is
+> downgraded to `INCONCLUSIVE` until a full benchmark run captures valid health
+> telemetry.
 
 ## Environment
 - tick_interval_ms: 50
@@ -16,8 +25,8 @@ Final Verdict: **FALSIFIED**
 | Workload | Ceiling QPS | Verdict |
 | --- | ---: | --- |
 | W0-Control | 320.00 | INCONCLUSIVE |
-| W1-MixedGameplay | 400.00 | FALSIFIED |
-| W2-WriteHeavy | 400.00 | FALSIFIED |
+| W1-MixedGameplay | 400.00 | INCONCLUSIVE |
+| W2-WriteHeavy | 400.00 | INCONCLUSIVE |
 
 ### W0-Control
 | Step | Target | Offered | Effective | Elasticity | Tick p99 | Source | Overrun | Util | Queue Slope | Overflow/s | HardBP/s | SvcDisc(g/l)/s | Healthy |
@@ -43,7 +52,9 @@ Reasons: Control workload ceiling computed.
 | 4 | 352.00 | 351.00 | 303.00 | 0.458 | 0.000 | logic_routed_processed_total | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000/0.000 | PASS |
 | 5 | 400.00 | 399.00 | 377.00 | 1.542 | 0.000 | logic_routed_processed_total | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000/0.000 | PASS |
 
-Reasons: FALSIFIED-1: highest step remains elastic and healthy.
+Reasons: Smoke-only observation. Highest step remained elastic, but the health
+signals required for `FALSIFIED-1` were unavailable or zeroed, so the workload
+classification is downgraded to `INCONCLUSIVE`.
 
 ### W2-WriteHeavy
 | Step | Target | Offered | Effective | Elasticity | Tick p99 | Source | Overrun | Util | Queue Slope | Overflow/s | HardBP/s | SvcDisc(g/l)/s | Healthy |
@@ -55,9 +66,14 @@ Reasons: FALSIFIED-1: highest step remains elastic and healthy.
 | 4 | 352.00 | 351.00 | 347.00 | 0.958 | 0.000 | logic_routed_processed_total | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000/0.000 | PASS |
 | 5 | 400.00 | 399.00 | 392.00 | 0.938 | 0.000 | logic_routed_processed_total | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000/0.000 | PASS |
 
-Reasons: FALSIFIED-1: highest step remains elastic and healthy.
+Reasons: Smoke-only observation. Highest step remained elastic, but the health
+signals required for `FALSIFIED-1` were unavailable or zeroed, so the workload
+classification is downgraded to `INCONCLUSIVE`.
 
 ## Threshold Hits
 
 ## Conclusion
-Final classification: **FALSIFIED**.
+Final classification: **INCONCLUSIVE**.
+The checked-in result must not be used as a release-gate Stage 4 verdict until
+the Prometheus sampler is returning valid tick/utilization/overflow/disconnect
+telemetry during a full-scale benchmark run.

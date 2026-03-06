@@ -24,7 +24,7 @@ Add new fixture/class `GatewayLogicPressureTest` and tests:
 All tests must guard with benchmark-only skip.
 
 **Step 2: Run targeted tests to verify RED**
-Run: `./build-wsl/bin/legend2_tests --gtest_filter='GatewayLogicPressureTest.*'`
+Run: `LEGEND2_BENCHMARK_ONLY=1 ./build-wsl/bin/legend2_tests --gtest_filter='GatewayLogicPressureTest.*'`
 Expected: build or runtime failure due missing pressure engine helpers.
 
 ### Task 2: Implement pressure engine (GREEN)

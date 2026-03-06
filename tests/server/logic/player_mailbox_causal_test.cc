@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <filesystem>
 #include <vector>
 
 #define private public
@@ -27,6 +28,8 @@
 #include "common/internal_message_helper.h"
 #include "common/protocol/packet_codec.h"
 #include "chat_generated.h"
+#include "ecs/components/character_components.h"
+#include "ecs/dirty_tracker.h"
 #include "system_generated.h"
 #include "ecs/registry_manager.h"
 #include "logic/coroutine_executor.h"
@@ -41,11 +44,14 @@
 #include "network/tcp_session.h"
 #include "logic/services/combat_service.h"
 #include "logic/services/session_role_store.h"
+#include "storage_engine/storage_engine.h"
+#include "storage_engine/test_backend_mocks.h"
 
 namespace mir2::logic::test {
 namespace {
 
 using namespace std::chrono_literals;
+using mir2::storage_engine::StorageEngine;
 
 class ScopedEnv {
  public:
@@ -75,6 +81,16 @@ class ScopedEnv {
   bool had_old_ = false;
   std::string old_value_;
 };
+
+std::filesystem::path MakeTempDir(std::string_view suffix) {
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto path =
+      std::filesystem::path("/tmp") /
+      ("mir2_player_mailbox_causal_test_" + std::string(suffix) + "_" +
+       std::to_string(stamp));
+  std::filesystem::create_directories(path);
+  return path;
+}
 
 std::shared_ptr<network::TcpSession> MakeTcpSession(asio::io_context& io_context,
                                                      uint64_t session_id) {
@@ -127,6 +143,49 @@ class OrderingCombatService final : public CombatService {
  private:
   OrderState& state_;
 };
+
+class CleanupBatchCountingBackend final : public mir2::storage_engine::test::NoopStorageBackend {
+ public:
+  StorageResult Save(const std::string&,
+                     uint64_t,
+                     const std::vector<uint8_t>&) override {
+    save_calls.fetch_add(1, std::memory_order_relaxed);
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult SaveBatch(const BatchItems& items) override {
+    batch_save_calls.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mutex_);
+    batch_sizes_.push_back(items.size());
+    return StorageResult{true, "", 0};
+  }
+
+  std::vector<size_t> BatchSizes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return batch_sizes_;
+  }
+
+  std::atomic<uint32_t> save_calls{0};
+  std::atomic<uint32_t> batch_save_calls{0};
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<size_t> batch_sizes_;
+};
+
+StorageEngine::Config BuildCleanupDeferredFlushConfig(const std::string& l2_path) {
+  StorageEngine::Config config;
+  config.l2_path = l2_path;
+  config.enable_outbox = true;
+  config.batch_size = 8;
+  config.auto_sync_interval_ms = 60000;
+  config.queue_retry_count = 0;
+  config.queue_retry_delay_ms = 0;
+  config.enable_strict_write_guarantee = false;
+  config.sync_write_key_prefixes = {"char:"};
+  config.critical_key_prefixes = {"char:"};
+  return config;
+}
 
 class PlayerMailboxCausalTest : public ::testing::Test {
  protected:
@@ -382,7 +441,7 @@ TEST_F(PlayerMailboxCausalTest, LoginEventBypassesAuthMiddleware) {
   EXPECT_EQ(handled.load(std::memory_order_relaxed), 1);
 }
 
-TEST_F(PlayerMailboxCausalTest, LegacyDispatchAllowsWhitelistedLogin) {
+TEST_F(PlayerMailboxCausalTest, LegacyDispatchBlockedByDefaultPolicy) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->handler_registry_, nullptr);
 
@@ -394,16 +453,10 @@ TEST_F(PlayerMailboxCausalTest, LegacyDispatchAllowsWhitelistedLogin) {
         co_return;
       });
 
-  EXPECT_TRUE(server_->DispatchRoutedMessageLegacy(
+  EXPECT_FALSE(server_->DispatchRoutedMessageLegacy(
       30001, static_cast<uint16_t>(mir2::common::MsgId::kLoginReq), {}));
-
-  const auto deadline = std::chrono::steady_clock::now() + 2s;
-  while (std::chrono::steady_clock::now() < deadline &&
-         handled.load(std::memory_order_relaxed) == 0) {
-    std::this_thread::sleep_for(5ms);
-  }
-
-  EXPECT_EQ(handled.load(std::memory_order_relaxed), 1);
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
 }
 
 TEST_F(PlayerMailboxCausalTest, LegacyDispatchCanBeDisabledByPolicy) {
@@ -425,9 +478,11 @@ TEST_F(PlayerMailboxCausalTest, LegacyDispatchCanBeDisabledByPolicy) {
   EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
 }
 
-TEST_F(PlayerMailboxCausalTest, LegacyDispatchDropsUnauthenticatedGenericMessage) {
+TEST_F(PlayerMailboxCausalTest, LegacyDispatchRejectsUnauthenticatedGenericMessage) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->handler_registry_, nullptr);
+  server_->legacy_fallback_enabled_ = true;
+  server_->legacy_fallback_allow_critical_msgs_ = true;
 
   std::atomic<int> handled{0};
   server_->handler_registry_->RegisterHandler(
@@ -437,7 +492,7 @@ TEST_F(PlayerMailboxCausalTest, LegacyDispatchDropsUnauthenticatedGenericMessage
         co_return;
       });
 
-  EXPECT_TRUE(server_->DispatchRoutedMessageLegacy(
+  EXPECT_FALSE(server_->DispatchRoutedMessageLegacy(
       30002, static_cast<uint16_t>(mir2::common::MsgId::kEquipReq), {}));
   std::this_thread::sleep_for(200ms);
 
@@ -483,7 +538,7 @@ TEST_F(PlayerMailboxCausalTest, BuildHandlerContextDoesNotFallbackToClientIdWhen
   EXPECT_FALSE(result.fallback_entity_exists);
 }
 
-TEST_F(PlayerMailboxCausalTest, HandleRoutedMessageUsesLegacyFallbackWhenPipelineDisabled) {
+TEST_F(PlayerMailboxCausalTest, HandleRoutedMessageForcesPipelineEnableWithoutLegacyFallback) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->handler_registry_, nullptr);
 
@@ -506,11 +561,12 @@ TEST_F(PlayerMailboxCausalTest, HandleRoutedMessageUsesLegacyFallbackWhenPipelin
   ASSERT_NE(session, nullptr);
 
   server_->HandleRoutedMessage(session, routed_payload);
-
-  EXPECT_TRUE(WaitForCount(handled, 1));
+  EXPECT_TRUE(server_->hot_event_pipeline_->enabled());
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
 }
 
-TEST_F(PlayerMailboxCausalTest, QueueFullCriticalMessageFallsBackToLegacyDispatch) {
+TEST_F(PlayerMailboxCausalTest, QueueFullCriticalMessageDropsWithoutLegacyFallback) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->handler_registry_, nullptr);
 
@@ -535,7 +591,8 @@ TEST_F(PlayerMailboxCausalTest, QueueFullCriticalMessageFallsBackToLegacyDispatc
   ASSERT_NE(session, nullptr);
 
   server_->HandleRoutedMessage(session, routed_payload);
-  EXPECT_TRUE(WaitForCount(handled, 1));
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
 }
 
 TEST_F(PlayerMailboxCausalTest, QueueFullCriticalMessageDropsWhenFallbackDisabled) {
@@ -572,6 +629,13 @@ TEST_F(PlayerMailboxCausalTest, QueueFullChatMessageStillDropsAsNonCritical) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->handler_registry_, nullptr);
 
+  const auto gateway = MakeActiveTcpSession(io_context_, 99030);
+  ASSERT_NE(gateway.socket, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+    server_->gateway_session_ = gateway.session;
+  }
+
   ScopedEnv env("LEGEND2_HOT_EVENT_PIPELINE", "1");
   server_->hot_event_pipeline_ = std::make_unique<events::HotEventPipeline>();
   server_->hot_event_pipeline_->InitializeFromEnv();
@@ -603,6 +667,25 @@ TEST_F(PlayerMailboxCausalTest, QueueFullChatMessageStillDropsAsNonCritical) {
   server_->HandleRoutedMessage(session, routed_payload);
   std::this_thread::sleep_for(200ms);
   EXPECT_EQ(handled.load(std::memory_order_relaxed), 0);
+
+  ASSERT_TRUE(WaitForSocketWrites(gateway.socket, 1));
+  ASSERT_FALSE(gateway.socket->GetWrites().empty());
+
+  common::NetworkPacket packet;
+  const auto& wire = gateway.socket->GetWrites().back();
+  uint16_t sequence = 0;
+  ASSERT_EQ(common::DecodePacketV2(wire.data(), wire.size(), &packet, &sequence),
+            common::DecodeStatus::kOk);
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kBackpressureControl));
+
+  flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+  ASSERT_TRUE(verifier.VerifyBuffer<mir2::proto::BackpressureControl>(nullptr));
+  const auto* control = flatbuffers::GetRoot<mir2::proto::BackpressureControl>(
+      packet.payload.data());
+  ASSERT_NE(control, nullptr);
+  EXPECT_EQ(control->client_id(), kClientId);
+  EXPECT_EQ(control->action(), mir2::proto::BackpressureAction::PAUSE_READ);
+  EXPECT_EQ(control->duration_ms(), server_->backpressure_pause_ms_);
 }
 
 TEST_F(PlayerMailboxCausalTest, ResponseSenderPrefersGatewaySessionWhenAvailable) {
@@ -692,6 +775,134 @@ TEST_F(PlayerMailboxCausalTest, MailboxSpawnRejectCleansStateAndLaterEventsStill
   DispatchHotEventOnIo(second_event);
 
   EXPECT_TRUE(WaitForCount(handled, 1));
+}
+
+TEST_F(PlayerMailboxCausalTest, MailboxSpawnRejectedOverLimitSendsKick) {
+  ASSERT_NE(server_, nullptr);
+
+  const auto gateway = MakeActiveTcpSession(io_context_, 65004);
+  ASSERT_NE(gateway.socket, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+    server_->gateway_session_ = gateway.session;
+  }
+
+  const uint64_t client_id = 45011;
+  events::HotEvent queued_event{};
+  queued_event.client_id = client_id;
+  queued_event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  queued_event.type = events::HotEventType::kGeneric;
+
+  auto reject_done = std::make_shared<std::promise<void>>();
+  auto reject_future = reject_done->get_future();
+  asio::post(io_context_, [this, client_id, queued_event, reject_done]() mutable {
+    LogicServer::PlayerMailbox mailbox;
+    mailbox.executing = true;
+    mailbox.high_priority_events.push_back(queued_event);
+    server_->player_mailboxes_[client_id] = std::move(mailbox);
+    server_->mailbox_pending_events_total_ = 1;
+    server_->mailbox_active_runners_ = 1;
+    server_->HandleMailboxSpawnRejected(client_id, SpawnResult::kOverLimit);
+    reject_done->set_value();
+  });
+  ASSERT_EQ(reject_future.wait_for(2s), std::future_status::ready);
+
+  struct MailboxState {
+    bool mailbox_exists = false;
+    size_t pending_events = 0;
+    size_t active_runners = 0;
+  };
+  auto state_promise = std::make_shared<std::promise<MailboxState>>();
+  auto state_future = state_promise->get_future();
+  asio::post(io_context_, [this, client_id, state_promise]() mutable {
+    MailboxState state;
+    state.mailbox_exists =
+        server_->player_mailboxes_.find(client_id) != server_->player_mailboxes_.end();
+    state.pending_events = server_->mailbox_pending_events_total_;
+    state.active_runners = server_->mailbox_active_runners_;
+    state_promise->set_value(state);
+  });
+  const MailboxState state = state_future.get();
+  EXPECT_FALSE(state.mailbox_exists);
+  EXPECT_EQ(state.pending_events, 0u);
+  EXPECT_EQ(state.active_runners, 0u);
+
+  ASSERT_TRUE(WaitForSocketWrites(gateway.socket, 1));
+  ASSERT_FALSE(gateway.socket->GetWrites().empty());
+
+  common::NetworkPacket packet;
+  const auto& wire = gateway.socket->GetWrites().back();
+  uint16_t sequence = 0;
+  ASSERT_EQ(common::DecodePacketV2(wire.data(), wire.size(), &packet, &sequence),
+            common::DecodeStatus::kOk);
+  EXPECT_EQ(packet.msg_id, static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage));
+
+  common::RoutedMessageData routed;
+  ASSERT_TRUE(common::ParseRoutedMessage(packet.payload, &routed));
+  EXPECT_EQ(routed.client_id, client_id);
+  EXPECT_EQ(routed.msg_id, static_cast<uint16_t>(common::MsgId::kKick));
+
+  flatbuffers::Verifier verifier(routed.payload.data(), routed.payload.size());
+  ASSERT_TRUE(verifier.VerifyBuffer<mir2::proto::Kick>(nullptr));
+  const auto* kick = flatbuffers::GetRoot<mir2::proto::Kick>(routed.payload.data());
+  ASSERT_NE(kick, nullptr);
+  EXPECT_EQ(kick->reason(), mir2::proto::ErrorCode::ERR_KICK_ADMIN_MANUAL);
+  ASSERT_NE(kick->reason_text(), nullptr);
+  EXPECT_EQ(kick->reason_text()->str(), "logic overload");
+}
+
+TEST_F(PlayerMailboxCausalTest, MailboxSpawnRejectedInvalidTaskDoesNotSendKick) {
+  ASSERT_NE(server_, nullptr);
+
+  const auto gateway = MakeActiveTcpSession(io_context_, 65005);
+  ASSERT_NE(gateway.socket, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(server_->gateway_mutex_);
+    server_->gateway_session_ = gateway.session;
+  }
+
+  const uint64_t client_id = 45012;
+  events::HotEvent queued_event{};
+  queued_event.client_id = client_id;
+  queued_event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kEquipReq);
+  queued_event.type = events::HotEventType::kGeneric;
+
+  auto reject_done = std::make_shared<std::promise<void>>();
+  auto reject_future = reject_done->get_future();
+  asio::post(io_context_, [this, client_id, queued_event, reject_done]() mutable {
+    LogicServer::PlayerMailbox mailbox;
+    mailbox.executing = true;
+    mailbox.high_priority_events.push_back(queued_event);
+    server_->player_mailboxes_[client_id] = std::move(mailbox);
+    server_->mailbox_pending_events_total_ = 1;
+    server_->mailbox_active_runners_ = 1;
+    server_->HandleMailboxSpawnRejected(client_id, SpawnResult::kInvalidTask);
+    reject_done->set_value();
+  });
+  ASSERT_EQ(reject_future.wait_for(2s), std::future_status::ready);
+
+  struct MailboxState {
+    bool mailbox_exists = false;
+    size_t pending_events = 0;
+    size_t active_runners = 0;
+  };
+  auto state_promise = std::make_shared<std::promise<MailboxState>>();
+  auto state_future = state_promise->get_future();
+  asio::post(io_context_, [this, client_id, state_promise]() mutable {
+    MailboxState state;
+    state.mailbox_exists =
+        server_->player_mailboxes_.find(client_id) != server_->player_mailboxes_.end();
+    state.pending_events = server_->mailbox_pending_events_total_;
+    state.active_runners = server_->mailbox_active_runners_;
+    state_promise->set_value(state);
+  });
+  const MailboxState state = state_future.get();
+  EXPECT_FALSE(state.mailbox_exists);
+  EXPECT_EQ(state.pending_events, 0u);
+  EXPECT_EQ(state.active_runners, 0u);
+
+  std::this_thread::sleep_for(100ms);
+  EXPECT_TRUE(gateway.socket->GetWrites().empty());
 }
 
 TEST_F(PlayerMailboxCausalTest, MailboxHandlerExceptionKicksAndCleansSession) {
@@ -1176,6 +1387,118 @@ TEST_F(PlayerMailboxCausalTest, OnGatewayDisconnectedCleansAllSessionState) {
   }
 }
 
+TEST_F(PlayerMailboxCausalTest, CleanupAllClientSessionsFlushesDirtyBatchOnce) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  if (StorageEngine::IsInitialized()) {
+    StorageEngine::Shutdown();
+  }
+
+  const auto temp_dir = MakeTempDir("cleanup_flush_once");
+  const auto l2_path = temp_dir / "storage";
+  std::error_code ec;
+  std::filesystem::remove_all(l2_path, ec);
+
+  auto backend = std::make_unique<CleanupBatchCountingBackend>();
+  auto* backend_ptr = backend.get();
+  ASSERT_TRUE(StorageEngine::Initialize(std::move(backend),
+                                        BuildCleanupDeferredFlushConfig(l2_path.string())));
+
+  server_->registry_manager_ = &ecs::RegistryManager::Instance();
+
+  constexpr uint64_t kClientA = 92011;
+  constexpr uint64_t kClientB = 92012;
+  constexpr uint32_t kRoleA = 392011;
+  constexpr uint32_t kRoleB = 392012;
+
+  auto done =
+      std::make_shared<std::promise<LogicServer::CleanupAllClientSessionsSummary>>();
+  auto done_future = done->get_future();
+  asio::post(io_context_, [this, done, kClientA, kClientB, kRoleA, kRoleB]() mutable {
+    auto& character_manager = server_->registry_manager_->GetCharacterManager();
+    character_manager.BindToCurrentThread();
+
+    const auto entity_a = character_manager.GetOrCreate(kRoleA);
+    const auto entity_b = character_manager.GetOrCreate(kRoleB);
+    auto* registry_a = character_manager.TryGetRegistry(kRoleA);
+    auto* registry_b = character_manager.TryGetRegistry(kRoleB);
+
+    character_manager.OnLogin(kRoleA);
+    character_manager.OnLogin(kRoleB);
+    registry_a->get<ecs::CharacterAttributesComponent>(entity_a).hp = 61;
+    registry_b->get<ecs::CharacterAttributesComponent>(entity_b).hp = 62;
+    ecs::dirty_tracker::mark_attributes_dirty(*registry_a, entity_a);
+    ecs::dirty_tracker::mark_attributes_dirty(*registry_b, entity_b);
+
+    server_->client_registry_.Track(kClientA);
+    server_->client_registry_.Track(kClientB);
+    server_->role_store_->BindClientAccount(kClientA, 492011);
+    server_->role_store_->BindClientAccount(kClientB, 492012);
+    server_->role_store_->BindClientRole(kClientA, kRoleA);
+    server_->role_store_->BindClientRole(kClientB, kRoleB);
+
+    done->set_value(server_->CleanupAllClientSessionsImpl(
+        "test_dirty_batch_flush_once"));
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+  const auto summary = done_future.get();
+
+  EXPECT_EQ(summary.cleaned_total, 2u);
+  EXPECT_EQ(summary.cleanup_dirty_count, 2u);
+  EXPECT_TRUE(summary.cleanup_flush_attempted);
+  EXPECT_TRUE(summary.cleanup_flush_success);
+  EXPECT_GE(backend_ptr->save_calls.load(std::memory_order_relaxed), 2u);
+  EXPECT_EQ(backend_ptr->batch_save_calls.load(std::memory_order_relaxed), 0u);
+  EXPECT_TRUE(backend_ptr->BatchSizes().empty());
+
+  StorageEngine::Shutdown();
+  std::filesystem::remove_all(temp_dir, ec);
+}
+
+TEST_F(PlayerMailboxCausalTest, CleanupAllClientSessionsAttemptsFlushWhenDirtySaveFails) {
+  ASSERT_NE(server_, nullptr);
+  ASSERT_NE(server_->role_store_, nullptr);
+
+  if (StorageEngine::IsInitialized()) {
+    StorageEngine::Shutdown();
+  }
+
+  server_->registry_manager_ = &ecs::RegistryManager::Instance();
+
+  constexpr uint64_t kClient = 92021;
+  constexpr uint32_t kRole = 392021;
+
+  auto done =
+      std::make_shared<std::promise<LogicServer::CleanupAllClientSessionsSummary>>();
+  auto done_future = done->get_future();
+  asio::post(io_context_, [this, done, kClient, kRole]() mutable {
+    auto& character_manager = server_->registry_manager_->GetCharacterManager();
+    character_manager.BindToCurrentThread();
+
+    const auto entity = character_manager.GetOrCreate(kRole);
+    auto* registry = character_manager.TryGetRegistry(kRole);
+
+    character_manager.OnLogin(kRole);
+    registry->get<ecs::CharacterAttributesComponent>(entity).hp = 71;
+    ecs::dirty_tracker::mark_attributes_dirty(*registry, entity);
+
+    server_->client_registry_.Track(kClient);
+    server_->role_store_->BindClientAccount(kClient, 492021);
+    server_->role_store_->BindClientRole(kClient, kRole);
+
+    done->set_value(server_->CleanupAllClientSessionsImpl(
+        "test_dirty_save_failure_flush_attempt"));
+  });
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+  const auto summary = done_future.get();
+
+  EXPECT_EQ(summary.cleaned_total, 1u);
+  EXPECT_EQ(summary.cleanup_dirty_count, 1u);
+  EXPECT_TRUE(summary.cleanup_flush_attempted);
+  EXPECT_FALSE(summary.cleanup_flush_success);
+}
+
 TEST_F(PlayerMailboxCausalTest, ZombieScanUsesIdleAndReconcileDoubleCondition) {
   ASSERT_NE(server_, nullptr);
   ASSERT_NE(server_->role_store_, nullptr);
@@ -1239,6 +1562,66 @@ TEST_F(PlayerMailboxCausalTest, ZombieScanSkipsClientWhenLastActivityIsInFuture)
 
   EXPECT_TRUE(server_->client_registry_.Contains(kFutureClient));
   EXPECT_TRUE(server_->role_store_->GetAccountId(kFutureClient).has_value());
+}
+
+TEST_F(PlayerMailboxCausalTest, DispatchHotEventsBatchReusesScratchSetsAcrossCalls) {
+  ASSERT_NE(server_, nullptr);
+
+  struct ScratchSnapshot {
+    size_t first_batch_clients_buckets = 0;
+    size_t first_runner_buckets = 0;
+    size_t second_batch_clients_buckets = 0;
+    size_t second_runner_buckets = 0;
+    bool empty_after_second = false;
+  };
+
+  auto snapshot = std::make_shared<ScratchSnapshot>();
+  auto done = std::make_shared<std::promise<void>>();
+  auto done_future = done->get_future();
+
+  asio::post(io_context_, [this, snapshot, done]() mutable {
+    server_->logic_thread_id_ = std::this_thread::get_id();
+
+    auto build_events = [](size_t count) {
+      std::vector<events::HotEvent> events;
+      events.reserve(count);
+      for (size_t i = 0; i < count; ++i) {
+        events::HotEvent event{};
+        event.client_id = 0;
+        event.msg_id = static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat);
+        event.type = events::HotEventType::kHeartbeat;
+        events.push_back(event);
+      }
+      return events;
+    };
+
+    server_->DispatchHotEventsBatch(build_events(128));
+    snapshot->first_batch_clients_buckets =
+        server_->mailbox_dispatch_scratch_.batch_clients.bucket_count();
+    snapshot->first_runner_buckets =
+        server_->mailbox_dispatch_scratch_.runners_to_start.bucket_count();
+
+    server_->DispatchHotEventsBatch(build_events(8));
+    snapshot->second_batch_clients_buckets =
+        server_->mailbox_dispatch_scratch_.batch_clients.bucket_count();
+    snapshot->second_runner_buckets =
+        server_->mailbox_dispatch_scratch_.runners_to_start.bucket_count();
+    snapshot->empty_after_second =
+        server_->mailbox_dispatch_scratch_.batch_clients.empty() &&
+        server_->mailbox_dispatch_scratch_.runners_to_start.empty() &&
+        server_->mailbox_dispatch_scratch_.hard_backpressure_clients.empty() &&
+        server_->mailbox_dispatch_scratch_.soft_backpressure_clients.empty() &&
+        server_->mailbox_dispatch_scratch_.kick_clients.empty();
+
+    done->set_value();
+  });
+
+  ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+  EXPECT_GT(snapshot->first_batch_clients_buckets, 0u);
+  EXPECT_GE(snapshot->second_batch_clients_buckets,
+            snapshot->first_batch_clients_buckets);
+  EXPECT_GE(snapshot->second_runner_buckets, snapshot->first_runner_buckets);
+  EXPECT_TRUE(snapshot->empty_after_second);
 }
 
 }  // namespace

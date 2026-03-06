@@ -103,12 +103,10 @@ constexpr size_t kBackpressureStateMaxEntries = 8192;
 constexpr size_t kBackpressurePruneBatchSize = 256;
 constexpr size_t kBackpressureStateHardCapEntries = 16384;
 constexpr auto kExecutorDrainTimeout = std::chrono::seconds(10);
-constexpr const char* kMetricLegacyFallbackTotal =
-    "logic.hot_event.legacy_fallback_total";
-constexpr const char* kMetricArenaFallbackTotal =
-    "logic.hot_event.arena_fallback_total";
-constexpr const char* kMetricQueueFullFallbackTotal =
-    "logic.hot_event.queue_full_fallback_total";
+constexpr const char* kMetricArenaDropTotal =
+    "logic.hot_event.arena_drop_total";
+constexpr const char* kMetricBypassDropTotal =
+    "logic.hot_event.bypass_drop_total";
 constexpr const char* kMetricMailboxBatchSize = "logic.mailbox.batch_size";
 constexpr const char* kMetricMailboxBatchPlayers = "logic.mailbox.batch_players";
 constexpr const char* kMetricMailboxOverflowTotal = "logic.mailbox.overflow_total";
@@ -193,6 +191,20 @@ constexpr const char* kMetricCoroutineDumpMaxEntries =
     "logic.coroutine.dump_max_entries";
 constexpr const char* kMetricLegacyDispatchBlockedTotal =
     "logic.legacy_dispatch_blocked_total";
+constexpr const char* kMetricRoutedProcessedTotal =
+    "logic.routed.processed_total";
+constexpr const char* kMetricRoutedProcessedMoveTotal =
+    "logic.routed.processed_move_total";
+constexpr const char* kMetricRoutedProcessedAttackTotal =
+    "logic.routed.processed_attack_total";
+constexpr const char* kMetricRoutedProcessedSkillTotal =
+    "logic.routed.processed_skill_total";
+constexpr const char* kMetricRoutedProcessedChatTotal =
+    "logic.routed.processed_chat_total";
+constexpr const char* kMetricRoutedProcessedHeartbeatTotal =
+    "logic.routed.processed_heartbeat_total";
+constexpr const char* kMetricRoutedProcessedGenericTotal =
+    "logic.routed.processed_generic_total";
 constexpr const char* kMetricEntityLaneActive = "logic.entity_lane.active";
 constexpr const char* kMetricEntityLanePending = "logic.entity_lane.pending";
 constexpr const char* kMetricEntityVersionMismatchTotal =
@@ -209,6 +221,10 @@ constexpr const char* kMetricSessionReconcileSnapshotSize =
     "logic.session.reconcile.snapshot_size";
 constexpr const char* kMetricSessionZombieScanTotal =
     "logic.session.zombie_scan_total";
+constexpr const char* kMetricServiceConnectedGatewayTotal =
+    "logic.service.connected_gateway_total";
+constexpr const char* kMetricServiceDisconnectedGatewayTotal =
+    "logic.service.disconnected_gateway_total";
 
 std::string ToLowerAscii(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -306,14 +322,16 @@ bool IsBestEffortEvent(const events::HotEvent& event) {
   return ResolveEventPriority(event) == events::HotEventPriority::kBestEffort;
 }
 
-bool IsBestEffortMsgId(uint16_t msg_id) {
-  return ClassifyMsgPriority(msg_id) == events::HotEventPriority::kBestEffort;
-}
+void EnsureHotEventPipelineEnabled(events::HotEventPipeline* pipeline,
+                                   const char* source) {
+  if (!pipeline || pipeline->enabled()) {
+    return;
+  }
 
-bool ShouldFallbackOnQueueFull(uint16_t msg_id) {
-  // Best-effort messages are dropped under overload. Other messages fallback
-  // to legacy dispatch to avoid losing critical gameplay/account operations.
-  return !IsBestEffortMsgId(msg_id);
+  pipeline->ForceEnable();
+  SYSLOG_WARN(
+      "LogicServer forced hot_event_pipeline enable (source={}, env LEGEND2_HOT_EVENT_PIPELINE ignored)",
+      source == nullptr ? "unknown" : source);
 }
 
 uint64_t BuildLaneKey(const HandlerContext& context, uint64_t client_id) {
@@ -616,6 +634,12 @@ bool LogicServer::Initialize(const std::string& config_path) {
   }
 
   tick_interval_ = std::chrono::milliseconds(server_config.tick_interval_ms);
+  const size_t service_link_write_queue_size = static_cast<size_t>(
+      std::max(server_config.service_link_write_queue_size, 1));
+  const int64_t network_session_idle_check_interval_ms = static_cast<int64_t>(
+      std::max(server_config.network_session_idle_check_interval_ms, 1));
+  const int64_t network_session_idle_timeout_ms = static_cast<int64_t>(
+      std::max(server_config.network_session_idle_timeout_ms, 1));
   hot_event_max_drain_per_tick_ = static_cast<size_t>(std::max(
       server_config.hot_event_max_drain_per_tick, 1));
   hot_event_max_drain_duration_per_tick_ = std::chrono::milliseconds(std::max(
@@ -682,15 +706,21 @@ bool LogicServer::Initialize(const std::string& config_path) {
       server_config.zombie_detection_scan_interval_ms, 1));
   zombie_idle_timeout_ms_ = static_cast<int64_t>(std::max(
       server_config.zombie_detection_idle_timeout_ms, 1));
-  legacy_fallback_enabled_ = server_config.legacy_fallback_enabled;
-  legacy_fallback_allow_auth_whitelist_ =
-      server_config.legacy_fallback_allow_auth_whitelist;
-  legacy_fallback_allow_critical_msgs_ =
-      server_config.legacy_fallback_allow_critical_msgs;
-  legacy_fallback_allow_normal_msgs_ =
-      server_config.legacy_fallback_allow_normal_msgs;
-  queue_full_fallback_non_best_effort_enabled_ =
+  const bool legacy_requested =
+      server_config.legacy_fallback_enabled ||
+      server_config.legacy_fallback_allow_auth_whitelist ||
+      server_config.legacy_fallback_allow_critical_msgs ||
+      server_config.legacy_fallback_allow_normal_msgs ||
       server_config.queue_full_fallback_non_best_effort_enabled;
+  if (legacy_requested) {
+    SYSLOG_WARN(
+        "LogicServer ignores legacy fallback config and forces mailbox-only routing");
+  }
+  legacy_fallback_enabled_ = false;
+  legacy_fallback_allow_auth_whitelist_ = false;
+  legacy_fallback_allow_critical_msgs_ = false;
+  legacy_fallback_allow_normal_msgs_ = false;
+  queue_full_fallback_non_best_effort_enabled_ = false;
   chat_batch_send_enabled_ = server_config.chat_batch_send_enabled;
   SYSLOG_INFO(
       "LogicServer legacy fallback policy enabled={} allow_auth_whitelist={} "
@@ -774,6 +804,18 @@ bool LogicServer::Initialize(const std::string& config_path) {
   }
 
   network_ = std::make_unique<network::NetworkManager>(app_.GetIoContext());
+  network_->SetIdlePolicy(network_session_idle_check_interval_ms,
+                          network_session_idle_timeout_ms);
+  network_->SetAcceptedConnectionWriteQueueSize(service_link_write_queue_size);
+  network_->SetAcceptedConnectionLowCopySendEnabled(
+      server_config.network_low_copy_send_enabled);
+  SYSLOG_INFO(
+      "LogicServer network policy idle_check_ms={} idle_timeout_ms={} "
+      "service_link_write_queue_size={} low_copy_send_enabled={}",
+      network_session_idle_check_interval_ms,
+      network_session_idle_timeout_ms,
+      service_link_write_queue_size,
+      server_config.network_low_copy_send_enabled);
 
   executor_ = std::make_unique<CoroutineExecutor>(app_.GetIoContext());
   entity_lane_scheduler_ = std::make_unique<EntityLaneScheduler>(app_.GetIoContext());
@@ -844,6 +886,10 @@ bool LogicServer::Initialize(const std::string& config_path) {
   storage_config.l2_block_size = loaded_storage_config.l2_block_size;
   storage_config.l2_bloom_filter_bits_per_key =
       loaded_storage_config.l2_bloom_filter_bits_per_key;
+  storage_config.l2_usage_soft_limit_ratio =
+      loaded_storage_config.l2_usage_soft_limit_ratio;
+  storage_config.l2_usage_hard_limit_ratio =
+      loaded_storage_config.l2_usage_hard_limit_ratio;
   storage_config.l2_path = loaded_storage_config.l2_path;
   storage_config.l2_ttl_seconds = loaded_storage_config.l2_ttl_seconds;
   storage_config.l2_ttl_periodic_compaction_seconds =
@@ -880,6 +926,25 @@ bool LogicServer::Initialize(const std::string& config_path) {
   storage_config.audit_log_max_entries = loaded_storage_config.audit_log_max_entries;
   storage_config.enable_new_write_path =
       loaded_storage_config.enable_new_write_path;
+  storage_config.enable_v2_encode = loaded_storage_config.enable_v2_encode;
+  storage_config.enable_v2_read_fallback =
+      loaded_storage_config.enable_v2_read_fallback;
+  storage_config.enable_data_encryption =
+      loaded_storage_config.enable_data_encryption;
+  storage_config.encryption_active_key_id =
+      loaded_storage_config.encryption_active_key_id;
+  storage_config.encryption_key_env =
+      loaded_storage_config.encryption_key_env;
+  storage_config.startup_fail_on_validation_error =
+      loaded_storage_config.startup_fail_on_validation_error;
+  storage_config.checkpoint_enabled = loaded_storage_config.checkpoint_enabled;
+  storage_config.checkpoint_interval_seconds =
+      std::max(loaded_storage_config.checkpoint_interval_minutes, 1u) * 60u;
+  storage_config.checkpoint_retention = loaded_storage_config.checkpoint_retention;
+  storage_config.tombstone_retention_seconds =
+      loaded_storage_config.tombstone_retention_seconds;
+  storage_config.tombstone_gc_interval_seconds =
+      loaded_storage_config.tombstone_gc_interval_seconds;
   storage_config.enable_access_control =
       loaded_storage_config.enable_access_control;
   storage_config.require_auth_for_reads =
@@ -1295,6 +1360,7 @@ void LogicServer::RegisterHandlers() {
     hot_event_pipeline_ = std::make_unique<events::HotEventPipeline>();
     hot_event_pipeline_->InitializeFromEnv();
   }
+  EnsureHotEventPipelineEnabled(hot_event_pipeline_.get(), "RegisterHandlers");
 
   if (executor_ && !handler_registry_) {
     handler_registry_ = std::make_unique<HandlerRegistry>(*executor_);
@@ -1431,10 +1497,11 @@ void LogicServer::RegisterHandlers() {
     player_presence_service_ = PlayerPresenceService::CreateDefault(*default_registry);
   }
 
-  if (executor_ && response_sender_ && default_registry && chat_aoi &&
+  if (executor_ && response_sender_ && role_store_ && default_registry && chat_aoi &&
       player_presence_service_ && !chat_handler_) {
     chat_handler_ = std::make_unique<ChatHandler>(*response_sender_,
                                                   *player_presence_service_,
+                                                  *role_store_,
                                                   *chat_aoi,
                                                   *default_registry,
                                                   chat_batch_send_enabled_);
@@ -1853,16 +1920,13 @@ void LogicServer::DispatchHotEventsBatch(std::vector<events::HotEvent> events) {
     }
   };
 
-  std::unordered_set<uint64_t> batch_clients;
-  batch_clients.reserve(events.size());
-  std::unordered_set<uint64_t> runners_to_start;
-  runners_to_start.reserve(events.size());
-  std::unordered_set<uint64_t> hard_backpressure_clients;
-  hard_backpressure_clients.reserve(events.size());
-  std::unordered_set<uint64_t> soft_backpressure_clients;
-  soft_backpressure_clients.reserve(events.size());
-  std::unordered_set<uint64_t> kick_clients;
-  kick_clients.reserve(events.size());
+  auto& scratch = mailbox_dispatch_scratch_;
+  scratch.Reset(events.size());
+  auto& batch_clients = scratch.batch_clients;
+  auto& runners_to_start = scratch.runners_to_start;
+  auto& hard_backpressure_clients = scratch.hard_backpressure_clients;
+  auto& soft_backpressure_clients = scratch.soft_backpressure_clients;
+  auto& kick_clients = scratch.kick_clients;
 
   for (const auto& event : events) {
     if (event.client_id == 0) {
@@ -2014,6 +2078,8 @@ void LogicServer::DispatchHotEventsBatch(std::vector<events::HotEvent> events) {
                                      mailbox_soft_backpressure_pause_ms_,
                                      mailbox_soft_backpressure_cooldown_ms_);
   }
+
+  scratch.Clear();
 }
 
 Task<void> LogicServer::RunPlayerMailbox(uint64_t client_id) {
@@ -2374,6 +2440,8 @@ Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
   }
 
   if (event.type == events::HotEventType::kHeartbeat) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+    monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedHeartbeatTotal);
     co_return;
   }
 
@@ -2410,18 +2478,24 @@ Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
       if (movement_handler_) {
         co_await movement_handler_->HandleHot(
             std::move(context), event.data.move.target_x, event.data.move.target_y);
+        monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+        monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedMoveTotal);
       }
       co_return;
     case events::HotEventType::kAttack:
       if (attack_handler_) {
         co_await attack_handler_->HandleHot(
             std::move(context), event.data.attack.target_id, event.data.attack.target_type);
+        monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+        monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedAttackTotal);
       }
       co_return;
     case events::HotEventType::kSkill:
       if (skill_handler_) {
         co_await skill_handler_->HandleHot(
             std::move(context), event.data.skill.target_id, event.data.skill.skill_id);
+        monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+        monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedSkillTotal);
       }
       co_return;
     case events::HotEventType::kHeartbeat:
@@ -2457,6 +2531,8 @@ Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
 
       hot_event_pipeline_->ReleaseVarPayload(event);
       co_await chat_handler_->HandleHot(std::move(context), channel, target_id, std::move(content));
+      monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+      monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedChatTotal);
       co_return;
     }
     case events::HotEventType::kGeneric: {
@@ -2491,6 +2567,8 @@ Task<void> LogicServer::ExecuteQueuedEvent(const events::HotEvent& event) {
       }
 
       co_await std::move(task);
+      monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+      monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedGenericTotal);
       co_return;
     }
   }
@@ -2522,8 +2600,22 @@ void LogicServer::OnGatewayDisconnected() {
 }
 
 void LogicServer::CleanupAllClientSessions(const char* reason) {
+  const auto summary = CleanupAllClientSessionsImpl(reason);
+  if (summary.cleaned_total > 0 || summary.cleanup_flush_attempted) {
+    SYSLOG_INFO(
+        "LogicServer session cleanup_all reason={} cleaned={} cleanup_dirty_count={} cleanup_flush_attempted={} cleanup_flush_success={}",
+        reason == nullptr ? "unknown" : reason,
+        summary.cleaned_total,
+        summary.cleanup_dirty_count,
+        summary.cleanup_flush_attempted ? "true" : "false",
+        summary.cleanup_flush_success ? "true" : "false");
+  }
+}
+
+LogicServer::CleanupAllClientSessionsSummary LogicServer::CleanupAllClientSessionsImpl(
+    const char* reason) {
   if (!AssertOnLogicThread("LogicServer::CleanupAllClientSessions")) {
-    return;
+    return {};
   }
 
   const auto clients = client_registry_.GetAll();
@@ -2544,33 +2636,45 @@ void LogicServer::CleanupAllClientSessions(const char* reason) {
     }
   }
 
-  uint64_t cleaned_total = 0;
+  CleanupAllClientSessionsSummary summary;
   for (const uint64_t client_id : cleanup_client_ids) {
-    if (CleanupClientSession(client_id, reason)) {
-      ++cleaned_total;
+    const auto cleanup_result = CleanupClientSessionDetailed(client_id, reason);
+    if (cleanup_result.cleaned) {
+      ++summary.cleaned_total;
+    }
+    if (cleanup_result.disconnect_role_was_dirty) {
+      ++summary.cleanup_dirty_count;
     }
   }
   last_reconciled_client_ids_.clear();
-  monitor::Metrics::Instance().IncrementCounter(kMetricSessionCleanupAllTotal, cleaned_total);
-
-  if (cleaned_total > 0) {
-    SYSLOG_INFO("LogicServer session cleanup_all reason={} cleaned={}",
-                reason == nullptr ? "unknown" : reason,
-                cleaned_total);
+  monitor::Metrics::Instance().IncrementCounter(kMetricSessionCleanupAllTotal,
+                                                summary.cleaned_total);
+  summary.cleanup_flush_attempted = summary.cleanup_dirty_count > 0;
+  if (summary.cleanup_flush_attempted) {
+    summary.cleanup_flush_success =
+        storage_engine::StorageEngine::IsInitialized() &&
+        storage_engine::StorageEngine::Instance().Flush(2000);
   }
+  return summary;
 }
 
 bool LogicServer::CleanupClientSession(uint64_t client_id, const char* reason) {
+  return CleanupClientSessionDetailed(client_id, reason).cleaned;
+}
+
+LogicServer::CleanupClientSessionResult LogicServer::CleanupClientSessionDetailed(
+    uint64_t client_id,
+    const char* reason) {
   if (!AssertOnLogicThread("LogicServer::CleanupClientSession")) {
-    return false;
+    return {};
   }
   if (client_id == 0) {
-    return false;
+    return {};
   }
 
-  bool cleaned = false;
+  CleanupClientSessionResult result;
   if (CancelMailbox(client_id, reason)) {
-    cleaned = true;
+    result.cleaned = true;
   }
   std::optional<uint64_t> role_id_opt;
   std::optional<uint64_t> account_id_opt;
@@ -2581,43 +2685,51 @@ bool LogicServer::CleanupClientSession(uint64_t client_id, const char* reason) {
 
   if (role_id_opt.has_value() && registry_manager_ &&
       *role_id_opt <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+    SYSLOG_INFO("LogicServer CleanupClientSession client_id={} role_id={} account_id={} reason={} invoking_on_disconnect=true",
+                client_id,
+                *role_id_opt,
+                account_id_opt.value_or(0),
+                reason == nullptr ? "unknown" : reason);
     auto& character_manager = registry_manager_->GetCharacterManager();
-    character_manager.OnDisconnect(static_cast<uint32_t>(*role_id_opt));
-    cleaned = true;
+    const auto disconnect_result =
+        character_manager.OnDisconnect(static_cast<uint32_t>(*role_id_opt));
+    result.disconnect_invoked = true;
+    result.disconnect_role_was_dirty = disconnect_result.was_dirty_before_save;
+    result.cleaned = true;
   }
 
   if (role_id_opt.has_value() || account_id_opt.has_value()) {
-    cleaned = true;
+    result.cleaned = true;
   }
   if (role_store_) {
     role_store_->UnbindClient(client_id);
   }
 
   if (client_registry_.Contains(client_id)) {
-    cleaned = true;
+    result.cleaned = true;
   }
   client_registry_.Remove(client_id);
 
   if (client_last_activity_ms_.erase(client_id) > 0) {
-    cleaned = true;
+    result.cleaned = true;
   }
   if (last_reconciled_client_ids_.erase(client_id) > 0) {
-    cleaned = true;
+    result.cleaned = true;
   }
 
   {
     std::lock_guard<std::mutex> lock(backpressure_mutex_);
     if (backpressure_until_ms_.erase(client_id) > 0) {
-      cleaned = true;
+      result.cleaned = true;
     }
   }
 
-  if (cleaned) {
+  if (result.cleaned) {
     SYSLOG_DEBUG("LogicServer cleaned client session reason={} client_id={}",
                  reason == nullptr ? "unknown" : reason,
                  client_id);
   }
-  return cleaned;
+  return result;
 }
 
 void LogicServer::ReconcileWithGatewaySnapshot(
@@ -2742,7 +2854,9 @@ void LogicServer::HandleServiceHello(const std::shared_ptr<network::TcpSession>&
     return;
   }
 
+  session->SetSessionKind(network::TcpSession::SessionKind::kService);
   session->SetBypassRateLimit(true);
+  monitor::Metrics::Instance().IncrementCounter(kMetricServiceConnectedGatewayTotal);
   SYSLOG_INFO("LogicServer handshake from service={}", static_cast<int>(remote));
   const auto ack = common::BuildServiceHelloAck(common::ServiceType::kLogic, true);
   session->Send(static_cast<uint16_t>(common::InternalMsgId::kServiceHelloAck), ack);
@@ -2758,6 +2872,8 @@ void LogicServer::HandleServiceHello(const std::shared_ptr<network::TcpSession>&
           }
         }
         if (should_cleanup) {
+          monitor::Metrics::Instance().IncrementCounter(
+              kMetricServiceDisconnectedGatewayTotal);
           OnGatewayDisconnected();
         }
       });
@@ -2811,14 +2927,10 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
   }
 
   if (!hot_event_pipeline_) {
-    monitor::Metrics::Instance().IncrementCounter(kMetricLegacyFallbackTotal);
-    SYSLOG_WARN("LogicServer hot_event_pipeline unavailable, fallback to legacy dispatch "
-                "msg_id={} client_id={}",
-                routed.msg_id,
-                routed.client_id);
-    DispatchRoutedMessageLegacy(routed.client_id, routed.msg_id, routed.payload);
-    return;
+    hot_event_pipeline_ = std::make_unique<events::HotEventPipeline>();
+    hot_event_pipeline_->InitializeFromEnv();
   }
+  EnsureHotEventPipelineEnabled(hot_event_pipeline_.get(), "HandleRoutedMessage");
 
   HandlerContext context;
   context.client_id = routed.client_id;
@@ -2830,20 +2942,29 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
     return;
   }
 
-  if (enqueue_result == events::HotEventPipeline::EnqueueResult::kBypass ||
-      enqueue_result == events::HotEventPipeline::EnqueueResult::kArenaExhausted) {
-    monitor::Metrics::Instance().IncrementCounter(kMetricLegacyFallbackTotal);
-    if (enqueue_result == events::HotEventPipeline::EnqueueResult::kArenaExhausted) {
-      monitor::Metrics::Instance().IncrementCounter(kMetricArenaFallbackTotal);
-      SYSLOG_WARN("LogicServer hot arena exhausted, fallback to legacy dispatch "
-                  "msg_id={} client_id={}",
-                  routed.msg_id,
-                  routed.client_id);
+  if (enqueue_result == events::HotEventPipeline::EnqueueResult::kBypass) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricBypassDropTotal);
+    SYSLOG_ERROR("LogicServer hot_event_pipeline bypassed unexpectedly, dropping msg_id={} "
+                 "client_id={}",
+                 routed.msg_id,
+                 routed.client_id);
+    if (MaybeSendBackpressurePause(routed.client_id,
+                                   backpressure_pause_ms_,
+                                   backpressure_signal_cooldown_ms_)) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricBackpressureQueueFullSignalTotal);
     }
-    if (!DispatchRoutedMessageLegacy(routed.client_id, routed.msg_id, routed.payload)) {
-      SYSLOG_WARN("LogicServer legacy fallback failed msg_id={} client_id={}",
-                  routed.msg_id,
-                  routed.client_id);
+    return;
+  }
+
+  if (enqueue_result == events::HotEventPipeline::EnqueueResult::kArenaExhausted) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricArenaDropTotal);
+    SYSLOG_WARN("LogicServer hot arena exhausted, dropping msg_id={} client_id={}",
+                routed.msg_id,
+                routed.client_id);
+    if (MaybeSendBackpressurePause(routed.client_id,
+                                   backpressure_pause_ms_,
+                                   backpressure_signal_cooldown_ms_)) {
+      monitor::Metrics::Instance().IncrementCounter(kMetricBackpressureQueueFullSignalTotal);
     }
     return;
   }
@@ -2857,24 +2978,7 @@ void LogicServer::HandleRoutedMessage(const std::shared_ptr<network::TcpSession>
   }
 
   if (enqueue_result == events::HotEventPipeline::EnqueueResult::kQueueFull) {
-    const bool should_fallback =
-        queue_full_fallback_non_best_effort_enabled_ &&
-        ShouldFallbackOnQueueFull(routed.msg_id);
-    if (should_fallback) {
-      monitor::Metrics::Instance().IncrementCounter(kMetricQueueFullFallbackTotal);
-      SYSLOG_WARN("LogicServer hot queue full, fallback to legacy dispatch "
-                  "msg_id={} client_id={}",
-                  routed.msg_id,
-                  routed.client_id);
-      if (!DispatchRoutedMessageLegacy(routed.client_id, routed.msg_id, routed.payload)) {
-        SYSLOG_WARN("LogicServer legacy fallback failed msg_id={} client_id={}",
-                    routed.msg_id,
-                    routed.client_id);
-      }
-      return;
-    }
-
-    SYSLOG_WARN("LogicServer hot queue full, dropping non-critical msg_id={} client_id={}",
+    SYSLOG_WARN("LogicServer hot queue full, dropping msg_id={} client_id={}",
                 routed.msg_id,
                 routed.client_id);
     if (MaybeSendBackpressurePause(routed.client_id,
@@ -2907,14 +3011,17 @@ bool LogicServer::DispatchRoutedMessageLegacy(uint64_t client_id,
   }
 
   if (msg_id == static_cast<uint16_t>(common::MsgId::kHeartbeat)) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+    monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedHeartbeatTotal);
     return true;
   }
 
   if (!IsAuthWhitelistedMsgId(msg_id) && !client_registry_.Contains(client_id)) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricLegacyDispatchBlockedTotal);
     SYSLOG_WARN("LogicServer dropped unauthenticated routed message client_id={} msg_id={}",
                 client_id,
                 msg_id);
-    return true;
+    return false;
   }
 
   if (!handler_registry_) {
@@ -2935,6 +3042,8 @@ bool LogicServer::DispatchRoutedMessageLegacy(uint64_t client_id,
                 ToString(spawn_result));
     return false;
   }
+  monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedTotal);
+  monitor::Metrics::Instance().IncrementCounter(kMetricRoutedProcessedGenericTotal);
   return true;
 }
 
@@ -3320,10 +3429,23 @@ bool LogicServer::ReloadStorageRuntimeConfig() {
   const auto& loaded = config::ConfigManager::Instance().GetStorageEngineConfig();
   storage_engine::StorageEngine::RuntimeTunableConfig runtime;
   runtime.l1_ttl_seconds = loaded.l1_ttl_seconds;
+  runtime.l2_usage_soft_limit_ratio = loaded.l2_usage_soft_limit_ratio;
+  runtime.l2_usage_hard_limit_ratio = loaded.l2_usage_hard_limit_ratio;
   runtime.auto_sync_interval_ms = loaded.auto_sync_interval_ms;
   runtime.batch_size = loaded.batch_size;
   runtime.queue_retry_count = loaded.queue_retry_count;
   runtime.queue_retry_delay_ms = loaded.queue_retry_delay_ms;
+  runtime.enable_v2_encode = loaded.enable_v2_encode;
+  runtime.enable_v2_read_fallback = loaded.enable_v2_read_fallback;
+  runtime.enable_data_encryption = loaded.enable_data_encryption;
+  runtime.encryption_active_key_id = loaded.encryption_active_key_id;
+  runtime.encryption_key_env = loaded.encryption_key_env;
+  runtime.checkpoint_enabled = loaded.checkpoint_enabled;
+  runtime.checkpoint_interval_seconds =
+      std::max(loaded.checkpoint_interval_minutes, 1u) * 60u;
+  runtime.checkpoint_retention = loaded.checkpoint_retention;
+  runtime.tombstone_retention_seconds = loaded.tombstone_retention_seconds;
+  runtime.tombstone_gc_interval_seconds = loaded.tombstone_gc_interval_seconds;
   runtime.circuit_breaker_threshold = loaded.circuit_breaker_threshold;
   runtime.circuit_breaker_timeout_ms = loaded.circuit_breaker_timeout_ms;
   runtime.enable_metrics = loaded.enable_metrics;
@@ -3337,12 +3459,24 @@ bool LogicServer::ReloadStorageRuntimeConfig() {
       storage_engine::StorageEngine::Instance().ApplyRuntimeConfig(runtime);
   if (applied) {
     SYSLOG_INFO(
-        "LogicServer reloaded storage runtime config: l1_ttl={} sync_ms={} batch={} retry={} retry_delay_ms={} metrics={} strict_write={} new_write_path={} access_control={} auth_reads={}",
+        "LogicServer reloaded storage runtime config: l1_ttl={} l2_soft_limit_ratio={} l2_hard_limit_ratio={} sync_ms={} batch={} retry={} retry_delay_ms={} v2_encode={} v2_fallback={} data_encryption={} encryption_active_key_id={} encryption_key_env={} checkpoint_enabled={} checkpoint_interval_minutes={} checkpoint_retention={} tombstone_retention_s={} tombstone_gc_interval_s={} metrics={} strict_write={} new_write_path={} access_control={} auth_reads={}",
         loaded.l1_ttl_seconds,
+        loaded.l2_usage_soft_limit_ratio,
+        loaded.l2_usage_hard_limit_ratio,
         loaded.auto_sync_interval_ms,
         loaded.batch_size,
         loaded.queue_retry_count,
         loaded.queue_retry_delay_ms,
+        loaded.enable_v2_encode,
+        loaded.enable_v2_read_fallback,
+        loaded.enable_data_encryption,
+        loaded.encryption_active_key_id,
+        loaded.encryption_key_env,
+        loaded.checkpoint_enabled,
+        loaded.checkpoint_interval_minutes,
+        loaded.checkpoint_retention,
+        loaded.tombstone_retention_seconds,
+        loaded.tombstone_gc_interval_seconds,
         loaded.enable_metrics,
         loaded.enable_strict_write_guarantee,
         loaded.enable_new_write_path,

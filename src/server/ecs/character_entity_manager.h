@@ -40,6 +40,11 @@ class CharacterEntityManager {
     kSaveFailed,
   };
 
+  struct DisconnectPersistResult {
+    bool was_dirty_before_save = false;
+    SaveResult save_result = SaveResult::kEntityNotFound;
+  };
+
   enum class ErrorPolicy {
     kRetainDirtyFlag,
     kClearDirtyFlag,
@@ -95,7 +100,8 @@ class CharacterEntityManager {
   void OnLogin(uint32_t character_id, EventBus* event_bus = nullptr);
 
   /// 断线时保存角色并标记离线
-  void OnDisconnect(uint32_t character_id, EventBus* event_bus = nullptr);
+  DisconnectPersistResult OnDisconnect(uint32_t character_id,
+                                       EventBus* event_bus = nullptr);
 
   /// 周期更新（保存与超时清理）
   void Update(float delta_time);

@@ -506,18 +506,34 @@ void CharacterEntityManager::OnLogin(uint32_t character_id, EventBus* event_bus)
   }
 }
 
-void CharacterEntityManager::OnDisconnect(uint32_t character_id, EventBus* event_bus) {
+CharacterEntityManager::DisconnectPersistResult CharacterEntityManager::OnDisconnect(
+    uint32_t character_id,
+    EventBus* event_bus) {
   AssertSameThread();
+  DisconnectPersistResult result;
   auto entity = TryGet(character_id);
-  SaveIfDirty(character_id);
-
+  entt::registry* registry = nullptr;
   if (entity) {
-    if (entt::registry* registry = TryGetRegistry(character_id)) {
+    registry = TryGetRegistry(character_id);
+    if (registry) {
       if (auto* state = registry->try_get<CharacterStateComponent>(*entity)) {
         state->is_online = false;
+        dirty_tracker::mark_state_dirty(*registry, *entity);
+        result.was_dirty_before_save = dirty_tracker::is_dirty(*registry, *entity);
       }
     }
   }
+
+  if (entity && registry && result.was_dirty_before_save) {
+    result.save_result = SaveCritical(character_id);
+  } else {
+    result.save_result = SaveIfDirty(character_id);
+  }
+  SYSLOG_INFO(
+      "CharacterEntityManager OnDisconnect character_id={} was_dirty_before_save={} save_result={}",
+              character_id,
+              result.was_dirty_before_save ? "true" : "false",
+              static_cast<int>(result.save_result));
 
   auto it = sessions_.find(character_id);
   if (it != sessions_.end()) {
@@ -532,6 +548,7 @@ void CharacterEntityManager::OnDisconnect(uint32_t character_id, EventBus* event
     event.character_id = character_id;
     event_bus->Publish(event);
   }
+  return result;
 }
 
 void CharacterEntityManager::Update(float delta_time) {
@@ -614,6 +631,8 @@ CharacterEntityManager::SaveResult CharacterEntityManager::SaveIfDirty(uint32_t 
   }
 
   if (!dirty_tracker::is_dirty(*registry, *entity)) {
+    SYSLOG_INFO("CharacterEntityManager SaveIfDirty character_id={} result=not_dirty",
+                character_id);
     return SaveResult::kNotDirty;
   }
 
@@ -628,6 +647,8 @@ CharacterEntityManager::SaveResult CharacterEntityManager::SaveIfDirty(uint32_t 
       return SaveResult::kSaveFailed;
     }
     dirty_tracker::clear_dirty(*registry, *entity);
+    SYSLOG_INFO("CharacterEntityManager SaveIfDirty character_id={} result=success",
+                character_id);
     return SaveResult::kSuccess;
   } catch (const std::exception& ex) {
     SYSLOG_ERROR("CharacterEntityManager SaveIfDirty failed id={} error={}",

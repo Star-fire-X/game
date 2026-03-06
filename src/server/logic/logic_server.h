@@ -184,8 +184,22 @@ class LogicServer {
   void KickMailboxOverflow(uint64_t client_id);
   void KickMailboxException(uint64_t client_id);
   void OnGatewayDisconnected();
+  struct CleanupClientSessionResult {
+    bool cleaned = false;
+    bool disconnect_invoked = false;
+    bool disconnect_role_was_dirty = false;
+  };
+  struct CleanupAllClientSessionsSummary {
+    uint64_t cleaned_total = 0;
+    uint64_t cleanup_dirty_count = 0;
+    bool cleanup_flush_attempted = false;
+    bool cleanup_flush_success = false;
+  };
   void CleanupAllClientSessions(const char* reason);
+  CleanupAllClientSessionsSummary CleanupAllClientSessionsImpl(const char* reason);
   bool CleanupClientSession(uint64_t client_id, const char* reason);
+  CleanupClientSessionResult CleanupClientSessionDetailed(uint64_t client_id,
+                                                         const char* reason);
   void ReconcileWithGatewaySnapshot(const std::unordered_set<uint64_t>& restored_client_ids,
                                     uint32_t request_id);
   void MarkClientActivity(uint64_t client_id, int64_t now_ms);
@@ -271,8 +285,53 @@ class LogicServer {
     uint8_t consecutive_overflow_count = 0;
     bool executing = false;
   };
+
+  struct MailboxDispatchScratch {
+    std::unordered_set<uint64_t> batch_clients;
+    std::unordered_set<uint64_t> runners_to_start;
+    std::unordered_set<uint64_t> hard_backpressure_clients;
+    std::unordered_set<uint64_t> soft_backpressure_clients;
+    std::unordered_set<uint64_t> kick_clients;
+
+    void Reset(size_t reserve_hint) {
+      batch_clients.clear();
+      runners_to_start.clear();
+      hard_backpressure_clients.clear();
+      soft_backpressure_clients.clear();
+      kick_clients.clear();
+
+      if (reserve_hint == 0) {
+        return;
+      }
+      if (batch_clients.bucket_count() < reserve_hint) {
+        batch_clients.reserve(reserve_hint);
+      }
+      if (runners_to_start.bucket_count() < reserve_hint) {
+        runners_to_start.reserve(reserve_hint);
+      }
+      if (hard_backpressure_clients.bucket_count() < reserve_hint) {
+        hard_backpressure_clients.reserve(reserve_hint);
+      }
+      if (soft_backpressure_clients.bucket_count() < reserve_hint) {
+        soft_backpressure_clients.reserve(reserve_hint);
+      }
+      if (kick_clients.bucket_count() < reserve_hint) {
+        kick_clients.reserve(reserve_hint);
+      }
+    }
+
+    void Clear() {
+      batch_clients.clear();
+      runners_to_start.clear();
+      hard_backpressure_clients.clear();
+      soft_backpressure_clients.clear();
+      kick_clients.clear();
+    }
+  };
+
   // Accessed only on the logic io_context thread.
   std::unordered_map<uint64_t, PlayerMailbox> player_mailboxes_;
+  MailboxDispatchScratch mailbox_dispatch_scratch_;
   std::unordered_set<uint64_t> cancelled_mailbox_clients_;
   size_t mailbox_pending_events_total_ = 0;
   size_t mailbox_active_runners_ = 0;
@@ -290,11 +349,11 @@ class LogicServer {
   bool zombie_detection_enabled_ = true;
   int64_t zombie_scan_interval_ms_ = 5000;
   int64_t zombie_idle_timeout_ms_ = 120000;
-  bool legacy_fallback_enabled_ = true;
-  bool legacy_fallback_allow_auth_whitelist_ = true;
-  bool legacy_fallback_allow_critical_msgs_ = true;
+  bool legacy_fallback_enabled_ = false;
+  bool legacy_fallback_allow_auth_whitelist_ = false;
+  bool legacy_fallback_allow_critical_msgs_ = false;
   bool legacy_fallback_allow_normal_msgs_ = false;
-  bool queue_full_fallback_non_best_effort_enabled_ = true;
+  bool queue_full_fallback_non_best_effort_enabled_ = false;
   bool chat_batch_send_enabled_ = true;
   uint32_t backpressure_pause_ms_ = 100;
   int64_t backpressure_signal_cooldown_ms_ = 100;

@@ -4,11 +4,15 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
 #include "ecs/dirty_tracker.h"
+#include "log/logger.h"
 #include "storage_engine/storage_engine.h"
 #include "storage_engine/test_backend_mocks.h"
 
@@ -43,6 +47,35 @@ class OutboxBlockingBackend : public mir2::storage_engine::test::NoopStorageBack
   std::atomic<uint32_t> batch_save_calls{0};
 };
 
+class BatchCountingBackend : public mir2::storage_engine::test::NoopStorageBackend {
+ public:
+  StorageResult Save(const std::string&,
+                     uint64_t,
+                     const std::vector<uint8_t>&) override {
+    save_calls.fetch_add(1, std::memory_order_relaxed);
+    return StorageResult{true, "", 0};
+  }
+
+  StorageResult SaveBatch(const BatchItems& items) override {
+    batch_save_calls.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mutex_);
+    batch_sizes_.push_back(items.size());
+    return StorageResult{true, "", 0};
+  }
+
+  std::vector<size_t> BatchSizes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return batch_sizes_;
+  }
+
+  std::atomic<uint32_t> save_calls{0};
+  std::atomic<uint32_t> batch_save_calls{0};
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<size_t> batch_sizes_;
+};
+
 StorageEngine::Config BuildOutboxTestConfig(const std::string& l2_path) {
   StorageEngine::Config config;
   config.l2_path = l2_path;
@@ -57,10 +90,26 @@ StorageEngine::Config BuildOutboxTestConfig(const std::string& l2_path) {
   return config;
 }
 
+StorageEngine::Config BuildDeferredFlushConfig(const std::string& l2_path) {
+  auto config = BuildOutboxTestConfig(l2_path);
+  config.auto_sync_interval_ms = 60000;
+  config.batch_size = 8;
+  return config;
+}
+
 std::string BuildTempPath(const char* prefix) {
   return std::string("/tmp/") + prefix + "_" +
          std::to_string(
              std::chrono::steady_clock::now().time_since_epoch().count());
+}
+
+std::string ReadTextFile(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    return "";
+  }
+  return std::string(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
 }
 
 }  // namespace
@@ -244,4 +293,84 @@ TEST(CharacterEntityManagerDirtyTest, SaveIfDirtyKeepsDirtyWhenAsyncDurableWrite
 
     StorageEngine::Shutdown();
     std::filesystem::remove_all(l2_path, ec);
+}
+
+TEST(CharacterEntityManagerDirtyTest,
+     OnDisconnectPersistsMovedCharacterSnapshotToStorageEngineL2) {
+    entt::registry registry;
+    CharacterEntityManager manager(registry);
+
+    if (StorageEngine::IsInitialized()) {
+      StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path = BuildTempPath("mir2_char_manager_disconnect_persist");
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+
+    auto backend = std::make_unique<mir2::storage_engine::test::NoopStorageBackend>();
+    StorageEngine::Config config;
+    config.l2_path = l2_path;
+    config.enable_metrics = false;
+    config.auto_sync_interval_ms = 10;
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend), config));
+
+    auto& engine = StorageEngine::Instance();
+    auto entity = manager.GetOrCreate(1000);
+    ASSERT_TRUE(registry.valid(entity));
+
+    manager.OnLogin(1000);
+    ASSERT_TRUE(manager.SetPosition(1000, 101, 100, 1));
+    ASSERT_TRUE(dirty_tracker::is_dirty(registry, entity));
+
+    manager.OnDisconnect(1000);
+    ASSERT_TRUE(engine.Flush(2000));
+
+    auto stored = engine.Get("char:1000");
+    ASSERT_TRUE(stored.has_value());
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
+}
+
+TEST(CharacterEntityManagerDirtyTest,
+     OnDisconnectReturnsDirtyPersistResultWithoutFlushAfterSaveLog) {
+    entt::registry registry;
+    CharacterEntityManager manager(registry);
+
+    if (StorageEngine::IsInitialized()) {
+      StorageEngine::Shutdown();
+    }
+
+    const std::string l2_path = BuildTempPath("mir2_char_manager_disconnect_result");
+    const auto log_dir = std::filesystem::path(l2_path).parent_path() / "logs";
+    std::error_code ec;
+    std::filesystem::remove_all(l2_path, ec);
+    std::filesystem::remove_all(log_dir, ec);
+
+    auto backend = std::make_unique<BatchCountingBackend>();
+    ASSERT_TRUE(StorageEngine::Initialize(std::move(backend),
+                                          BuildDeferredFlushConfig(l2_path)));
+    ASSERT_TRUE(mir2::log::Logger::Instance().Initialize(log_dir.string(), "info", 1, 2));
+
+    const auto entity = manager.GetOrCreate(2000);
+    ASSERT_TRUE(registry.valid(entity));
+    manager.OnLogin(2000);
+
+    auto& attributes = registry.get<CharacterAttributesComponent>(entity);
+    attributes.hp = 77;
+    dirty_tracker::mark_attributes_dirty(registry, entity);
+    ASSERT_TRUE(dirty_tracker::is_dirty(registry, entity));
+
+    const auto result = manager.OnDisconnect(2000);
+
+    EXPECT_TRUE(result.was_dirty_before_save);
+    EXPECT_EQ(result.save_result, CharacterEntityManager::SaveResult::kSuccess);
+    mir2::log::Logger::Instance().Shutdown();
+    const auto system_log = ReadTextFile(log_dir / "system.log");
+    EXPECT_EQ(system_log.find("flush_after_save"), std::string::npos);
+
+    StorageEngine::Shutdown();
+    std::filesystem::remove_all(l2_path, ec);
+    std::filesystem::remove_all(log_dir, ec);
 }

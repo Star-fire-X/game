@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.16)
 # Dependencies
 find_package(RocksDB CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # 源文件列表
 set(STORAGE_ENGINE_SOURCES
@@ -31,6 +32,8 @@ set(STORAGE_ENGINE_SOURCES
     utils/global_hybrid_clock.cc
     utils/phase0_gate.h
     utils/phase0_gate.cc
+    utils/storage_admin_tool.h
+    utils/storage_admin_tool.cc
 
     # Types
     types.h
@@ -63,6 +66,7 @@ target_link_libraries(mir2_storage_engine PUBLIC
     legend2_common
     spdlog::spdlog
     Threads::Threads
+    OpenSSL::Crypto
 )
 
 target_link_libraries(mir2_storage_engine PRIVATE RocksDB::rocksdb)
@@ -87,6 +91,8 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(mir2_storage_engine PRIVATE MIR2_DEBUG_MODE)
 endif()
+
+target_compile_definitions(mir2_storage_engine PUBLIC HAVE_OPENSSL)
 
 # 导出
 set(STORAGE_ENGINE_LIBRARY mir2_storage_engine PARENT_SCOPE)

@@ -399,7 +399,7 @@ add_subdirectory(src/common)
 
 option(BUILD_SERVER "Build server" ON)
 option(BUILD_DB "Build database support libraries" ON)
-option(LEGEND2_ENABLE_PROMETHEUS "Enable Prometheus metrics" OFF)
+option(LEGEND2_ENABLE_PROMETHEUS "Enable Prometheus metrics" ON)
 option(LEGEND2_ENABLE_LEGACY "Enable legacy server modules" OFF)
 option(BUILD_EXPERIMENTAL_MAP_FEATURES
        "Build experimental map modules (ChunkManager/MapEventManager)" OFF)
@@ -582,7 +582,7 @@ if(BUILD_CLIENT)
     list(APPEND INSTALL_TARGETS legend2_client)
 endif()
 if(BUILD_SERVER)
-    list(APPEND INSTALL_TARGETS mir2_gateway mir2_logic mir2_dead_letter_replay)
+    list(APPEND INSTALL_TARGETS mir2_gateway mir2_logic mir2_dead_letter_replay mir2_storage_admin mir2_storage_engine_phase6_fault_driver)
 endif()
 
 install(TARGETS ${INSTALL_TARGETS}

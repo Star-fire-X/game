@@ -17,7 +17,10 @@ set(LEGEND2_TEST_SOURCES
     server/gateway/ring_buffer_test.cc
     server/network/kcp_session_test.cc
     server/network/tcp_client_test.cc
+    server/network/network_manager_test.cc
     server/network/tcp_session_protocol_gate_test.cc
+    server/network/protocol_ingress_parser_test.cc
+    server/network/control_message_parser_test.cc
     server/conv_blacklist_test.cc
     server/network/kcp_server_test.cc
     server/network/kcp_upgrade_handler_test.cc
@@ -27,9 +30,13 @@ set(LEGEND2_TEST_SOURCES
     server/storage_engine/async_outbox_backpressure_test.cc
     server/storage_engine/blocking_queue_test.cc
     server/storage_engine/dead_letter_persistence_test.cc
+    server/storage_engine/dead_letter_replay_compat_test.cc
     server/storage_engine/phase0_gate_test.cc
     server/storage_engine/rocksdb_cache_test.cc
+    server/storage_engine/storage_admin_tool_test.cc
+    ${CMAKE_SOURCE_DIR}/src/server/apps/dead_letter_replay_compat.cc
     server/logic/coroutine_executor_test.cc
+    server/logic/coroutine_executor_internal_test.cc
     server/logic/coroutine_executor_counter_race_test.cc
     server/logic/mock_response_sender.cc
     server/logic/character_handler_test.cc
@@ -56,6 +63,7 @@ set(LEGEND2_TEST_SOURCES
     server/logic/player_mailbox_causal_test.cc
     server/logic/thread_affinity_test.cc
     server/logic/handler_context_test.cc
+    server/logic/handler_registry_test.cc
     server/logic/handler_msg_id_matrix_test.cc
     server/logic/logic_server_test.cc  # P0 Ultra-Critical: Main server orchestrator
     server/logic/handlers/attack_handler_test.cc  # P0 Ultra-Critical: Attack processing
@@ -252,6 +260,7 @@ endif()
 
 set(LEGEND2_PQXX_TEST_SOURCES
     server/db/postgres_database_test.cpp
+    server/db/storage_engine_backend_sql_test.cc
     server/db/account_storage_backend_test.cpp
     server/db/account_storage_backend_cache_test.cpp
     server/logic/auction_handler_persistence_test.cc
@@ -371,9 +380,19 @@ add_executable(storage_engine_focus_tests
     server/storage_engine/async_test.cc
     server/storage_engine/async_outbox_backpressure_test.cc
     server/storage_engine/dead_letter_persistence_test.cc
+    server/storage_engine/dead_letter_replay_compat_test.cc
+    server/storage_engine/phase4_shell_script_test.cc
+    server/storage_engine/phase6_shell_script_test.cc
+    server/storage_engine/phase6_logic_process_shell_test.cc
+    server/storage_engine/phase6_gateway_e2e_shell_test.cc
+    server/storage_engine/phase6_gateway_mock_client_test.cc
     server/storage_engine/phase0_gate_test.cc
     server/storage_engine/rocksdb_cache_test.cc
+    server/storage_engine/storage_admin_tool_test.cc
+    ${CMAKE_SOURCE_DIR}/src/server/apps/storage_engine_phase6_gateway_mock_client.cc
     server/config/config_manager_storage_engine_test.cc
+    server/db/storage_engine_backend_sql_test.cc
+    ${CMAKE_SOURCE_DIR}/src/server/apps/dead_letter_replay_compat.cc
 )
 
 target_link_libraries(storage_engine_focus_tests PRIVATE

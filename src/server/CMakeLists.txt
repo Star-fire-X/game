@@ -92,6 +92,8 @@ set(MIR2_SERVER_SOURCES
     network/kcp_server.cc
     network/kcp_session.cc
     network/dual_channel_manager.cc
+    network/protocol_ingress_parser.cc
+    network/control_message_parser.cc
     network/ip_rate_limiter.cc
     network/conv_blacklist.cc
     network/message_dispatcher.cc
@@ -303,8 +305,20 @@ target_link_libraries(mir2_server_lib PUBLIC mir2_storage_engine)
 
 add_executable(mir2_logic apps/logic_main.cc)
 
-add_executable(mir2_dead_letter_replay apps/dead_letter_replay_main.cc)
+add_executable(mir2_dead_letter_replay
+    apps/dead_letter_replay_main.cc
+    apps/dead_letter_replay_compat.cc
+)
 target_link_libraries(mir2_dead_letter_replay PRIVATE yaml-cpp::yaml-cpp)
+add_executable(mir2_storage_admin apps/storage_admin_main.cc)
+add_executable(mir2_storage_engine_phase6_fault_driver
+    apps/storage_engine_phase6_fault_driver_main.cc
+    apps/storage_engine_phase6_fault_driver.cc
+)
+add_executable(mir2_storage_engine_phase6_gateway_mock_client
+    apps/storage_engine_phase6_gateway_mock_client_main.cc
+    apps/storage_engine_phase6_gateway_mock_client.cc
+)
 
 # NOTE:
 # mir2_server_lib and mir2_storage_engine have circular static-archive references
@@ -321,6 +335,18 @@ target_link_libraries(mir2_logic PRIVATE
     mir2_server_lib
 )
 target_link_libraries(mir2_dead_letter_replay PRIVATE
+    mir2_storage_engine
+    mir2_server_lib
+)
+target_link_libraries(mir2_storage_admin PRIVATE
+    mir2_storage_engine
+    mir2_server_lib
+)
+target_link_libraries(mir2_storage_engine_phase6_fault_driver PRIVATE
+    mir2_storage_engine
+    mir2_server_lib
+)
+target_link_libraries(mir2_storage_engine_phase6_gateway_mock_client PRIVATE
     mir2_storage_engine
     mir2_server_lib
 )

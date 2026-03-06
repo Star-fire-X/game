@@ -33,13 +33,15 @@ std::vector<uint8_t> BuildLegacyV1Packet(uint16_t msg_id) {
 std::shared_ptr<TcpConnection> CreateConnection(asio::io_context& io_context,
                                                 MockSocket** out_socket,
                                                 size_t max_write_queue_size =
-                                                    TcpConnection::kDefaultMaxWriteQueueSize) {
+                                                    TcpConnection::kDefaultMaxWriteQueueSize,
+                                                TcpConnection::WriteBatchOptions
+                                                    write_batch_options = {}) {
   auto mock_socket = std::make_unique<MockSocket>(io_context.get_executor());
   if (out_socket) {
     *out_socket = mock_socket.get();
   }
   return std::make_shared<TcpConnection>(
-      std::move(mock_socket), 1, max_write_queue_size);
+      std::move(mock_socket), 1, max_write_queue_size, write_batch_options);
 }
 
 }  // namespace
@@ -117,7 +119,7 @@ TEST(TcpConnectionTest, ReadV2PacketTriggersHandler) {
   EXPECT_TRUE(received.payload.empty());
 }
 
-TEST(TcpConnectionTest, TcpDropsKcpFlaggedPacket) {
+TEST(TcpConnectionTest, TcpClosesOnKcpFlaggedPacket) {
   asio::io_context io_context;
   MockSocket* mock_socket = nullptr;
   auto connection = CreateConnection(io_context, &mock_socket);
@@ -151,9 +153,10 @@ TEST(TcpConnectionTest, TcpDropsKcpFlaggedPacket) {
 
   io_context.run();
 
-  EXPECT_EQ(call_count, 1u);
-  EXPECT_EQ(last_msg_id, msg_id);
-  EXPECT_EQ(session->GetState(), TcpSession::SessionState::kActive);
+  EXPECT_EQ(call_count, 0u);
+  EXPECT_EQ(last_msg_id, 0u);
+  EXPECT_NE(session->GetState(), TcpSession::SessionState::kActive);
+  EXPECT_TRUE(mock_socket->IsClosed());
 }
 
 TEST(TcpConnectionTest, SendWritesEncodedPacket) {
@@ -276,6 +279,64 @@ TEST(TcpConnectionTest, ConcurrentSessionSendKeepsWireSequenceMonotonic) {
     EXPECT_EQ(packet.msg_id, kMsgId);
     EXPECT_EQ(sequence, static_cast<uint16_t>(i));
   }
+}
+
+TEST(TcpConnectionTest, WriteBatchCoalescesQueuedPacketsWhenEnabled) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(
+      io_context,
+      &mock_socket,
+      TcpConnection::kDefaultMaxWriteQueueSize,
+      TcpConnection::WriteBatchOptions{
+          .max_batch_bytes = 32768,
+          .flush_interval_us = 1000,
+      });
+  auto session = std::make_shared<TcpSession>(connection);
+  session->Start();
+
+  session->Send(101, {});
+  session->Send(102, {});
+  session->Send(103, {});
+  io_context.run();
+
+  const auto& writes = mock_socket->GetWrites();
+  ASSERT_EQ(writes.size(), 1u);
+  const auto& wire = writes.front();
+
+  std::vector<uint8_t> expected;
+  const auto first = PacketCodec::EncodeV2(101, nullptr, 0, 0);
+  const auto second = PacketCodec::EncodeV2(102, nullptr, 0, 1);
+  const auto third = PacketCodec::EncodeV2(103, nullptr, 0, 2);
+  expected.reserve(first.size() + second.size() + third.size());
+  expected.insert(expected.end(), first.begin(), first.end());
+  expected.insert(expected.end(), second.begin(), second.end());
+  expected.insert(expected.end(), third.begin(), third.end());
+  EXPECT_EQ(wire, expected);
+}
+
+TEST(TcpConnectionTest, LowCopyBatchUsesScatterWriteWithoutCoalescingCopy) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(
+      io_context,
+      &mock_socket,
+      TcpConnection::kDefaultMaxWriteQueueSize,
+      TcpConnection::WriteBatchOptions{
+          .max_batch_bytes = 32768,
+          .flush_interval_us = 1000,
+      });
+  connection->SetLowCopySendEnabled(true);
+  auto session = std::make_shared<TcpSession>(connection);
+  session->Start();
+
+  session->Send(201, {});
+  session->Send(202, {});
+  session->Send(203, {});
+  io_context.run();
+
+  EXPECT_EQ(mock_socket->GetWritevCallCount(), 1u);
+  EXPECT_EQ(mock_socket->GetWriteCallCount(), 0u);
 }
 
 TEST(TcpConnectionTest, PauseReadBlocksUntilResume) {
@@ -409,6 +470,21 @@ TEST(TcpConnectionTest, BypassRateLimitKeepsSessionActive) {
 
   EXPECT_FALSE(session->IsRateLimited());
   EXPECT_EQ(session->GetState(), TcpSession::SessionState::kActive);
+}
+
+TEST(TcpSessionTest, SessionKindDefaultsToClientAndSupportsServiceOverride) {
+  asio::io_context io_context;
+  MockSocket* mock_socket = nullptr;
+  auto connection = CreateConnection(io_context, &mock_socket);
+  auto session = std::make_shared<TcpSession>(connection);
+  ASSERT_TRUE(session != nullptr);
+
+  EXPECT_EQ(session->GetSessionKind(), TcpSession::SessionKind::kClient);
+  EXPECT_FALSE(session->IsServiceSession());
+
+  session->SetSessionKind(TcpSession::SessionKind::kService);
+  EXPECT_EQ(session->GetSessionKind(), TcpSession::SessionKind::kService);
+  EXPECT_TRUE(session->IsServiceSession());
 }
 
 }  // namespace mir2::network

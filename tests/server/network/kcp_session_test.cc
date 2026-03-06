@@ -83,15 +83,14 @@ TEST_F(KcpSessionTest, OutputHandlerPrependsConvAndToken) {
   std::vector<uint8_t> captured;
   asio::ip::udp::endpoint captured_endpoint;
 
-  testing::MockFunction<void(const asio::ip::udp::endpoint&, const uint8_t*, size_t)> mock_output;
-  EXPECT_CALL(mock_output, Call(testing::_, testing::_, testing::_))
+  testing::MockFunction<void(const asio::ip::udp::endpoint&, std::vector<uint8_t>&&)> mock_output;
+  EXPECT_CALL(mock_output, Call(testing::_, testing::_))
       .Times(testing::AtLeast(1))
       .WillRepeatedly([&](const asio::ip::udp::endpoint& ep,
-                          const uint8_t* data,
-                          size_t size) {
+                          std::vector<uint8_t>&& packet) {
         if (captured.empty()) {
           captured_endpoint = ep;
-          captured.assign(data, data + size);
+          captured = std::move(packet);
         }
       });
 
@@ -121,8 +120,7 @@ TEST_F(KcpSessionTest, ConcurrentSendAndUpdateIsSafe) {
 
   std::atomic<int> output_calls{0};
   session_->SetOutputHandler([&](const asio::ip::udp::endpoint&,
-                                 const uint8_t*,
-                                 size_t) {
+                                 std::vector<uint8_t>&&) {
     output_calls.fetch_add(1, std::memory_order_relaxed);
   });
 

@@ -356,6 +356,22 @@ Task<void> RunWhenAnyProbeTask(CoroutineExecutor* executor,
   co_return;
 }
 
+Task<void> RunWhenAllEmptyProbeTask(CoroutineExecutor* executor,
+                                    std::promise<void>* done_promise) {
+  std::vector<Task<void>> tasks;
+  co_await executor->WhenAll(std::move(tasks));
+  done_promise->set_value();
+  co_return;
+}
+
+Task<void> RunWhenAnyEmptyProbeTask(CoroutineExecutor* executor,
+                                    std::promise<size_t>* winner_promise) {
+  std::vector<Task<void>> tasks;
+  const size_t winner = co_await executor->WhenAny(std::move(tasks));
+  winner_promise->set_value(winner);
+  co_return;
+}
+
 Task<void> RunWhenAnyCancellableSleepTask(CoroutineExecutor* executor,
                                           std::chrono::milliseconds delay,
                                           std::atomic<int>* cancelled_counter,
@@ -802,6 +818,51 @@ TEST_F(CoroutineExecutorTest, WhenAnyReturnsFirstCompletedTaskIndex) {
   io_thread.join();
 }
 
+TEST_F(CoroutineExecutorTest, WhenAllEmptyReturnsImmediately) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::promise<void> done_promise;
+  auto done_future = done_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunWhenAllEmptyProbeTask(&executor, &done_promise)));
+  ASSERT_EQ(done_future.wait_for(100ms), std::future_status::ready);
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
+TEST_F(CoroutineExecutorTest, WhenAnyEmptyReturnsNoTaskIndexSentinel) {
+  using namespace std::chrono_literals;
+
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+  auto guard = asio::make_work_guard(io_context);
+
+  std::promise<size_t> winner_promise;
+  auto winner_future = winner_promise.get_future();
+
+  std::thread io_thread([&]() { io_context.run(); });
+
+  ASSERT_TRUE(executor.Spawn(RunWhenAnyEmptyProbeTask(&executor, &winner_promise)));
+  ASSERT_EQ(winner_future.wait_for(100ms), std::future_status::ready);
+  EXPECT_EQ(winner_future.get(), CoroutineExecutor::kWhenAnyNoTaskIndex);
+
+  EXPECT_TRUE(executor.DrainAndJoin(std::chrono::seconds(2)));
+
+  guard.reset();
+  io_context.stop();
+  io_thread.join();
+}
+
 TEST_F(CoroutineExecutorTest, WhenAnyDefaultDoesNotCancelLosers) {
   using namespace std::chrono_literals;
 
@@ -1149,6 +1210,40 @@ TEST_F(CoroutineExecutorTest, SpawnOrDropReportsNotAcceptingReason) {
   EXPECT_EQ(callback_reason, SpawnResult::kNotAccepting);
   EXPECT_EQ(rejected_task_future.wait_for(std::chrono::milliseconds(50)),
             std::future_status::timeout);
+}
+
+TEST_F(CoroutineExecutorTest, TrySpawnInvalidTaskReturnsReasonAndIncrementsMetric) {
+  asio::io_context io_context;
+  auto metrics_sink = std::make_shared<TestMetricsSink>();
+  CoroutineExecutor executor(io_context, 1, 1, metrics_sink);
+
+  Task<void> invalid_task(Task<void>::Handle{});
+  const SpawnResult result = executor.TrySpawn(std::move(invalid_task));
+  EXPECT_EQ(result, SpawnResult::kInvalidTask);
+
+  EXPECT_EQ(metrics_sink->CounterValue("logic.coroutine.spawn_rejected_total"), 1u);
+  EXPECT_EQ(metrics_sink->CounterValue("logic.coroutine.spawn_rejected_invalid_task_total"), 1u);
+  EXPECT_EQ(metrics_sink->CounterValue("logic.coroutine.spawn_rejected_not_accepting_total"), 0u);
+  EXPECT_EQ(metrics_sink->CounterValue("logic.coroutine.spawn_rejected_over_limit_total"), 0u);
+}
+
+TEST_F(CoroutineExecutorTest, SpawnOrDropReportsInvalidTaskReason) {
+  asio::io_context io_context;
+  CoroutineExecutor executor(io_context, 1);
+
+  bool callback_called = false;
+  SpawnResult callback_reason = SpawnResult::kSpawned;
+  Task<void> invalid_task(Task<void>::Handle{});
+  const SpawnResult result = executor.SpawnOrDrop(
+      std::move(invalid_task),
+      [&callback_called, &callback_reason](SpawnResult reason) {
+        callback_called = true;
+        callback_reason = reason;
+      });
+
+  EXPECT_EQ(result, SpawnResult::kInvalidTask);
+  EXPECT_TRUE(callback_called);
+  EXPECT_EQ(callback_reason, SpawnResult::kInvalidTask);
 }
 
 TEST_F(CoroutineExecutorTest, InjectedMetricsSinkCapturesExecutorMetrics) {

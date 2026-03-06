@@ -6,6 +6,7 @@
 #ifndef MIR2_NETWORK_DUAL_CHANNEL_MANAGER_H
 #define MIR2_NETWORK_DUAL_CHANNEL_MANAGER_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -46,8 +47,12 @@ class IDualChannelManager {
   virtual ~IDualChannelManager() = default;
 
   virtual IKcpServer& GetKcpServer() = 0;
+  virtual std::shared_ptr<KcpSession> GetKcpSession(uint64_t session_id) const = 0;
   virtual bool BindKcpSession(uint64_t session_id,
                               const std::shared_ptr<KcpSession>& kcp_session) = 0;
+  virtual bool TryBindKcpSessionIfAbsent(
+      uint64_t session_id,
+      const std::shared_ptr<KcpSession>& kcp_session) = 0;
 };
 /**
  * @brief Combines TCP and KCP sessions with automatic routing.
@@ -77,6 +82,11 @@ class DualChannelManager : public IDualChannelManager {
   void RegisterChannelAwareHandler(uint16_t msg_id, ChannelMessageHandler handler);
   void SetRoute(uint16_t msg_id, mir2::common::ChannelType channel);
   void SetDefaultChannel(mir2::common::ChannelType channel);
+  void SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size);
+  void SetAcceptedConnectionWriteBatchOptions(size_t max_batch_bytes,
+                                              int64_t flush_interval_us);
+  void SetAcceptedConnectionLowCopySendEnabled(bool enabled);
+  void SetKcpCleanupIntervalMs(int64_t interval_ms);
 
   void Send(uint64_t session_id, uint16_t msg_id, const std::vector<uint8_t>& payload);
   void Broadcast(uint16_t msg_id, const std::vector<uint8_t>& payload);
@@ -92,8 +102,11 @@ class DualChannelManager : public IDualChannelManager {
 
   bool BindKcpSession(uint64_t session_id,
                       const std::shared_ptr<KcpSession>& kcp_session) override;
+  bool TryBindKcpSessionIfAbsent(
+      uint64_t session_id,
+      const std::shared_ptr<KcpSession>& kcp_session) override;
   void UnbindKcpSession(uint64_t session_id);
-  std::shared_ptr<KcpSession> GetKcpSession(uint64_t session_id) const;
+  std::shared_ptr<KcpSession> GetKcpSession(uint64_t session_id) const override;
 
   IKcpServer& GetKcpServer() override { return *kcp_server_; }
 
@@ -104,6 +117,8 @@ class DualChannelManager : public IDualChannelManager {
   };
 
   void HandleKcpMessage(const std::shared_ptr<KcpSession>& session, const Packet& packet);
+  bool RemoveKcpBinding(uint64_t session_id, bool stale);
+  void PublishKcpBindingCountLocked() const;
   void CleanupKcpSessions();
 
   asio::io_context& io_context_;
@@ -116,6 +131,8 @@ class DualChannelManager : public IDualChannelManager {
 
   mutable std::mutex mutex_;
   std::unordered_map<uint64_t, KcpBinding> kcp_sessions_;
+  std::atomic<int64_t> last_kcp_cleanup_ms_{0};
+  int64_t kcp_cleanup_interval_ms_ = 1000;
 };
 
 }  // namespace mir2::network

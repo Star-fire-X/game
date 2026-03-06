@@ -40,7 +40,7 @@ class KcpSession : public std::enable_shared_from_this<KcpSession> {
   using MessageHandler =
       std::function<void(const std::shared_ptr<KcpSession>&, const Packet&)>;
   using OutputHandler =
-      std::function<void(const asio::ip::udp::endpoint&, const uint8_t*, size_t)>;
+      std::function<void(const asio::ip::udp::endpoint&, std::vector<uint8_t>&&)>;
 
   static constexpr size_t kTokenSize = 8;
   static constexpr int64_t kDefaultTimeoutMs = 15000;
@@ -76,9 +76,12 @@ class KcpSession : public std::enable_shared_from_this<KcpSession> {
   void Input(const uint8_t* data, size_t size);
   void Update(uint32_t now_ms);
   void Send(uint16_t msg_id, const std::vector<uint8_t>& payload);
+  void Send(uint16_t msg_id, std::vector<uint8_t>&& payload);
 
   int64_t GetLastActiveMs() const { return last_active_ms_.load(); }
   bool IsTimedOut(int64_t now_ms, int64_t timeout_ms = kDefaultTimeoutMs) const;
+  void SetLastActiveMsForTesting(int64_t last_active_ms);
+  void SetHasRemoteEndpointForTesting(bool has_remote_endpoint);
 
  private:
   static int KcpOutput(const char* buf, int len, IKCPCB* kcp, void* user);

@@ -151,6 +151,10 @@ void KcpSession::Update(uint32_t now_ms) {
 }
 
 void KcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
+  Send(msg_id, std::vector<uint8_t>(payload));
+}
+
+void KcpSession::Send(uint16_t msg_id, std::vector<uint8_t>&& payload) {
   if (!kcp_) {
     return;
   }
@@ -180,6 +184,14 @@ void KcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
 bool KcpSession::IsTimedOut(int64_t now_ms, int64_t timeout_ms) const {
   const int64_t last_active = last_active_ms_.load(std::memory_order_relaxed);
   return now_ms >= last_active && (now_ms - last_active) >= timeout_ms;
+}
+
+void KcpSession::SetLastActiveMsForTesting(int64_t last_active_ms) {
+  last_active_ms_.store(last_active_ms, std::memory_order_relaxed);
+}
+
+void KcpSession::SetHasRemoteEndpointForTesting(bool has_remote_endpoint) {
+  has_endpoint_.store(has_remote_endpoint, std::memory_order_relaxed);
 }
 
 int KcpSession::KcpOutput(const char* buf, int len, IKCPCB* /*kcp*/, void* user) {
@@ -216,7 +228,7 @@ int KcpSession::KcpOutput(const char* buf, int len, IKCPCB* /*kcp*/, void* user)
   offset += kTokenSize;
   std::memcpy(packet.data() + offset, buf, static_cast<size_t>(len));
 
-  handler(endpoint, packet.data(), packet.size());
+  handler(endpoint, std::move(packet));
   return 0;
 }
 
@@ -231,9 +243,9 @@ void KcpSession::ConfigureKcp() {
 }
 
 void KcpSession::DrainReceive() {
+  std::vector<uint8_t> buffer;
   while (true) {
-    Packet packet{};
-    bool has_packet = false;
+    int recv_size = 0;
 
     {
       std::lock_guard<std::mutex> lock(kcp_mutex_);
@@ -246,36 +258,30 @@ void KcpSession::DrainReceive() {
         break;
       }
 
-      std::vector<uint8_t> buffer(static_cast<size_t>(peek_size));
-      const int recv_size =
-          ikcp_recv(kcp_, reinterpret_cast<char*>(buffer.data()), peek_size);
+      buffer.resize(static_cast<size_t>(peek_size));
+      recv_size = ikcp_recv(kcp_, reinterpret_cast<char*>(buffer.data()), peek_size);
       if (recv_size <= 0) {
         break;
       }
-
-      const size_t recv_len = static_cast<size_t>(recv_size);
-      uint16_t sequence = 0;
-      uint8_t flags = 0;
-      const auto status = PacketCodec::DecodeV2(
-          buffer.data(), recv_len, &packet, &sequence, &flags);
-      if (status != DecodeStatus::kOk) {
-        monitor::Metrics::Instance().IncrementError("kcp_decode");
-        continue;
-      }
-
-      if (!mir2::common::ValidateChannelFlag(flags, mir2::common::ChannelType::kKcp)) {
-        SYSLOG_WARN("KCP channel flag mismatch (conv={})", conv_id_);
-        monitor::Metrics::Instance().IncrementError("kcp_channel_flag");
-        continue;
-      }
-
-      (void)sequence;
-      has_packet = true;
     }
 
-    if (!has_packet) {
+    const size_t recv_len = static_cast<size_t>(recv_size);
+    Packet packet{};
+    uint16_t sequence = 0;
+    uint8_t flags = 0;
+    const auto status = PacketCodec::DecodeV2(
+        buffer.data(), recv_len, &packet, &sequence, &flags);
+    if (status != DecodeStatus::kOk) {
+      monitor::Metrics::Instance().IncrementError("kcp_decode");
       continue;
     }
+
+    if (!mir2::common::ValidateChannelFlag(flags, mir2::common::ChannelType::kKcp)) {
+      SYSLOG_WARN("KCP channel flag mismatch (conv={})", conv_id_);
+      monitor::Metrics::Instance().IncrementError("kcp_channel_flag");
+      continue;
+    }
+    (void)sequence;
 
     MessageHandler handler;
     {

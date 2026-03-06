@@ -461,7 +461,7 @@ TEST(GatewayForwardingTest, KcpMessagesDropDuringHoldingInsteadOfBuffering) {
                               common::ChannelType::kKcp,
                               payload);
 
-  std::shared_lock<std::shared_mutex> lock(server.session_map_mutex_);
+  std::shared_lock<std::shared_mutex> lock(server.holder_lock_);
   ASSERT_EQ(server.holder_state_, ConnectionHolder::State::HOLDING);
   auto holder_it = server.connection_holders_.find(8101);
   ASSERT_NE(holder_it, server.connection_holders_.end());
@@ -483,13 +483,19 @@ TEST(GatewayForwardingTest, DisconnectNotificationQueuedAndReplayedAfterReconnec
   server.UnregisterSession(bundle.session);
 
   EXPECT_EQ(logic_socket->GetWrites().size(), 0u);
-  EXPECT_EQ(server.pending_disconnect_events_.size(), 1u);
+  {
+    std::shared_lock<std::shared_mutex> lock(server.disconnect_queue_lock_);
+    EXPECT_EQ(server.pending_disconnect_events_.size(), 1u);
+  }
 
   server.logic_client_->connected_.store(true);
   server.ProcessDisconnectRetryQueue(network::TcpSession::NowMs());
   DrainIoContext(io_context);
 
-  EXPECT_TRUE(server.pending_disconnect_events_.empty());
+  {
+    std::shared_lock<std::shared_mutex> lock(server.disconnect_queue_lock_);
+    EXPECT_TRUE(server.pending_disconnect_events_.empty());
+  }
   ASSERT_EQ(logic_socket->GetWrites().size(), 1u);
 
   network::Packet packet{};

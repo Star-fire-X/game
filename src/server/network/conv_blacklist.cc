@@ -7,10 +7,19 @@ namespace mir2::network {
 ConvBlacklist::ConvBlacklist() : config_({}) {}
 ConvBlacklist::ConvBlacklist(Config config) : config_(config) {}
 
-bool ConvBlacklist::IsBlacklisted(uint32_t conv, int64_t now_ms) {
+void ConvBlacklist::SetConfig(Config config) {
   std::lock_guard<std::mutex> lock(mutex_);
+  config_ = config;
+  blacklist_.clear();
+  failures_.clear();
+  last_cleanup_ms_ = 0;
+}
 
-  auto it = blacklist_.find(conv);
+bool ConvBlacklist::IsBlacklisted(uint32_t conv, uint32_t source_ip, int64_t now_ms) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const Key key{.conv = conv, .source_ip = source_ip};
+
+  auto it = blacklist_.find(key);
   if (it == blacklist_.end()) {
     return false;
   }
@@ -23,31 +32,34 @@ bool ConvBlacklist::IsBlacklisted(uint32_t conv, int64_t now_ms) {
   return true;
 }
 
-void ConvBlacklist::RecordFailure(uint32_t conv, int64_t now_ms) {
+void ConvBlacklist::RecordFailure(uint32_t conv, uint32_t source_ip, int64_t now_ms) {
   std::lock_guard<std::mutex> lock(mutex_);
+  const Key key{.conv = conv, .source_ip = source_ip};
 
-  auto& entry = failures_[conv];
+  auto& entry = failures_[key];
   if (entry.count < std::numeric_limits<uint8_t>::max()) {
     ++entry.count;
   }
   entry.last_fail_ms = now_ms;
 
   if (entry.count >= config_.max_failures) {
-    blacklist_[conv] = now_ms + config_.blacklist_ttl_ms;
-    failures_.erase(conv);
+    blacklist_[key] = now_ms + config_.blacklist_ttl_ms;
+    failures_.erase(key);
   }
 }
 
-void ConvBlacklist::Add(uint32_t conv, int64_t now_ms) {
+void ConvBlacklist::Add(uint32_t conv, uint32_t source_ip, int64_t now_ms) {
   std::lock_guard<std::mutex> lock(mutex_);
-  blacklist_[conv] = now_ms + config_.blacklist_ttl_ms;
-  failures_.erase(conv);
+  const Key key{.conv = conv, .source_ip = source_ip};
+  blacklist_[key] = now_ms + config_.blacklist_ttl_ms;
+  failures_.erase(key);
 }
 
-void ConvBlacklist::Remove(uint32_t conv) {
+void ConvBlacklist::Remove(uint32_t conv, uint32_t source_ip) {
   std::lock_guard<std::mutex> lock(mutex_);
-  blacklist_.erase(conv);
-  failures_.erase(conv);
+  const Key key{.conv = conv, .source_ip = source_ip};
+  blacklist_.erase(key);
+  failures_.erase(key);
 }
 
 void ConvBlacklist::Cleanup(int64_t now_ms) {

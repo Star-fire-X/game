@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -25,6 +26,7 @@
 #include <asio/local/stream_protocol.hpp>
 #endif
 #include <asio/socket_base.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 #include <asio/write.hpp>
 
@@ -43,6 +45,8 @@ class SocketAdapter {
   virtual ~SocketAdapter() = default;
   virtual void async_read_some(const asio::mutable_buffer& buffer, IoHandler handler) = 0;
   virtual void async_write(const asio::const_buffer& buffer, IoHandler handler) = 0;
+  virtual void async_writev(const std::vector<asio::const_buffer>& buffers,
+                            IoHandler handler) = 0;
   virtual void shutdown(asio::socket_base::shutdown_type type, asio::error_code& ec) = 0;
   virtual void close(asio::error_code& ec) = 0;
   virtual asio::ip::tcp::endpoint remote_endpoint(asio::error_code& ec) const = 0;
@@ -62,6 +66,11 @@ class AsioSocketAdapter : public SocketAdapter {
 
   void async_write(const asio::const_buffer& buffer, IoHandler handler) override {
     asio::async_write(socket_, buffer, std::move(handler));
+  }
+
+  void async_writev(const std::vector<asio::const_buffer>& buffers,
+                    IoHandler handler) override {
+    asio::async_write(socket_, buffers, std::move(handler));
   }
 
   void shutdown(asio::socket_base::shutdown_type type, asio::error_code& ec) override {
@@ -99,6 +108,11 @@ class UdsSocketAdapter : public SocketAdapter {
     asio::async_write(socket_, buffer, std::move(handler));
   }
 
+  void async_writev(const std::vector<asio::const_buffer>& buffers,
+                    IoHandler handler) override {
+    asio::async_write(socket_, buffers, std::move(handler));
+  }
+
   void shutdown(asio::socket_base::shutdown_type type, asio::error_code& ec) override {
     socket_.shutdown(type, ec);
   }
@@ -126,6 +140,10 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
  public:
   using BytesHandler = std::function<void(const uint8_t*, size_t)>;
   using DisconnectHandler = std::function<void(uint64_t)>;
+  struct WriteBatchOptions {
+    size_t max_batch_bytes = 0;
+    int64_t flush_interval_us = 0;
+  };
 
   // Prevent unbounded memory growth when peers read slowly.
   static constexpr size_t kDefaultMaxWriteQueueSize = 100;
@@ -133,6 +151,10 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
   TcpConnection(std::unique_ptr<SocketAdapter> socket,
                 uint64_t connection_id,
                 size_t max_write_queue_size = kDefaultMaxWriteQueueSize);
+  TcpConnection(std::unique_ptr<SocketAdapter> socket,
+                uint64_t connection_id,
+                size_t max_write_queue_size,
+                WriteBatchOptions write_batch_options);
 
   /**
    * @brief 启动读循环
@@ -144,6 +166,7 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
    */
   void SendRaw(const std::vector<uint8_t>& bytes);
   void SendRaw(std::vector<uint8_t>&& bytes);
+  void SendRaw(std::shared_ptr<std::vector<uint8_t>> bytes);
 
   /**
    * @brief 关闭连接
@@ -174,6 +197,9 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
    * @brief 设置断开回调
    */
   void SetDisconnectHandler(DisconnectHandler handler);
+  void SetWriteBatchOptions(WriteBatchOptions options);
+  void SetLowCopySendEnabled(bool enabled);
+  bool IsLowCopySendEnabled() const { return low_copy_send_enabled_; }
 
   uint64_t GetConnectionId() const { return connection_id_; }
   const std::string& GetRemoteAddress() const { return remote_address_; }
@@ -183,13 +209,30 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
  private:
   void DoRead();
   void DoWrite();
+  void ScheduleBatchedWrite();
+  bool IsWriteBatchingEnabled() const;
+  size_t EffectiveBatchMaxBytes() const;
 
   std::unique_ptr<SocketAdapter> socket_;
   asio::strand<IoExecutor> write_strand_;
   uint64_t connection_id_ = 0;
   std::array<uint8_t, 4096> read_buffer_{};
-  std::deque<std::vector<uint8_t>> write_queue_;
+  struct QueuedWrite {
+    std::shared_ptr<std::vector<uint8_t>> bytes;
+    size_t size = 0;
+    std::chrono::steady_clock::time_point enqueued_at{};
+  };
+  std::deque<QueuedWrite> write_queue_;
   size_t max_write_queue_size_ = kDefaultMaxWriteQueueSize;
+  WriteBatchOptions write_batch_options_{};
+  asio::steady_timer write_batch_timer_;
+  bool write_batch_timer_armed_ = false;
+  size_t queued_write_bytes_ = 0;
+  std::vector<uint8_t> active_write_buffer_;
+  std::shared_ptr<std::vector<uint8_t>> active_single_write_buffer_;
+  std::vector<std::shared_ptr<std::vector<uint8_t>>> active_write_buffers_;
+  std::vector<asio::const_buffer> active_write_const_buffers_;
+  bool low_copy_send_enabled_ = false;
   std::atomic<bool> writing_{false};
   std::atomic<bool> read_in_flight_{false};
   std::atomic<bool> read_paused_{false};

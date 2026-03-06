@@ -10,10 +10,7 @@
 #include "common/enums.h"
 #include "mocks/mock_socket.h"
 #include "network/packet_codec.h"
-
-#define private public
 #include "network/tcp_client.h"
-#undef private
 
 namespace mir2::network {
 namespace {
@@ -30,8 +27,7 @@ ClientBundle CreateMockClient(asio::io_context& io_context) {
   bundle.socket = mock_socket.get();
   auto connection =
       std::make_shared<TcpConnection>(std::move(mock_socket), 1, /*max_write_queue_size=*/8192);
-  bundle.client->connection_ = connection;
-  bundle.client->connected_.store(true, std::memory_order_release);
+  bundle.client->AttachConnectionForTest(connection, /*connected=*/true);
   return bundle;
 }
 
@@ -86,6 +82,22 @@ TEST(TcpClientTest, ConcurrentSendKeepsWireSequenceMonotonic) {
     EXPECT_EQ(packet.msg_id, kMsgId);
     EXPECT_EQ(sequence, static_cast<uint16_t>(index));
   }
+}
+
+TEST(TcpClientTest, CloseOnActiveConnectionInvokesDisconnectHandlerOnce) {
+  asio::io_context io_context;
+  auto bundle = CreateMockClient(io_context);
+  ASSERT_NE(bundle.client, nullptr);
+
+  std::atomic<int> disconnect_count{0};
+  bundle.client->SetDisconnectHandler([&disconnect_count]() {
+    disconnect_count.fetch_add(1, std::memory_order_relaxed);
+  });
+
+  bundle.client->Close();
+  io_context.run();
+
+  EXPECT_EQ(disconnect_count.load(std::memory_order_relaxed), 1);
 }
 
 }  // namespace mir2::network

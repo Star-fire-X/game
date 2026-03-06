@@ -186,6 +186,8 @@ Task<void> CharacterHandler::HandleMessage(HandlerContext ctx,
         co_await HandleCreateRole(std::move(ctx), req);
         co_return;
       }
+      SYSLOG_WARN("CharacterHandler CreateRole decode failed (client_id={})",
+                  ctx.client_id);
       auto response_payload = BuildCreateRoleRsp(
           mir2::proto::ErrorCode::ERR_INVALID_ACTION, 0);
       co_await response_sender_.SendAsync(
@@ -201,6 +203,8 @@ Task<void> CharacterHandler::HandleMessage(HandlerContext ctx,
         co_await HandleSelectRole(std::move(ctx), req);
         co_return;
       }
+      SYSLOG_WARN("CharacterHandler SelectRole decode failed (client_id={})",
+                  ctx.client_id);
       auto response_payload = BuildSelectRoleRsp(
           mir2::proto::ErrorCode::ERR_INVALID_ACTION, 0);
       co_await response_sender_.SendAsync(
@@ -272,6 +276,10 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
 
   const std::string name = req->name() ? req->name()->str() : "";
   const auto account_id_opt = role_store_.GetAccountId(ctx.client_id);
+  SYSLOG_INFO("CharacterHandler CreateRole request client_id={} name={} authenticated_account={}",
+              ctx.client_id,
+              name,
+              account_id_opt.value_or(0));
 
   if (!account_id_opt.has_value() || *account_id_opt == 0) {
     SYSLOG_WARN("CharacterHandler CreateRole unauthenticated client_id={} name={}",
@@ -287,6 +295,8 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
   }
 
   const uint64_t account_id = *account_id_opt;
+  SYSLOG_INFO("CharacterHandler CreateRole authenticated client_id={} account_id={} name={}",
+              ctx.client_id, account_id, name);
 
   mir2::common::CharacterClass character_class;
   mir2::common::Gender character_gender;
@@ -300,6 +310,12 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
         std::move(response_payload));
     co_return;
   }
+  SYSLOG_INFO("CharacterHandler CreateRole enum validation passed client_id={} account_id={} name={} profession={} gender={}",
+              ctx.client_id,
+              account_id,
+              name,
+              static_cast<int>(req->profession()),
+              static_cast<int>(req->gender()));
 
   mir2::common::CharacterCreateRequest create_request;
   create_request.account_id = account_id;
@@ -318,6 +334,8 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
         std::move(response_payload));
     co_return;
   }
+  SYSLOG_INFO("CharacterHandler CreateRole business validation passed client_id={} account_id={} name={}",
+              ctx.client_id, account_id, name);
 
   RoleRecord record;
   auto code = role_store_.CreateRole(
@@ -325,6 +343,12 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
       static_cast<uint8_t>(req->profession()),
       static_cast<uint8_t>(req->gender()),
       &record);
+  SYSLOG_INFO("CharacterHandler CreateRole role_store result client_id={} account_id={} name={} code={} player_id={}",
+              ctx.client_id,
+              account_id,
+              name,
+              static_cast<int>(code),
+              record.player_id);
 
   if (code == mir2::common::ErrorCode::kOk) {
     if (record.player_id > std::numeric_limits<uint32_t>::max()) {
@@ -353,15 +377,28 @@ Task<void> CharacterHandler::HandleCreateRole(HandlerContext ctx,
       }
       code = mir2::common::ErrorCode::kUnknown;
       record.player_id = 0;
+    } else {
+      SYSLOG_INFO("CharacterHandler CreateRole entity created client_id={} account_id={} player_id={}",
+                  ctx.client_id, account_id, record.player_id);
     }
   }
 
   const auto proto_code = ToProtoError(code);
   auto response_payload = BuildCreateRoleRsp(proto_code, record.player_id);
+  SYSLOG_INFO("CharacterHandler CreateRole sending response client_id={} account_id={} code={} player_id={}",
+              ctx.client_id,
+              account_id,
+              static_cast<int>(proto_code),
+              record.player_id);
   co_await response_sender_.SendAsync(
       ctx.client_id,
       static_cast<uint16_t>(mir2::common::MsgId::kCreateRoleRsp),
       std::move(response_payload));
+  SYSLOG_INFO("CharacterHandler CreateRole response sent client_id={} account_id={} code={} player_id={}",
+              ctx.client_id,
+              account_id,
+              static_cast<int>(proto_code),
+              record.player_id);
 
   if (code == mir2::common::ErrorCode::kOk) {
     SYSLOG_INFO("CharacterHandler CreateRole success account_id={} name={} player_id={}",
@@ -399,6 +436,10 @@ Task<void> CharacterHandler::HandleSelectRole(HandlerContext ctx,
 
   const uint64_t player_id = req->player_id();
   const uint64_t account_id = *account_id_opt;
+  SYSLOG_INFO("CharacterHandler SelectRole request client_id={} player_id={} account_id={}",
+              ctx.client_id,
+              player_id,
+              account_id);
   const auto role_opt = role_store_.FindRole(account_id, player_id);
   const bool found = role_opt.has_value();
   const bool player_id_fits = player_id <= std::numeric_limits<uint32_t>::max();

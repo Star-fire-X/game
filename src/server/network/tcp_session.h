@@ -18,6 +18,7 @@
 #include <asio/strand.hpp>
 
 #include "network/packet_codec.h"
+#include "network/protocol_ingress_parser.h"
 #include "network/tcp_connection.h"
 
 namespace mir2::common {
@@ -55,6 +56,11 @@ class TcpSession : public ITcpSession,
     kRejected
   };
 
+  enum class SessionKind {
+    kClient = 0,
+    kService,
+  };
+
   using ConnectedHandler = std::function<void(const std::shared_ptr<TcpSession>&)>;
   using DisconnectedHandler = std::function<void(const std::shared_ptr<TcpSession>&)>;
   using MessageHandler = std::function<void(const std::shared_ptr<TcpSession>&, const Packet&)>;
@@ -70,6 +76,7 @@ class TcpSession : public ITcpSession,
    * @brief 发送消息
    */
   void Send(uint16_t msg_id, const std::vector<uint8_t>& payload) override;
+  void Send(uint16_t msg_id, std::vector<uint8_t>&& payload);
 
   /**
    * @brief 关闭会话
@@ -91,6 +98,9 @@ class TcpSession : public ITcpSession,
   void SetAuthState(AuthState state) { auth_state_.store(state); }
   void SetBypassRateLimit(bool bypass) { bypass_rate_limit_.store(bypass); }
   bool IsRateLimitBypassed() const { return bypass_rate_limit_.load(); }
+  void SetSessionKind(SessionKind kind) { session_kind_.store(kind, std::memory_order_release); }
+  SessionKind GetSessionKind() const { return session_kind_.load(std::memory_order_acquire); }
+  bool IsServiceSession() const { return GetSessionKind() == SessionKind::kService; }
 
   void SetConnectedHandler(ConnectedHandler handler) { connected_handler_ = std::move(handler); }
   void SetDisconnectedHandler(DisconnectedHandler handler) { disconnected_handler_ = std::move(handler); }
@@ -121,15 +131,13 @@ class TcpSession : public ITcpSession,
  private:
   void PostSend(uint16_t msg_id, std::vector<uint8_t> payload, bool close_after_send);
   bool CheckRateLimit(size_t payload_size);
-  size_t BufferedBytes() const;
-  void ConsumeBytes(size_t bytes);
-  void CompactReadBufferIfNeeded(size_t incoming_bytes = 0);
 
   std::shared_ptr<TcpConnection> connection_;
   std::optional<asio::strand<IoExecutor>> send_strand_;
   uint64_t connection_id_ = 0;
   std::atomic<SessionState> state_{SessionState::kInit};
   std::atomic<AuthState> auth_state_{AuthState::kUnknown};
+  std::atomic<SessionKind> session_kind_{SessionKind::kClient};
   std::atomic<uint64_t> user_id_{0};
   std::atomic<uint64_t> account_id_{0};
   std::atomic<int64_t> last_heartbeat_ms_{0};
@@ -146,12 +154,8 @@ class TcpSession : public ITcpSession,
 
   std::atomic<uint16_t> send_sequence_{0};
   std::atomic<uint16_t> recv_sequence_{0};
-  ProtocolVersion protocol_version_ = ProtocolVersion::kV2;
-  std::atomic<bool> protocol_version_detected_{false};
   std::atomic<bool> kcp_upgrade_allowed_{true};
-  std::vector<uint8_t> read_buffer_;
-  size_t read_offset_ = 0;
-  Packet decode_packet_{};
+  ProtocolIngressParser ingress_parser_{mir2::common::ChannelType::kTcp};
 
   ConnectedHandler connected_handler_;
   DisconnectedHandler disconnected_handler_;

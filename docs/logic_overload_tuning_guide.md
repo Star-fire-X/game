@@ -21,6 +21,9 @@
 | 配置项 | 默认值 | 线上建议区间 | 说明 |
 | --- | --- | --- | --- |
 | `tick_interval_ms` | `50` | `30-100` | 主 Tick 周期。越小延迟越低，但调度压力越大。 |
+| `service_link_write_queue_size` | `8192` | `2048-16384` | Gateway->Logic 服务链路写队列上限，过小会导致服务链路瞬断。 |
+| `network_session_idle_check_interval_ms` | `30000` | `5000-60000` | 网络层空闲检测扫描周期（毫秒）。 |
+| `network_session_idle_timeout_ms` | `90000` | `30000-300000` | 网络层会话空闲超时（毫秒）。 |
 | `hot_event_max_drain_per_tick` | `2048` | `1024-8192` | 每个 Tick 最多 drain 的 hot event 数。 |
 | `hot_event_max_drain_ms_per_tick` | `5` | `2-12` | 建议约为 `tick_interval_ms` 的 `10%-25%`。 |
 | `mailbox_player_max_high_pending` | `100` | `64-256` | 单玩家高优先级待处理上限。 |
@@ -182,3 +185,59 @@ server:
 3. 除非有明确理由，优先使用 `mailbox_global_pending_soft_limit: -1`。
 4. 任何降低 `tick_interval_ms` 的改动，必须重跑完整突发压测。
 5. 若 `logic.mailbox.spawn_rejected_total` 异常上升，应先排查执行器压力，再继续调参。
+
+## 7. 硬瓶颈判定（Stage 4）
+
+该章节用于回答一个明确问题：当前吞吐上限是否由 Logic 主线程硬性限制。
+
+### 7.1 工作负载与爬坡
+
+1. 控制组 `W0-Control`：`100% Heartbeat`。
+2. 业务组 `W1-MixedGameplay`：`50% MoveReq + 20% AttackReq + 10% SkillReq + 10% ChatReq + 10% Heartbeat`。
+3. 业务组 `W2-WriteHeavy`：`60% MoveReq + 30% AttackReq + 10% SkillReq`。
+4. 单步窗口默认：`Warmup 60s + Sample 180s + Cooldown 30s`，每步重复 `3` 轮取中位数。
+5. 控制组粗爬坡默认步点：`[2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000] msg/s`。
+6. 控制组可持续上限 `C_ctrl` 为最高健康步；业务组步点为 `[0.50, 0.65, 0.80, 0.95, 1.10, 1.25] * C_ctrl`。
+
+### 7.2 判定指标与计算
+
+每秒采样并在 Sample 窗口计算：
+
+1. `offered_qps`：压测器目标发送速率（实发计数/秒）。
+2. `effective_qps`：优先取 `Δlogic_routed_processed_total / sample_seconds`；若缺失则依次回退到 `logic_hot_event_drain_total`、`logic_hot_event_enqueue_total`。
+3. `elasticity_i = (effective_qps_i - effective_qps_{i-1}) / (offered_qps_i - offered_qps_{i-1})`。
+4. `overrun_rate = Δlogic_tick_overrun_total / tick_count_window`。
+5. `drain_budget_hit_rate = Δlogic_hot_event_drain_budget_hit_total / tick_count_window`。
+6. `queue_slope = (queue_depth_end - queue_depth_start) / sample_seconds`。
+
+健康线（默认 `tick_interval_ms=50`，改 Tick 间隔时按比例换算）：
+
+1. `p99(logic_tick_duration_ms) < 0.8 * tick_interval_ms`
+2. `overrun_rate < 0.05`
+3. `mailbox_util_avg < 0.70`
+4. `queue_slope <= 0`
+
+### 7.3 三态结论
+
+1. `PROVED`（全部满足）：
+   `2` 个连续负载步 `elasticity < 0.10`；并在同窗口满足：
+   `p99(logic_tick_duration_ms) >= tick_interval_ms` 或 `overrun_rate >= 0.20`；
+   `drain_budget_hit_rate >= 0.30`；
+   `mailbox_util_avg >= 0.90` 且 `queue_slope > 0`；
+   `global_overflow_rate >= 1/s` 或 `hard_backpressure_rate >= 5/s`；
+   且同负载点控制组仍健康并满足 `C_ctrl / C_game >= 1.8`。
+2. `FALSIFIED`（任一满足）：
+   最高步仍 `elasticity >= 0.30` 且健康线全通过；
+   或业务组与控制组上限差异 `< 15%` 且退化模式一致；
+   或业务组退化时逻辑指标仍健康（`p99 < 0.8*tick`、`overrun_rate < 0.05`、`mailbox_util < 0.70`）。
+3. `INCONCLUSIVE`：
+   不满足 `PROVED`，也不满足 `FALSIFIED`。
+   另外，若 Prometheus 不可用/抓取失败，或样本窗口内出现 Gateway-Logic 服务链路断开，必须降级为 `INCONCLUSIVE`，禁止给出强结论。
+
+### 7.4 报告与发布门禁
+
+1. 压测实现位于 `GatewayLogicPressureTest.*`，输出：
+   `docs/STAGE4-LOGIC-BOTTLENECK-REPORT.md` 与
+   `docs/STAGE4-LOGIC-BOTTLENECK-REPORT.csv`。
+2. 报告必须包含每步 `offered/effective/tick/backlog/backpressure` 和最终唯一结论。
+3. 该流程列为发布前必跑压测之一；任何涉及主线程调度、邮箱背压、HotEvent drain 预算的改动，发布前必须重跑。

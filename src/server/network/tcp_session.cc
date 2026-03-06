@@ -1,8 +1,6 @@
 #include "network/tcp_session.h"
 
 #include <chrono>
-#include <cstring>
-
 #include <asio/post.hpp>
 #include <flatbuffers/flatbuffers.h>
 
@@ -62,6 +60,10 @@ void TcpSession::Start() {
 }
 
 void TcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
+  Send(msg_id, std::vector<uint8_t>(payload));
+}
+
+void TcpSession::Send(uint16_t msg_id, std::vector<uint8_t>&& payload) {
   if (!connection_ || !send_strand_) {
     return;
   }
@@ -69,7 +71,7 @@ void TcpSession::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
     return;
   }
 
-  PostSend(msg_id, std::vector<uint8_t>(payload), false);
+  PostSend(msg_id, std::move(payload), false);
 }
 
 void TcpSession::Close() {
@@ -172,13 +174,12 @@ void TcpSession::MarkHeartbeat() {
 }
 
 void TcpSession::SetProtocolVersion(ProtocolVersion version) {
-  protocol_version_ = version;
-  protocol_version_detected_.store(true, std::memory_order_relaxed);
+  ingress_parser_.SetProtocolVersion(version, /*detected=*/true);
   kcp_upgrade_allowed_.store(version == ProtocolVersion::kV2, std::memory_order_relaxed);
 }
 
 ProtocolVersion TcpSession::GetProtocolVersion() const {
-  return protocol_version_;
+  return ingress_parser_.GetProtocolVersion();
 }
 
 uint16_t TcpSession::NextSendSequence() {
@@ -263,47 +264,6 @@ void TcpSession::HandleDisconnect(uint64_t connection_id) {
   }
 }
 
-size_t TcpSession::BufferedBytes() const {
-  if (read_buffer_.size() <= read_offset_) {
-    return 0;
-  }
-  return read_buffer_.size() - read_offset_;
-}
-
-void TcpSession::ConsumeBytes(size_t bytes) {
-  read_offset_ += bytes;
-  if (read_offset_ >= read_buffer_.size()) {
-    read_buffer_.clear();
-    read_offset_ = 0;
-    return;
-  }
-  CompactReadBufferIfNeeded();
-}
-
-void TcpSession::CompactReadBufferIfNeeded(size_t incoming_bytes) {
-  if (read_offset_ == 0) {
-    return;
-  }
-
-  const size_t buffered = BufferedBytes();
-  if (buffered == 0) {
-    read_buffer_.clear();
-    read_offset_ = 0;
-    return;
-  }
-
-  if (read_offset_ < read_buffer_.size() / 2 &&
-      read_buffer_.size() + incoming_bytes <= kMaxReadBufferSize) {
-    return;
-  }
-
-  std::memmove(read_buffer_.data(),
-               read_buffer_.data() + read_offset_,
-               buffered);
-  read_buffer_.resize(buffered);
-  read_offset_ = 0;
-}
-
 void TcpSession::HandleBytes(const uint8_t* data, size_t size) {
   if (!data || size == 0) {
     return;
@@ -312,98 +272,69 @@ void TcpSession::HandleBytes(const uint8_t* data, size_t size) {
     return;
   }
 
-  CompactReadBufferIfNeeded(size);
-  const size_t buffered_before_append = BufferedBytes();
-
-  // Prevent unbounded buffer growth from slow or malicious peers.
-  if (buffered_before_append >= kMaxReadBufferSize ||
-      size > kMaxReadBufferSize - buffered_before_append) {
-    SYSLOG_WARN("Read buffer overflow (current={}, incoming={}), closing session {}",
-                buffered_before_append, size, GetSessionId());
+  if (!ingress_parser_.AppendBytes(data, size, kMaxReadBufferSize)) {
+    SYSLOG_WARN("Read buffer overflow (incoming={}), closing session {}",
+                size,
+                GetSessionId());
     Close();
     return;
   }
 
-  read_buffer_.insert(read_buffer_.end(), data, data + size);
+  auto apply_protocol_gate = [this]() {
+    if (!ingress_parser_.IsProtocolVersionDetected()) {
+      return;
+    }
+    const bool allow_upgrade =
+        ingress_parser_.GetProtocolVersion() == ProtocolVersion::kV2;
+    kcp_upgrade_allowed_.store(allow_upgrade, std::memory_order_relaxed);
+  };
 
   while (true) {
-    const size_t buffered = BufferedBytes();
-    if (buffered < sizeof(uint32_t)) {
+    const IngressParseResult result = ingress_parser_.NextPacket();
+    apply_protocol_gate();
+    if (result.action == IngressParseAction::kNeedMoreData) {
       return;
     }
-    const uint8_t* frame = read_buffer_.data() + read_offset_;
-
-    if (!protocol_version_detected_.load(std::memory_order_relaxed)) {
-      protocol_version_ = mir2::common::DetectProtocolVersion(frame);
-      protocol_version_detected_.store(true, std::memory_order_relaxed);
-      kcp_upgrade_allowed_.store(protocol_version_ == ProtocolVersion::kV2,
-                                 std::memory_order_relaxed);
-    }
-
-    if (protocol_version_ == ProtocolVersion::kV1) {
-      SYSLOG_WARN("Rejecting V1 packet: protocol sunset (session_id={}, {}:{})",
-                  GetSessionId(),
-                  remote_address_,
-                  remote_port_);
+    if (result.action == IngressParseAction::kFatalError) {
+      switch (result.error) {
+        case IngressParseError::kLegacyV1:
+          SYSLOG_WARN("Rejecting V1 packet: protocol sunset (session_id={}, {}:{})",
+                      GetSessionId(),
+                      remote_address_,
+                      remote_port_);
+          break;
+        case IngressParseError::kHeaderInvalid:
+          monitor::Metrics::Instance().IncrementError("decode_header");
+          break;
+        case IngressParseError::kPayloadTooLarge:
+        case IngressParseError::kDecodeFailed:
+          monitor::Metrics::Instance().IncrementError("decode_body");
+          break;
+        case IngressParseError::kChannelMismatch:
+          SYSLOG_WARN(
+              "Channel flag mismatch: TCP received KCP-flagged packet from session {} ({}:{})",
+              GetSessionId(),
+              remote_address_,
+              remote_port_);
+          monitor::Metrics::Instance().IncrementError("channel_flag_mismatch_tcp");
+          break;
+        case IngressParseError::kNone:
+          break;
+      }
       Close();
       return;
     }
 
-    const size_t header_size = PacketHeaderV2::kSize;
-    if (buffered < header_size) {
-      return;
-    }
-
-    size_t payload_size = 0;
-    PacketHeaderV2 header{};
-    if (!PacketHeaderV2::FromBytes(frame, header_size, &header) ||
-        header.version != PacketHeaderV2::kVersion) {
-      monitor::Metrics::Instance().IncrementError("decode_header");
-      Close();
-      return;
-    }
-    payload_size = header.payload_size;
-
-    if (payload_size > mir2::common::kMaxPayloadSize) {
-      monitor::Metrics::Instance().IncrementError("decode_body");
-      Close();
-      return;
-    }
-
-    const size_t packet_size = header_size + payload_size;
-    if (buffered < packet_size) {
-      return;
-    }
-
-    if (!mir2::common::ValidateChannelFlag(
-            header.flags, mir2::common::ChannelType::kTcp)) {
-      SYSLOG_WARN("Channel flag mismatch: TCP received KCP-flagged packet from session {} ({}:{})",
-                  GetSessionId(), remote_address_, remote_port_);
-      monitor::Metrics::Instance().IncrementError("channel_flag_mismatch_tcp");
-      ConsumeBytes(packet_size);
-      continue;
-    }
-
-    uint16_t sequence = 0;
-    const auto status =
-        PacketCodec::DecodeV2(frame, packet_size, &decode_packet_, &sequence);
-    if (status != DecodeStatus::kOk) {
-      monitor::Metrics::Instance().IncrementError("decode_body");
-      Close();
-      return;
-    }
-    if (!CheckRecvSequence(sequence)) {
+    if (!CheckRecvSequence(result.parsed.sequence)) {
       monitor::Metrics::Instance().IncrementError("sequence");
       Close();
       return;
     }
 
-    HandlePacket(connection_id_, decode_packet_);
+    HandlePacket(connection_id_, result.parsed.packet);
     if (state_.load() != SessionState::kActive) {
       return;
     }
-
-    ConsumeBytes(packet_size);
   }
 }
 

@@ -8,11 +8,13 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <asio.hpp>
 
@@ -67,12 +69,29 @@ class KcpServer : public IKcpServer {
 
   void SetUdpSendFaultInjectEveryN(uint64_t every_n);
   uint64_t GetUdpSendFaultInjectEveryN() const;
+  void SetRateLimiterConfig(IpRateLimiter::Config config);
+  void SetConvBlacklistConfig(ConvBlacklist::Config config);
+  bool IsConvBlacklisted(uint32_t conv, uint32_t source_ip, int64_t now_ms);
+  uint16_t GetBoundPort() const;
+  void HandleRawPacketForTesting(const asio::ip::udp::endpoint& endpoint,
+                                 const uint8_t* data,
+                                 size_t size);
+  void StartUpdateTimerForTesting();
+  std::chrono::steady_clock::time_point GetUpdateTimerExpiryForTesting() const;
+  void CancelUpdateTimerForTesting();
+  void UpdateAllSessionsForTesting();
+  void SendRawForTesting(const asio::ip::udp::endpoint& endpoint,
+                         const uint8_t* data,
+                         size_t size);
+  uint64_t GetUdpSendErrorCountForTesting() const;
 
  private:
   void StartReceive();
   void HandleReceive(const asio::error_code& ec, std::size_t bytes);
   void StartUpdateTimer();
   void UpdateAllSessions();
+  void SendRaw(const asio::ip::udp::endpoint& endpoint,
+               std::vector<uint8_t>&& packet);
   void SendRaw(const asio::ip::udp::endpoint& endpoint,
                const uint8_t* data,
                size_t size);
@@ -89,6 +108,8 @@ class KcpServer : public IKcpServer {
 
   mutable std::shared_mutex mutex_;
   std::unordered_map<uint32_t, SessionPtr> sessions_;
+  std::vector<SessionPtr> update_scan_sessions_;
+  std::vector<uint32_t> update_expired_convs_;
   KcpSession::MessageHandler message_handler_;
   int64_t last_cleanup_ms_ = 0;
   std::atomic<uint64_t> udp_send_error_count_{0};

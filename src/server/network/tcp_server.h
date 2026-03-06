@@ -7,6 +7,7 @@
 #define MIR2_NETWORK_TCP_SERVER_H
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -46,6 +47,10 @@ class TcpServer {
    */
   void Stop();
 
+  void SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size);
+  void SetAcceptedConnectionWriteBatchOptions(TcpConnection::WriteBatchOptions options);
+  void SetAcceptedConnectionLowCopySendEnabled(bool enabled);
+
   void SetConnectHandler(ConnectHandler handler) { connect_handler_ = std::move(handler); }
 
  private:
@@ -61,6 +66,9 @@ class TcpServer {
   std::string uds_socket_path_;
   std::atomic<uint64_t> next_connection_id_{1};
   int max_connections_ = 0;
+  size_t accepted_connection_write_queue_size_ = TcpConnection::kDefaultMaxWriteQueueSize;
+  TcpConnection::WriteBatchOptions accepted_connection_write_batch_options_{};
+  bool accepted_connection_low_copy_send_enabled_ = false;
 
   ConnectHandler connect_handler_;
 };

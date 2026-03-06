@@ -6,6 +6,7 @@
 #ifndef MIR2_NETWORK_CONV_BLACKLIST_H_
 #define MIR2_NETWORK_CONV_BLACKLIST_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
@@ -27,21 +28,39 @@ class ConvBlacklist {
   ConvBlacklist();
   explicit ConvBlacklist(Config config);
 
-  bool IsBlacklisted(uint32_t conv, int64_t now_ms);
-  void RecordFailure(uint32_t conv, int64_t now_ms);
-  void Add(uint32_t conv, int64_t now_ms);
-  void Remove(uint32_t conv);
+  void SetConfig(Config config);
+
+  bool IsBlacklisted(uint32_t conv, uint32_t source_ip, int64_t now_ms);
+  void RecordFailure(uint32_t conv, uint32_t source_ip, int64_t now_ms);
+  void Add(uint32_t conv, uint32_t source_ip, int64_t now_ms);
+  void Remove(uint32_t conv, uint32_t source_ip);
   void Cleanup(int64_t now_ms);
 
  private:
+  struct Key {
+    uint32_t conv = 0;
+    uint32_t source_ip = 0;
+
+    bool operator==(const Key& other) const {
+      return conv == other.conv && source_ip == other.source_ip;
+    }
+  };
+
+  struct KeyHash {
+    size_t operator()(const Key& key) const {
+      return (static_cast<size_t>(key.conv) << 32) ^
+             static_cast<size_t>(key.source_ip);
+    }
+  };
+
   struct FailureEntry {
     uint8_t count = 0;
     int64_t last_fail_ms = 0;
   };
 
   Config config_;
-  std::unordered_map<uint32_t, int64_t> blacklist_;
-  std::unordered_map<uint32_t, FailureEntry> failures_;
+  std::unordered_map<Key, int64_t, KeyHash> blacklist_;
+  std::unordered_map<Key, FailureEntry, KeyHash> failures_;
   std::mutex mutex_;
   int64_t last_cleanup_ms_ = 0;
 };

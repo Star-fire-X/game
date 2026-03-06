@@ -175,7 +175,7 @@ public:
      std::queue<NetworkPacket> receive_queue_;
      std::mutex send_mutex_;
      std::mutex receive_mutex_;
-    bool write_in_progress_ = false;
+    std::atomic<bool> write_in_progress_{false};
 
      // Callbacks
      std::function<void(const NetworkPacket&)> on_message_;

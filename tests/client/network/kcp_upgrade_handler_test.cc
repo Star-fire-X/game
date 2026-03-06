@@ -10,6 +10,7 @@
 
 #include "client/network/kcp_upgrade_handler.h"
 #include "common/enums.h"
+#include "common/time_utils.h"
 #include "system_generated.h"
 
 namespace {
@@ -169,7 +170,7 @@ TEST(kcp_upgrade_handler, HeartbeatAckConfirmsOnce) {
     EXPECT_TRUE(handler.HandleKcpPacket(packet));
 }
 
-TEST(kcp_upgrade_handler, DisconnectsAfterHeartbeatTimeoutWithoutAck) {
+TEST(kcp_upgrade_handler, DisconnectsAfterHeartbeatTimeoutWithoutRecentAck) {
     KcpUpgradeHandler handler;
     StrictMock<MockSender> kcp_sender;
     StrictMock<MockEvents> events;
@@ -177,14 +178,65 @@ TEST(kcp_upgrade_handler, DisconnectsAfterHeartbeatTimeoutWithoutAck) {
     handler.SetKcpSender([&](uint16_t msg_id, const std::vector<uint8_t>& payload) {
         kcp_sender.Send(msg_id, payload);
     });
-    handler.SetConfirmedCallback([&]() { events.OnConfirmed(); });
     handler.SetDisconnectCallback([&]() { events.OnDisconnect(); });
 
-    EXPECT_CALL(events, OnConfirmed()).Times(0);
     EXPECT_CALL(events, OnDisconnect()).Times(1);
     EXPECT_CALL(kcp_sender, Send(static_cast<uint16_t>(MsgId::kKcpHeartbeat), _))
         .Times(1);
 
-    handler.Update(1000, false, true, true);
-    handler.Update(16000, false, false, true);
+    const int64_t base_now_ms = mir2::common::now_ms();
+    handler.Update(base_now_ms, false, true, true);
+
+    flatbuffers::FlatBufferBuilder builder;
+    const auto ack = mir2::proto::CreateKcpHeartbeatAck(builder, 123u);
+    builder.Finish(ack);
+    EXPECT_TRUE(handler.HandleKcpPacket(
+        MakePacket(MsgId::kKcpHeartbeatAck, BuildPayload(builder))));
+
+    handler.Update(base_now_ms + 16000, false, false, true);
+}
+
+TEST(kcp_upgrade_handler, NoDisconnectWhileChannelStillConnectedAfterAckStale) {
+    KcpUpgradeHandler handler;
+    StrictMock<MockSender> kcp_sender;
+    StrictMock<MockEvents> events;
+
+    handler.SetKcpSender([&](uint16_t msg_id, const std::vector<uint8_t>& payload) {
+        kcp_sender.Send(msg_id, payload);
+    });
+    handler.SetDisconnectCallback([&]() { events.OnDisconnect(); });
+
+    EXPECT_CALL(events, OnDisconnect()).Times(0);
+    EXPECT_CALL(kcp_sender, Send(static_cast<uint16_t>(MsgId::kKcpHeartbeat), _))
+        .Times(2);
+
+    const int64_t base_now_ms = mir2::common::now_ms();
+    handler.Update(base_now_ms, false, true, true);
+
+    flatbuffers::FlatBufferBuilder builder;
+    const auto ack = mir2::proto::CreateKcpHeartbeatAck(builder, 123u);
+    builder.Finish(ack);
+    EXPECT_TRUE(handler.HandleKcpPacket(
+        MakePacket(MsgId::kKcpHeartbeatAck, BuildPayload(builder))));
+
+    handler.Update(base_now_ms + 20000, false, true, true);
+}
+
+TEST(kcp_upgrade_handler, NoDisconnectBeforeFirstHeartbeatAck) {
+    KcpUpgradeHandler handler;
+    StrictMock<MockSender> kcp_sender;
+    StrictMock<MockEvents> events;
+
+    handler.SetKcpSender([&](uint16_t msg_id, const std::vector<uint8_t>& payload) {
+        kcp_sender.Send(msg_id, payload);
+    });
+    handler.SetDisconnectCallback([&]() { events.OnDisconnect(); });
+
+    EXPECT_CALL(events, OnDisconnect()).Times(0);
+    EXPECT_CALL(kcp_sender, Send(static_cast<uint16_t>(MsgId::kKcpHeartbeat), _))
+        .Times(1);
+
+    const int64_t base_now_ms = mir2::common::now_ms();
+    handler.Update(base_now_ms, false, true, true);
+    handler.Update(base_now_ms + 20000, false, false, true);
 }

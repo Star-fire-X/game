@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <limits>
 #include <utility>
 #include <flatbuffers/flatbuffers.h>
 
@@ -25,22 +26,21 @@
 namespace mir2::gateway {
 
 namespace {
-constexpr float kStaleRouteCleanupIntervalSec = 30.0f;
-constexpr uint32_t kDefaultBackpressurePauseMs = 100;
-constexpr uint32_t kMaxBackpressurePauseMs = 2000;
-constexpr size_t kMaxForwardPayloadBytes = 64 * 1024;
-constexpr int64_t kDisconnectRetryInitialBackoffMs = 500;
-constexpr int64_t kDisconnectRetryMaxBackoffMs = 30000;
-constexpr int64_t kDisconnectRetryTtlMs = 300000;
-constexpr size_t kDisconnectRetryMaxQueueSize = 100000;
 
-int64_t ComputeDisconnectBackoffMs(uint32_t retry_count) {
-  uint32_t capped_retry = retry_count;
-  if (capped_retry > 8) {
-    capped_retry = 8;
+const char* LifecycleStateToString(GatewayServer::LifecycleState state) {
+  switch (state) {
+    case GatewayServer::LifecycleState::kServing:
+      return "serving";
+    case GatewayServer::LifecycleState::kHolding:
+      return "holding";
+    case GatewayServer::LifecycleState::kRestoring:
+      return "restoring";
+    case GatewayServer::LifecycleState::kFlushing:
+      return "flushing";
+    case GatewayServer::LifecycleState::kShuttingDown:
+      return "shutting_down";
   }
-  const int64_t delay = kDisconnectRetryInitialBackoffMs << capped_retry;
-  return std::min(delay, kDisconnectRetryMaxBackoffMs);
+  return "unknown";
 }
 
 struct ConnectionSnapshot {
@@ -145,6 +145,36 @@ bool GatewayServer::Initialize(const std::string& config_path) {
   }
 
   const auto& server_config = config::ConfigManager::Instance().GetServerConfig();
+  max_connections_limit_ = server_config.max_connections > 0
+      ? static_cast<size_t>(server_config.max_connections)
+      : 1u;
+  stale_route_cleanup_elapsed_ms_ = 0;
+  stale_route_cleanup_interval_ms_ = static_cast<int64_t>(
+      server_config.gateway_stale_route_cleanup_interval_ms);
+  backpressure_default_pause_ms_ = static_cast<uint32_t>(
+      server_config.gateway_backpressure_default_pause_ms);
+  backpressure_max_pause_ms_ = static_cast<uint32_t>(
+      server_config.gateway_backpressure_max_pause_ms);
+  max_forward_payload_bytes_ = static_cast<size_t>(
+      server_config.gateway_max_forward_payload_bytes);
+  disconnect_retry_initial_backoff_ms_ = static_cast<int64_t>(
+      server_config.gateway_disconnect_retry_initial_backoff_ms);
+  disconnect_retry_max_backoff_ms_ = static_cast<int64_t>(
+      server_config.gateway_disconnect_retry_max_backoff_ms);
+  disconnect_retry_ttl_ms_ = static_cast<int64_t>(
+      server_config.gateway_disconnect_retry_ttl_ms);
+  disconnect_retry_max_queue_size_ = static_cast<size_t>(
+      server_config.gateway_disconnect_retry_max_queue_size);
+  holder_buffer_capacity_bytes_ = static_cast<size_t>(
+      server_config.gateway_holder_buffer_capacity_bytes);
+  holder_disconnect_threshold_bytes_ = static_cast<size_t>(
+      server_config.gateway_holder_disconnect_threshold_bytes);
+  {
+    std::unique_lock<std::shared_mutex> lock(holder_lock_);
+    lifecycle_state_ = LifecycleState::kServing;
+    ApplyLifecycleStateLocked(LifecycleState::kServing);
+  }
+
   const int configured_capacity = server_config.login_ip_rate_limit_capacity;
   const int configured_refill_rate = server_config.login_ip_rate_limit_refill_rate;
   const mir2::security::RateLimiter::Config login_rate_limit_config{
@@ -190,10 +220,33 @@ bool GatewayServer::Initialize(const std::string& config_path) {
   }
 
   network_ = std::make_unique<network::DualChannelManager>(app_.GetIoContext());
+  const size_t accepted_connection_write_queue_size = static_cast<size_t>(
+      std::max(server_config.service_link_write_queue_size, 1));
+  const size_t accepted_connection_write_batch_max_bytes = static_cast<size_t>(
+      std::max(server_config.gateway_tcp_write_batch_max_bytes, 1));
+  const int64_t accepted_connection_write_batch_flush_us = static_cast<int64_t>(
+      std::max(server_config.gateway_tcp_write_batch_flush_us, 0));
+  const bool accepted_connection_low_copy_send_enabled =
+      server_config.network_low_copy_send_enabled;
+  network_->SetAcceptedConnectionWriteQueueSize(accepted_connection_write_queue_size);
+  network_->SetAcceptedConnectionWriteBatchOptions(
+      accepted_connection_write_batch_max_bytes,
+      accepted_connection_write_batch_flush_us);
+  network_->SetAcceptedConnectionLowCopySendEnabled(
+      accepted_connection_low_copy_send_enabled);
+  network_->SetKcpCleanupIntervalMs(server_config.gateway_kcp_cleanup_interval_ms);
   if (!network_->Start(server_config.bind_ip, tcp_port, udp_port, server_config.max_connections)) {
     SYSLOG_ERROR("GatewayServer network start failed");
     return false;
   }
+  SYSLOG_INFO(
+      "GatewayServer network policy write_queue_size={} write_batch_max_bytes={} "
+      "write_batch_flush_us={} low_copy_send_enabled={} kcp_cleanup_interval_ms={}",
+      accepted_connection_write_queue_size,
+      accepted_connection_write_batch_max_bytes,
+      accepted_connection_write_batch_flush_us,
+      accepted_connection_low_copy_send_enabled,
+      server_config.gateway_kcp_cleanup_interval_ms);
 
   if (auto* kcp_server =
           dynamic_cast<network::KcpServer*>(&network_->GetKcpServer())) {
@@ -227,10 +280,11 @@ void GatewayServer::Shutdown() {
   if (shutting_down_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
+  TransitionLifecycleState(LifecycleEvent::kShutdownRequested);
 
   logic_reconnecting_.store(false, std::memory_order_release);
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::unique_lock<std::shared_mutex> lock(disconnect_queue_lock_);
     pending_disconnect_events_.clear();
   }
   monitor::Metrics::Instance().SetGauge("gateway.disconnect_queue.size", 0);
@@ -249,39 +303,39 @@ void GatewayServer::Shutdown() {
 }
 
 void GatewayServer::Tick(float delta_time) {
-    std::vector<std::shared_ptr<network::TcpSession>> sessions;
-    if (network_) {
-        network_->Tick();
-        sessions = network_->GetAllSessions();
-        for (const auto& session : sessions) {
-            if (!session) {
-                continue;
-            }
-            const uint64_t connection_id = session->GetSessionId();
-            if (connection_id == 0) {
-                continue;
-            }
-            if (!GetConnectionSession(connection_id)) {
-                RegisterConnection(connection_id, session);
-            }
-        }
+  std::vector<std::shared_ptr<network::TcpSession>> sessions;
+  if (network_) {
+    network_->Tick();
+    sessions = network_->GetAllSessions();
+    for (const auto& session : sessions) {
+      if (!session) {
+        continue;
+      }
+      const uint64_t connection_id = session->GetSessionId();
+      if (connection_id == 0) {
+        continue;
+      }
+      if (!GetConnectionSession(connection_id)) {
+        RegisterConnection(connection_id, session);
+      }
     }
+  }
 
-    const int64_t now_ms = network::TcpSession::NowMs();
-    ResumeBackpressuredSessions(now_ms);
-    CheckHeartbeatTimeouts(sessions, now_ms);
-    FlushBufferedMessages();
-    ProcessDisconnectRetryQueue(now_ms);
-    UpdateHoldingMetrics();
+  const int64_t now_ms = network::TcpSession::NowMs();
+  ResumeBackpressuredSessions(now_ms);
+  CheckHeartbeatTimeouts(sessions, now_ms);
+  FlushBufferedMessages();
+  ProcessDisconnectRetryQueue(now_ms);
+  UpdateHoldingMetrics();
 
-    stale_route_cleanup_elapsed_sec_ += delta_time;
-    if (stale_route_cleanup_elapsed_sec_ >= kStaleRouteCleanupIntervalSec) {
-        stale_route_cleanup_elapsed_sec_ -= kStaleRouteCleanupIntervalSec;
-        CleanupStaleRoutes();
-        monitor::Metrics::Instance().SetGauge(
-            "gateway.session_count",
-            static_cast<int64_t>(GetConnectionCount()));
-    }
+  stale_route_cleanup_elapsed_ms_ += static_cast<int64_t>(delta_time * 1000.0f);
+  if (stale_route_cleanup_elapsed_ms_ >= stale_route_cleanup_interval_ms_) {
+    stale_route_cleanup_elapsed_ms_ -= stale_route_cleanup_interval_ms_;
+    CleanupStaleRoutes();
+    monitor::Metrics::Instance().SetGauge(
+        "gateway.session_count",
+        static_cast<int64_t>(GetConnectionCount()));
+  }
 }
 
 void GatewayServer::CheckHeartbeatTimeouts(
@@ -313,105 +367,135 @@ void GatewayServer::CheckHeartbeatTimeouts(
 
 void GatewayServer::RegisterConnection(uint64_t connection_id,
                                        const std::shared_ptr<network::TcpSession>& session) {
-    if (!session) {
-        return;
-    }
+  if (!session) {
+    return;
+  }
 
-    const uint64_t resolved_id = connection_id != 0 ? connection_id : session->GetSessionId();
-    if (resolved_id == 0) {
-        return;
-    }
+  const uint64_t resolved_id = connection_id != 0 ? connection_id : session->GetSessionId();
+  if (resolved_id == 0) {
+    return;
+  }
 
-    {
-        std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-        session_map_[resolved_id] = session;
-        auto& holder = connection_holders_[resolved_id];
-        if (!holder) {
-            holder = std::make_unique<ConnectionHolder>();
-        }
-        ApplyHolderState(*holder, holder_state_);
-        connection_connected_at_ms_[resolved_id] = network::TcpSession::NowMs();
-        client_backpressure_until_ms_.erase(resolved_id);
+  bool reject_due_to_capacity = false;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_lock_);
+    const bool already_exists = session_map_.find(resolved_id) != session_map_.end();
+    if (!already_exists && session_map_.size() >= max_connections_limit_) {
+      reject_due_to_capacity = true;
+    } else {
+      session_map_[resolved_id] = session;
+      connection_connected_at_ms_[resolved_id] = network::TcpSession::NowMs();
     }
+  }
+  if (reject_due_to_capacity) {
+    SYSLOG_WARN("Gateway reject connection {} because max_connections reached ({})",
+                resolved_id,
+                max_connections_limit_);
+    monitor::Metrics::Instance().IncrementCounter("gateway.session.rejected.max_connections");
+    session->Kick(common::ErrorCode::kKickAdminManual, "Max connections reached");
+    return;
+  }
+  {
+    std::unique_lock<std::shared_mutex> lock(holder_lock_);
+    auto& holder = connection_holders_[resolved_id];
+    if (!holder) {
+      holder = MakeConnectionHolder();
+    }
+    ApplyHolderState(*holder, holder_state_);
+  }
+  {
+    std::unique_lock<std::shared_mutex> lock(backpressure_lock_);
+    client_backpressure_until_ms_.erase(resolved_id);
+  }
 
-    session->SetDisconnectedHandler([this](const std::shared_ptr<network::TcpSession>& disconnected) {
-        UnregisterSession(disconnected);
-    });
+  session->SetDisconnectedHandler([this](const std::shared_ptr<network::TcpSession>& disconnected) {
+    UnregisterSession(disconnected);
+  });
 }
 
 // RegisterUser 已移除：双进程架构下，UserID 由 LogicServer 管理
 
 void GatewayServer::UnregisterSession(const std::shared_ptr<network::TcpSession>& session) {
-    if (!session) {
-        return;
-    }
+  if (!session) {
+    return;
+  }
 
-    const uint64_t connection_id = session->GetSessionId();
+  const uint64_t connection_id = session->GetSessionId();
 
-    if (network_ && connection_id != 0) {
-        network_->UnbindKcpSession(connection_id);
-    }
+  if (network_ && connection_id != 0) {
+    network_->UnbindKcpSession(connection_id);
+  }
 
+  if (connection_id != 0) {
     {
-        std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-        if (connection_id != 0) {
-            auto it = session_map_.find(connection_id);
-            if (it != session_map_.end() && it->second == session) {
-                session_map_.erase(it);
-            }
-            connection_holders_.erase(connection_id);
-            connection_connected_at_ms_.erase(connection_id);
-            client_backpressure_until_ms_.erase(connection_id);
-        }
+      std::unique_lock<std::shared_mutex> lock(session_map_lock_);
+      auto it = session_map_.find(connection_id);
+      if (it != session_map_.end() && it->second == session) {
+        session_map_.erase(it);
+      }
+      connection_connected_at_ms_.erase(connection_id);
     }
+    {
+      std::unique_lock<std::shared_mutex> lock(holder_lock_);
+      connection_holders_.erase(connection_id);
+    }
+    {
+      std::unique_lock<std::shared_mutex> lock(backpressure_lock_);
+      client_backpressure_until_ms_.erase(connection_id);
+    }
+  }
 
-    monitor::Metrics::Instance().IncrementCounter("gateway.session.unregister");
-    NotifyClientDisconnected(connection_id);
+  monitor::Metrics::Instance().IncrementCounter("gateway.session.unregister");
+  NotifyClientDisconnected(connection_id);
 }
 
 void GatewayServer::CleanupStaleRoutes() {
-    size_t before_connections = 0;
-    size_t after_connections = 0;
+  size_t before_connections = 0;
+  size_t after_connections = 0;
+  std::vector<uint64_t> removed_connections;
+  {
+    std::unique_lock<std::shared_mutex> lock(session_map_lock_);
+    before_connections = session_map_.size();
 
-    {
-        std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-        before_connections = session_map_.size();
-        std::vector<uint64_t> removed_connections;
-
-        for (auto it = session_map_.begin(); it != session_map_.end();) {
-            const auto& session = it->second;
-            if (!session || session->GetState() == network::TcpSession::SessionState::kClosed) {
-                removed_connections.push_back(it->first);
-                it = session_map_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        for (uint64_t connection_id : removed_connections) {
-            connection_holders_.erase(connection_id);
-            connection_connected_at_ms_.erase(connection_id);
-            client_backpressure_until_ms_.erase(connection_id);
-        }
-
-        after_connections = session_map_.size();
+    for (auto it = session_map_.begin(); it != session_map_.end();) {
+      const auto& session = it->second;
+      if (!session || session->GetState() == network::TcpSession::SessionState::kClosed) {
+        removed_connections.push_back(it->first);
+        it = session_map_.erase(it);
+      } else {
+        ++it;
+      }
     }
 
-    SYSLOG_INFO("Cleanup stale sessions: {}->{}", before_connections, after_connections);
+    for (uint64_t connection_id : removed_connections) {
+      connection_connected_at_ms_.erase(connection_id);
+    }
+    after_connections = session_map_.size();
+  }
+  if (!removed_connections.empty()) {
+    std::unique_lock<std::shared_mutex> holder_lock(holder_lock_);
+    std::unique_lock<std::shared_mutex> backpressure_lock(backpressure_lock_);
+    for (uint64_t connection_id : removed_connections) {
+      connection_holders_.erase(connection_id);
+      client_backpressure_until_ms_.erase(connection_id);
+    }
+  }
+
+  SYSLOG_INFO("Cleanup stale sessions: {}->{}", before_connections, after_connections);
 }
 
 std::shared_ptr<network::TcpSession> GatewayServer::GetConnectionSession(uint64_t connection_id) const {
-    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
-    auto it = session_map_.find(connection_id);
-    if (it != session_map_.end()) {
-        return it->second;
-    }
-    return nullptr;
+  std::shared_lock<std::shared_mutex> lock(session_map_lock_);
+  auto it = session_map_.find(connection_id);
+  if (it != session_map_.end()) {
+    return it->second;
+  }
+  return nullptr;
 }
 
 size_t GatewayServer::GetConnectionCount() const {
-    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
-    return session_map_.size();
+  std::shared_lock<std::shared_mutex> lock(session_map_lock_);
+  return session_map_.size();
 }
 
 void GatewayServer::RegisterHandlers() {
@@ -476,11 +560,15 @@ bool GatewayServer::ConnectToLogicService() {
     return false;
   }
 
+  const auto& server_config = config::ConfigManager::Instance().GetServerConfig();
   const auto& services = config::ConfigManager::Instance().GetServiceConfig();
 
   if (!logic_client_) {
     logic_client_ = std::make_unique<network::TcpClient>(app_.GetIoContext());
   }
+  logic_client_->SetWriteQueueSize(
+      static_cast<size_t>(std::max(server_config.service_link_write_queue_size, 1)));
+  logic_client_->SetLowCopySendEnabled(server_config.network_low_copy_send_enabled);
   logic_client_->SetPacketHandler([this](const network::Packet& packet) {
     OnLogicPacket(packet);
   });
@@ -489,7 +577,7 @@ bool GatewayServer::ConnectToLogicService() {
       return;
     }
     SYSLOG_ERROR("Logic service disconnected, scheduling reconnect");
-    EnterHoldingState();
+    TransitionLifecycleState(LifecycleEvent::kLogicDisconnected);
     ScheduleReconnect(0);
   });
 
@@ -568,8 +656,13 @@ void GatewayServer::ScheduleReconnect(int retry_count) {
     return;
   }
 
-  const int capped_retry = std::min(retry_count, 5);
-  const int delay_ms = std::min(1000 * (1 << capped_retry), 30000);
+  const int capped_retry = std::clamp(retry_count, 0, 20);
+  const int64_t scaled_delay_ms =
+      logic_reconnect_initial_backoff_ms_ * static_cast<int64_t>(1ULL << capped_retry);
+  const int64_t delay_ms = std::clamp<int64_t>(
+      std::min(scaled_delay_ms, logic_reconnect_max_backoff_ms_),
+      1,
+      std::numeric_limits<int32_t>::max());
   SYSLOG_INFO("Scheduling reconnect to logic service in {}ms (retry={})",
               delay_ms, retry_count);
 
@@ -593,6 +686,15 @@ void GatewayServer::ScheduleReconnect(int retry_count) {
     }
 
     logic_reconnecting_.store(false, std::memory_order_release);
+    if (logic_reconnect_max_retries_ > 0 &&
+        retry_count >= logic_reconnect_max_retries_) {
+      SYSLOG_ERROR(
+          "Logic service reconnect retries exhausted (max_retries={}), giving up",
+          logic_reconnect_max_retries_);
+      monitor::Metrics::Instance().IncrementCounter(
+          "gateway.service.reconnect.giveup.logic");
+      return;
+    }
     ScheduleReconnect(retry_count + 1);
   });
 }
@@ -628,8 +730,8 @@ void GatewayServer::EnqueueDisconnectEvent(uint64_t client_id, int64_t now_ms) {
 
   size_t queue_size = 0;
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-    if (pending_disconnect_events_.size() >= kDisconnectRetryMaxQueueSize) {
+    std::unique_lock<std::shared_mutex> lock(disconnect_queue_lock_);
+    if (pending_disconnect_events_.size() >= disconnect_retry_max_queue_size_) {
       pending_disconnect_events_.pop_front();
       monitor::Metrics::Instance().IncrementCounter(
           "gateway.disconnect_queue.dropped_overflow_total");
@@ -662,10 +764,10 @@ void GatewayServer::TrimExpiredDisconnectEvents(int64_t now_ms) {
   size_t expired_count = 0;
   size_t queue_size = 0;
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::unique_lock<std::shared_mutex> lock(disconnect_queue_lock_);
     for (auto it = pending_disconnect_events_.begin();
          it != pending_disconnect_events_.end();) {
-      if (now_ms - it->first_seen_ms < kDisconnectRetryTtlMs) {
+      if (now_ms - it->first_seen_ms < disconnect_retry_ttl_ms_) {
         ++it;
         continue;
       }
@@ -691,7 +793,7 @@ void GatewayServer::ProcessDisconnectRetryQueue(int64_t now_ms) {
 
   std::vector<PendingDisconnectEvent> due_events;
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::unique_lock<std::shared_mutex> lock(disconnect_queue_lock_);
     for (auto it = pending_disconnect_events_.begin();
          it != pending_disconnect_events_.end();) {
       if (it->next_retry_ms > now_ms) {
@@ -721,11 +823,11 @@ void GatewayServer::ProcessDisconnectRetryQueue(int64_t now_ms) {
     bool dropped_expired = false;
     bool dropped_overflow = false;
     {
-      std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-      if (now_ms - event.first_seen_ms >= kDisconnectRetryTtlMs) {
+      std::unique_lock<std::shared_mutex> lock(disconnect_queue_lock_);
+      if (now_ms - event.first_seen_ms >= disconnect_retry_ttl_ms_) {
         dropped_expired = true;
       } else {
-        if (pending_disconnect_events_.size() >= kDisconnectRetryMaxQueueSize) {
+        if (pending_disconnect_events_.size() >= disconnect_retry_max_queue_size_) {
           pending_disconnect_events_.pop_front();
           dropped_overflow = true;
         }
@@ -743,7 +845,7 @@ void GatewayServer::ProcessDisconnectRetryQueue(int64_t now_ms) {
 
   size_t queue_size = 0;
   {
-    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::shared_lock<std::shared_mutex> lock(disconnect_queue_lock_);
     queue_size = pending_disconnect_events_.size();
   }
   monitor::Metrics::Instance().SetGauge(
@@ -755,12 +857,15 @@ void GatewayServer::UpdateHoldingMetrics() {
   size_t total_buffered_bytes = 0;
   size_t queue_size = 0;
   {
-    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::shared_lock<std::shared_mutex> lock(holder_lock_);
     for (const auto& [_, holder] : connection_holders_) {
       if (holder) {
         total_buffered_bytes += holder->BufferedBytes();
       }
     }
+  }
+  {
+    std::shared_lock<std::shared_mutex> lock(disconnect_queue_lock_);
     queue_size = pending_disconnect_events_.size();
   }
 
@@ -807,7 +912,7 @@ void GatewayServer::OnLogicPacket(const network::Packet& packet) {
       logic_client_->Send(static_cast<uint16_t>(common::InternalMsgId::kContextRestore),
                           response_payload);
     }
-    EnterRestoringState();
+    TransitionLifecycleState(LifecycleEvent::kContextRestoreRequested);
     return;
   }
 
@@ -834,7 +939,7 @@ void GatewayServer::OnLogicPacket(const network::Packet& packet) {
       network_->Broadcast(static_cast<uint16_t>(common::InternalMsgId::kKcpReset), payload);
       SYSLOG_INFO("Broadcast KcpReset to {} sessions", network_->GetConnectionCount());
     }
-    EnterFlushingState();
+    TransitionLifecycleState(LifecycleEvent::kLogicReadyReceived);
     return;
   }
 
@@ -891,7 +996,7 @@ void GatewayServer::HandleBackpressureControl(const std::vector<uint8_t>& payloa
   if (action == mir2::proto::BackpressureAction::RESUME_READ) {
     session->ResumeRead();
     {
-      std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+      std::unique_lock<std::shared_mutex> lock(backpressure_lock_);
       client_backpressure_until_ms_.erase(client_id);
     }
     monitor::Metrics::Instance().IncrementCounter("gateway.backpressure.resume_total");
@@ -899,14 +1004,14 @@ void GatewayServer::HandleBackpressureControl(const std::vector<uint8_t>& payloa
   }
 
   const uint32_t pause_ms = std::clamp(
-      control->duration_ms() == 0 ? kDefaultBackpressurePauseMs : control->duration_ms(),
+      control->duration_ms() == 0 ? backpressure_default_pause_ms_ : control->duration_ms(),
       1u,
-      kMaxBackpressurePauseMs);
+      backpressure_max_pause_ms_);
   const int64_t until_ms = network::TcpSession::NowMs() + pause_ms;
 
   session->PauseRead();
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::unique_lock<std::shared_mutex> lock(backpressure_lock_);
     auto& existing = client_backpressure_until_ms_[client_id];
     if (existing < until_ms) {
       existing = until_ms;
@@ -916,20 +1021,32 @@ void GatewayServer::HandleBackpressureControl(const std::vector<uint8_t>& payloa
 }
 
 void GatewayServer::ResumeBackpressuredSessions(int64_t now_ms) {
-  std::vector<std::shared_ptr<network::TcpSession>> sessions_to_resume;
+  std::vector<uint64_t> due_client_ids;
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::unique_lock<std::shared_mutex> lock(backpressure_lock_);
     for (auto it = client_backpressure_until_ms_.begin();
          it != client_backpressure_until_ms_.end();) {
       if (now_ms < it->second) {
         ++it;
         continue;
       }
-      auto session_it = session_map_.find(it->first);
+      due_client_ids.push_back(it->first);
+      it = client_backpressure_until_ms_.erase(it);
+    }
+  }
+
+  if (due_client_ids.empty()) {
+    return;
+  }
+
+  std::vector<std::shared_ptr<network::TcpSession>> sessions_to_resume;
+  {
+    std::shared_lock<std::shared_mutex> lock(session_map_lock_);
+    for (uint64_t client_id : due_client_ids) {
+      auto session_it = session_map_.find(client_id);
       if (session_it != session_map_.end() && session_it->second) {
         sessions_to_resume.push_back(session_it->second);
       }
-      it = client_backpressure_until_ms_.erase(it);
     }
   }
 
@@ -944,7 +1061,7 @@ void GatewayServer::ResumeBackpressuredSessions(int64_t now_ms) {
 std::vector<uint8_t> GatewayServer::BuildContextRestoreResponse(uint32_t request_id) const {
   std::vector<ConnectionSnapshot> snapshot;
   {
-    std::shared_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::shared_lock<std::shared_mutex> lock(session_map_lock_);
     snapshot.reserve(session_map_.size());
     for (const auto& [client_id, session] : session_map_) {
       if (!session || session->GetState() == network::TcpSession::SessionState::kClosed) {
@@ -992,43 +1109,128 @@ std::vector<uint8_t> GatewayServer::BuildContextRestoreResponse(uint32_t request
 }
 
 void GatewayServer::EnterHoldingState() {
-  std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-  if (holder_state_ == ConnectionHolder::State::HOLDING) {
-    return;
-  }
-  holder_state_ = ConnectionHolder::State::HOLDING;
-  for (auto& [_, holder] : connection_holders_) {
-    if (holder) {
-      ApplyHolderState(*holder, holder_state_);
-    }
-  }
+  TransitionLifecycleState(LifecycleEvent::kLogicDisconnected);
 }
 
 void GatewayServer::EnterRestoringState() {
-  std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-  if (holder_state_ == ConnectionHolder::State::FLUSHING ||
-      holder_state_ == ConnectionHolder::State::RESTORING) {
-    return;
-  }
-  holder_state_ = ConnectionHolder::State::RESTORING;
-  for (auto& [_, holder] : connection_holders_) {
-    if (holder) {
-      ApplyHolderState(*holder, holder_state_);
-    }
-  }
+  TransitionLifecycleState(LifecycleEvent::kContextRestoreRequested);
 }
 
 void GatewayServer::EnterFlushingState() {
-  std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-  if (holder_state_ == ConnectionHolder::State::FLUSHING) {
-    return;
+  TransitionLifecycleState(LifecycleEvent::kLogicReadyReceived);
+}
+
+bool GatewayServer::TransitionLifecycleState(LifecycleEvent event) {
+  std::unique_lock<std::shared_mutex> lock(holder_lock_);
+  if (lifecycle_state_ == LifecycleState::kShuttingDown &&
+      event != LifecycleEvent::kShutdownRequested) {
+    monitor::Metrics::Instance().IncrementCounter(
+        "gateway.lifecycle.invalid_transition_total");
+    return false;
   }
-  holder_state_ = ConnectionHolder::State::FLUSHING;
+
+  const LifecycleState previous = lifecycle_state_;
+  LifecycleState target = previous;
+  bool valid = true;
+  switch (event) {
+    case LifecycleEvent::kLogicDisconnected:
+      target = LifecycleState::kHolding;
+      break;
+    case LifecycleEvent::kContextRestoreRequested:
+      if (previous == LifecycleState::kServing ||
+          previous == LifecycleState::kHolding ||
+          previous == LifecycleState::kRestoring) {
+        target = LifecycleState::kRestoring;
+      } else {
+        valid = false;
+      }
+      break;
+    case LifecycleEvent::kLogicReadyReceived:
+      if (previous == LifecycleState::kServing ||
+          previous == LifecycleState::kHolding ||
+          previous == LifecycleState::kRestoring ||
+          previous == LifecycleState::kFlushing) {
+        target = LifecycleState::kFlushing;
+      } else {
+        valid = false;
+      }
+      break;
+    case LifecycleEvent::kFlushCompleted:
+      if (previous == LifecycleState::kFlushing) {
+        target = LifecycleState::kServing;
+      } else {
+        valid = false;
+      }
+      break;
+    case LifecycleEvent::kShutdownRequested:
+      target = LifecycleState::kShuttingDown;
+      break;
+  }
+
+  if (!valid) {
+    SYSLOG_WARN("Gateway lifecycle rejected transition state={} event={}",
+                LifecycleStateToString(previous),
+                static_cast<int>(event));
+    monitor::Metrics::Instance().IncrementCounter(
+        "gateway.lifecycle.invalid_transition_total");
+    return false;
+  }
+
+  if (target == previous) {
+    return true;
+  }
+
+  ApplyLifecycleStateLocked(target);
+  SYSLOG_INFO("Gateway lifecycle transition {} -> {} by event={}",
+              LifecycleStateToString(previous),
+              LifecycleStateToString(target),
+              static_cast<int>(event));
+  monitor::Metrics::Instance().IncrementCounter("gateway.lifecycle.transition_total");
+  return true;
+}
+
+void GatewayServer::ApplyLifecycleStateLocked(LifecycleState target) {
+  lifecycle_state_ = target;
+  holder_state_ = GetHolderTargetStateForLifecycle(target);
   for (auto& [_, holder] : connection_holders_) {
     if (holder) {
       ApplyHolderState(*holder, holder_state_);
     }
   }
+  monitor::Metrics::Instance().SetGauge(
+      "gateway.lifecycle.current_state",
+      static_cast<int64_t>(target));
+}
+
+ConnectionHolder::State GatewayServer::GetHolderTargetStateForLifecycle(
+    LifecycleState state) const {
+  switch (state) {
+    case LifecycleState::kServing:
+      return ConnectionHolder::State::FORWARDING;
+    case LifecycleState::kHolding:
+      return ConnectionHolder::State::HOLDING;
+    case LifecycleState::kRestoring:
+      return ConnectionHolder::State::RESTORING;
+    case LifecycleState::kFlushing:
+      return ConnectionHolder::State::FLUSHING;
+    case LifecycleState::kShuttingDown:
+      return ConnectionHolder::State::HOLDING;
+  }
+  return ConnectionHolder::State::FORWARDING;
+}
+
+int64_t GatewayServer::ComputeDisconnectBackoffMs(uint32_t retry_count) const {
+  uint32_t capped_retry = retry_count;
+  if (capped_retry > 8) {
+    capped_retry = 8;
+  }
+  const int64_t delay = disconnect_retry_initial_backoff_ms_ << capped_retry;
+  return std::min(delay, disconnect_retry_max_backoff_ms_);
+}
+
+std::unique_ptr<ConnectionHolder> GatewayServer::MakeConnectionHolder() const {
+  return std::make_unique<ConnectionHolder>(holder_buffer_capacity_bytes_,
+                                            holder_disconnect_threshold_bytes_);
 }
 
 void GatewayServer::FlushBufferedMessages() {
@@ -1036,10 +1238,18 @@ void GatewayServer::FlushBufferedMessages() {
     return;
   }
 
-  std::vector<std::pair<uint64_t, BufferedMessage>> drained;
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
-    if (holder_state_ != ConnectionHolder::State::FLUSHING) {
+    std::shared_lock<std::shared_mutex> state_lock(holder_lock_);
+    if (lifecycle_state_ != LifecycleState::kFlushing) {
+      return;
+    }
+  }
+
+  std::vector<std::pair<uint64_t, BufferedMessage>> drained;
+  bool drain_completed = false;
+  {
+    std::unique_lock<std::shared_mutex> lock(holder_lock_);
+    if (lifecycle_state_ != LifecycleState::kFlushing) {
       return;
     }
 
@@ -1061,15 +1271,11 @@ void GatewayServer::FlushBufferedMessages() {
         break;
       }
     }
+    drain_completed = empty;
+  }
 
-    if (empty) {
-      holder_state_ = ConnectionHolder::State::FORWARDING;
-      for (auto& [_, holder] : connection_holders_) {
-        if (holder) {
-          ApplyHolderState(*holder, holder_state_);
-        }
-      }
-    }
+  if (drain_completed) {
+    TransitionLifecycleState(LifecycleEvent::kFlushCompleted);
   }
 
   if (drained.empty()) {
@@ -1179,7 +1385,7 @@ void GatewayServer::HandleForwardMessage(const std::shared_ptr<network::TcpSessi
     return;
   }
 
-  if (payload.size() > kMaxForwardPayloadBytes) {
+  if (payload.size() > max_forward_payload_bytes_) {
     SYSLOG_WARN(
         "Gateway dropped oversized payload client_id={} msg_id={} channel={} size={}",
         client_id,
@@ -1217,20 +1423,25 @@ void GatewayServer::HandleForwardMessage(const std::shared_ptr<network::TcpSessi
 
   // 检查 LogicServer 连接状态
   if (!IsLogicConnected()) {
-    EnterHoldingState();
+    TransitionLifecycleState(LifecycleEvent::kLogicDisconnected);
   }
 
   // 通过 ConnectionHolder 处理消息（缓冲或转发）
   ConnectionHolder::Action action = ConnectionHolder::Action::kForward;
+  bool holder_created = false;
   {
-    std::unique_lock<std::shared_mutex> lock(session_map_mutex_);
+    std::unique_lock<std::shared_mutex> lock(holder_lock_);
     auto& holder = connection_holders_[client_id];
     if (!holder) {
-      holder = std::make_unique<ConnectionHolder>();
+      holder = MakeConnectionHolder();
       ApplyHolderState(*holder, holder_state_);
-      connection_connected_at_ms_.try_emplace(client_id, network::TcpSession::NowMs());
+      holder_created = true;
     }
     action = holder->HandleClientMessage(msg_id, channel, payload);
+  }
+  if (holder_created) {
+    std::unique_lock<std::shared_mutex> lock(session_map_lock_);
+    connection_connected_at_ms_.try_emplace(client_id, network::TcpSession::NowMs());
   }
 
   // 根据 ConnectionHolder 的决策执行操作

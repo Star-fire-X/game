@@ -7,6 +7,10 @@ server:
   max_connections: 100
   tick_interval_ms: 50
   heartbeat_timeout_ms: 30000
+  network_low_copy_send_enabled: true
+  gateway_kcp_cleanup_interval_ms: 1000
+  gateway_tcp_write_batch_max_bytes: 32768
+  gateway_tcp_write_batch_flush_us: 1000
 
 database:
   host: "127.0.0.1"
@@ -32,14 +36,3 @@ services:
   db:
     host: "127.0.0.1"
     port: 17002
-
-message_routes:
-  - msg_id: 1001
-    service: db
-    require_auth: false
-  - msg_id: 1010
-    service: world
-    require_auth: true
-  - msg_id: 2010
-    service: game
-    require_auth: true

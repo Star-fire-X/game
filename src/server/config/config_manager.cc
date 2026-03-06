@@ -1,5 +1,6 @@
 #include "config/config_manager.h"
 
+#include <array>
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -28,14 +29,148 @@ bool IsSupportedTransport(const std::string& value) {
   return value == "auto" || value == "tcp" || value == "uds";
 }
 
+bool ValidateNoRemovedKeys(const YAML::Node& root, const YAML::Node& server) {
+  if (root && root["message_routes"]) {
+    std::cerr << "Config load failed: key 'message_routes' is removed; "
+              << "gateway now uses universal forwarding." << std::endl;
+    return false;
+  }
+
+  static constexpr std::array<const char*, 5> kRemovedServerKeys = {
+      "legacy_fallback_enabled",
+      "legacy_fallback_allow_auth_whitelist",
+      "legacy_fallback_allow_critical_msgs",
+      "legacy_fallback_allow_normal_msgs",
+      "queue_full_fallback_non_best_effort_enabled"};
+  for (const char* key : kRemovedServerKeys) {
+    if (server && server[key]) {
+      std::cerr << "Config load failed: key 'server." << key
+                << "' is removed and must not be configured." << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ValidateGatewayThresholdConfig(const ServerConfig& config) {
+  if (config.gateway_stale_route_cleanup_interval_ms <= 0) {
+    std::cerr << "Config load failed: server.gateway_stale_route_cleanup_interval_ms "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_backpressure_default_pause_ms <= 0) {
+    std::cerr << "Config load failed: server.gateway_backpressure_default_pause_ms "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_backpressure_max_pause_ms <= 0) {
+    std::cerr << "Config load failed: server.gateway_backpressure_max_pause_ms "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_backpressure_max_pause_ms <
+      config.gateway_backpressure_default_pause_ms) {
+    std::cerr << "Config load failed: server.gateway_backpressure_max_pause_ms "
+              << "must be >= server.gateway_backpressure_default_pause_ms."
+              << std::endl;
+    return false;
+  }
+  if (config.gateway_max_forward_payload_bytes <= 0) {
+    std::cerr << "Config load failed: server.gateway_max_forward_payload_bytes "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_disconnect_retry_initial_backoff_ms <= 0) {
+    std::cerr << "Config load failed: "
+              << "server.gateway_disconnect_retry_initial_backoff_ms must be > 0."
+              << std::endl;
+    return false;
+  }
+  if (config.gateway_disconnect_retry_max_backoff_ms <= 0) {
+    std::cerr << "Config load failed: "
+              << "server.gateway_disconnect_retry_max_backoff_ms must be > 0."
+              << std::endl;
+    return false;
+  }
+  if (config.gateway_disconnect_retry_max_backoff_ms <
+      config.gateway_disconnect_retry_initial_backoff_ms) {
+    std::cerr << "Config load failed: "
+              << "server.gateway_disconnect_retry_max_backoff_ms "
+              << "must be >= server.gateway_disconnect_retry_initial_backoff_ms."
+              << std::endl;
+    return false;
+  }
+  if (config.gateway_disconnect_retry_ttl_ms <= 0) {
+    std::cerr << "Config load failed: server.gateway_disconnect_retry_ttl_ms "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_disconnect_retry_ttl_ms <
+      config.gateway_disconnect_retry_initial_backoff_ms) {
+    std::cerr << "Config load failed: server.gateway_disconnect_retry_ttl_ms "
+              << "must be >= server.gateway_disconnect_retry_initial_backoff_ms."
+              << std::endl;
+    return false;
+  }
+  if (config.gateway_disconnect_retry_max_queue_size <= 0) {
+    std::cerr << "Config load failed: server.gateway_disconnect_retry_max_queue_size "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_holder_buffer_capacity_bytes <= 0) {
+    std::cerr << "Config load failed: server.gateway_holder_buffer_capacity_bytes "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_holder_disconnect_threshold_bytes <= 0) {
+    std::cerr << "Config load failed: "
+              << "server.gateway_holder_disconnect_threshold_bytes must be > 0."
+              << std::endl;
+    return false;
+  }
+  if (config.gateway_holder_disconnect_threshold_bytes <
+      config.gateway_holder_buffer_capacity_bytes) {
+    std::cerr << "Config load failed: "
+              << "server.gateway_holder_disconnect_threshold_bytes must be >= "
+              << "server.gateway_holder_buffer_capacity_bytes." << std::endl;
+    return false;
+  }
+  if (config.gateway_kcp_cleanup_interval_ms <= 0) {
+    std::cerr << "Config load failed: server.gateway_kcp_cleanup_interval_ms "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_tcp_write_batch_max_bytes <= 0) {
+    std::cerr << "Config load failed: server.gateway_tcp_write_batch_max_bytes "
+              << "must be > 0." << std::endl;
+    return false;
+  }
+  if (config.gateway_tcp_write_batch_flush_us < 0) {
+    std::cerr << "Config load failed: server.gateway_tcp_write_batch_flush_us "
+              << "must be >= 0." << std::endl;
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 bool ConfigManager::Load(const std::string& config_path) {
   try {
     YAML::Node root = YAML::LoadFile(config_path);
     config_path_ = config_path;
+    server_config_ = ServerConfig{};
+    database_config_ = DatabaseConfig{};
+    log_config_ = LogConfig{};
+    service_config_ = ServiceConfig{};
+    ecs_config_ = EcsConfig{};
+    storage_engine_config_ = StorageEngineConfig{};
 
     const YAML::Node server = root["server"];
+    if (!ValidateNoRemovedKeys(root, server)) {
+      return false;
+    }
+
     server_config_.id = ReadOrDefault(server, "id", server_config_.id);
     server_config_.name = ReadOrDefault(server, "name", server_config_.name);
     server_config_.bind_ip = ReadOrDefault(server, "bind_ip", server_config_.bind_ip);
@@ -46,6 +181,22 @@ bool ConfigManager::Load(const std::string& config_path) {
     server_config_.tick_interval_ms = ReadOrDefault(server, "tick_interval_ms", server_config_.tick_interval_ms);
     server_config_.heartbeat_timeout_ms =
         ReadOrDefault(server, "heartbeat_timeout_ms", server_config_.heartbeat_timeout_ms);
+    server_config_.service_link_write_queue_size = ReadOrDefault(
+        server,
+        "service_link_write_queue_size",
+        server_config_.service_link_write_queue_size);
+    server_config_.network_low_copy_send_enabled = ReadOrDefault(
+        server,
+        "network_low_copy_send_enabled",
+        server_config_.network_low_copy_send_enabled);
+    server_config_.network_session_idle_check_interval_ms = ReadOrDefault(
+        server,
+        "network_session_idle_check_interval_ms",
+        server_config_.network_session_idle_check_interval_ms);
+    server_config_.network_session_idle_timeout_ms = ReadOrDefault(
+        server,
+        "network_session_idle_timeout_ms",
+        server_config_.network_session_idle_timeout_ms);
     server_config_.hot_event_max_drain_per_tick = ReadOrDefault(
         server,
         "hot_event_max_drain_per_tick",
@@ -148,30 +299,62 @@ bool ConfigManager::Load(const std::string& config_path) {
           "idle_timeout_ms",
           server_config_.zombie_detection_idle_timeout_ms);
     }
-    server_config_.legacy_fallback_enabled = ReadOrDefault(
-        server,
-        "legacy_fallback_enabled",
-        server_config_.legacy_fallback_enabled);
-    server_config_.legacy_fallback_allow_auth_whitelist = ReadOrDefault(
-        server,
-        "legacy_fallback_allow_auth_whitelist",
-        server_config_.legacy_fallback_allow_auth_whitelist);
-    server_config_.legacy_fallback_allow_critical_msgs = ReadOrDefault(
-        server,
-        "legacy_fallback_allow_critical_msgs",
-        server_config_.legacy_fallback_allow_critical_msgs);
-    server_config_.legacy_fallback_allow_normal_msgs = ReadOrDefault(
-        server,
-        "legacy_fallback_allow_normal_msgs",
-        server_config_.legacy_fallback_allow_normal_msgs);
-    server_config_.queue_full_fallback_non_best_effort_enabled = ReadOrDefault(
-        server,
-        "queue_full_fallback_non_best_effort_enabled",
-        server_config_.queue_full_fallback_non_best_effort_enabled);
     server_config_.chat_batch_send_enabled = ReadOrDefault(
         server,
         "chat_batch_send_enabled",
         server_config_.chat_batch_send_enabled);
+    server_config_.gateway_stale_route_cleanup_interval_ms = ReadOrDefault(
+        server,
+        "gateway_stale_route_cleanup_interval_ms",
+        server_config_.gateway_stale_route_cleanup_interval_ms);
+    server_config_.gateway_backpressure_default_pause_ms = ReadOrDefault(
+        server,
+        "gateway_backpressure_default_pause_ms",
+        server_config_.gateway_backpressure_default_pause_ms);
+    server_config_.gateway_backpressure_max_pause_ms = ReadOrDefault(
+        server,
+        "gateway_backpressure_max_pause_ms",
+        server_config_.gateway_backpressure_max_pause_ms);
+    server_config_.gateway_max_forward_payload_bytes = ReadOrDefault(
+        server,
+        "gateway_max_forward_payload_bytes",
+        server_config_.gateway_max_forward_payload_bytes);
+    server_config_.gateway_disconnect_retry_initial_backoff_ms = ReadOrDefault(
+        server,
+        "gateway_disconnect_retry_initial_backoff_ms",
+        server_config_.gateway_disconnect_retry_initial_backoff_ms);
+    server_config_.gateway_disconnect_retry_max_backoff_ms = ReadOrDefault(
+        server,
+        "gateway_disconnect_retry_max_backoff_ms",
+        server_config_.gateway_disconnect_retry_max_backoff_ms);
+    server_config_.gateway_disconnect_retry_ttl_ms = ReadOrDefault(
+        server,
+        "gateway_disconnect_retry_ttl_ms",
+        server_config_.gateway_disconnect_retry_ttl_ms);
+    server_config_.gateway_disconnect_retry_max_queue_size = ReadOrDefault(
+        server,
+        "gateway_disconnect_retry_max_queue_size",
+        server_config_.gateway_disconnect_retry_max_queue_size);
+    server_config_.gateway_holder_buffer_capacity_bytes = ReadOrDefault(
+        server,
+        "gateway_holder_buffer_capacity_bytes",
+        server_config_.gateway_holder_buffer_capacity_bytes);
+    server_config_.gateway_holder_disconnect_threshold_bytes = ReadOrDefault(
+        server,
+        "gateway_holder_disconnect_threshold_bytes",
+        server_config_.gateway_holder_disconnect_threshold_bytes);
+    server_config_.gateway_kcp_cleanup_interval_ms = ReadOrDefault(
+        server,
+        "gateway_kcp_cleanup_interval_ms",
+        server_config_.gateway_kcp_cleanup_interval_ms);
+    server_config_.gateway_tcp_write_batch_max_bytes = ReadOrDefault(
+        server,
+        "gateway_tcp_write_batch_max_bytes",
+        server_config_.gateway_tcp_write_batch_max_bytes);
+    server_config_.gateway_tcp_write_batch_flush_us = ReadOrDefault(
+        server,
+        "gateway_tcp_write_batch_flush_us",
+        server_config_.gateway_tcp_write_batch_flush_us);
     server_config_.movement_speed_violation_severity = ReadOrDefault(
         server,
         "movement_speed_violation_severity",
@@ -209,6 +392,9 @@ bool ConfigManager::Load(const std::string& config_path) {
         "enable_network_listener",
         server_config_.enable_network_listener);
     server_config_.metrics_port = ReadOrDefault(server, "metrics_port", server_config_.metrics_port);
+    if (!ValidateGatewayThresholdConfig(server_config_)) {
+      return false;
+    }
 
     const YAML::Node database = root["database"];
     database_config_.host = ReadOrDefault(database, "host", database_config_.host);
@@ -284,6 +470,12 @@ bool ConfigManager::Load(const std::string& config_path) {
     storage_engine_config_.l2_bloom_filter_bits_per_key = ReadOrDefault(
         storage_engine, "l2_bloom_filter_bits_per_key",
         storage_engine_config_.l2_bloom_filter_bits_per_key);
+    storage_engine_config_.l2_usage_soft_limit_ratio = ReadOrDefault(
+        storage_engine, "l2_usage_soft_limit_ratio",
+        storage_engine_config_.l2_usage_soft_limit_ratio);
+    storage_engine_config_.l2_usage_hard_limit_ratio = ReadOrDefault(
+        storage_engine, "l2_usage_hard_limit_ratio",
+        storage_engine_config_.l2_usage_hard_limit_ratio);
     storage_engine_config_.l2_path = ReadOrDefault(
         storage_engine, "l2_path", storage_engine_config_.l2_path);
     storage_engine_config_.l2_ttl_seconds = ReadOrDefault(
@@ -358,6 +550,39 @@ bool ConfigManager::Load(const std::string& config_path) {
     storage_engine_config_.enable_new_write_path = ReadOrDefault(
         storage_engine, "enable_new_write_path",
         storage_engine_config_.enable_new_write_path);
+    storage_engine_config_.enable_v2_encode = ReadOrDefault(
+        storage_engine, "enable_v2_encode",
+        storage_engine_config_.enable_v2_encode);
+    storage_engine_config_.enable_v2_read_fallback = ReadOrDefault(
+        storage_engine, "enable_v2_read_fallback",
+        storage_engine_config_.enable_v2_read_fallback);
+    storage_engine_config_.enable_data_encryption = ReadOrDefault(
+        storage_engine, "enable_data_encryption",
+        storage_engine_config_.enable_data_encryption);
+    storage_engine_config_.encryption_active_key_id = ReadOrDefault(
+        storage_engine, "encryption_active_key_id",
+        storage_engine_config_.encryption_active_key_id);
+    storage_engine_config_.encryption_key_env = ReadOrDefault(
+        storage_engine, "encryption_key_env",
+        storage_engine_config_.encryption_key_env);
+    storage_engine_config_.startup_fail_on_validation_error = ReadOrDefault(
+        storage_engine, "startup_fail_on_validation_error",
+        storage_engine_config_.startup_fail_on_validation_error);
+    storage_engine_config_.checkpoint_enabled = ReadOrDefault(
+        storage_engine, "checkpoint_enabled",
+        storage_engine_config_.checkpoint_enabled);
+    storage_engine_config_.checkpoint_interval_minutes = ReadOrDefault(
+        storage_engine, "checkpoint_interval_minutes",
+        storage_engine_config_.checkpoint_interval_minutes);
+    storage_engine_config_.checkpoint_retention = ReadOrDefault(
+        storage_engine, "checkpoint_retention",
+        storage_engine_config_.checkpoint_retention);
+    storage_engine_config_.tombstone_retention_seconds = ReadOrDefault(
+        storage_engine, "tombstone_retention_seconds",
+        storage_engine_config_.tombstone_retention_seconds);
+    storage_engine_config_.tombstone_gc_interval_seconds = ReadOrDefault(
+        storage_engine, "tombstone_gc_interval_seconds",
+        storage_engine_config_.tombstone_gc_interval_seconds);
     storage_engine_config_.enable_access_control = ReadOrDefault(
         storage_engine, "enable_access_control",
         storage_engine_config_.enable_access_control);

@@ -27,11 +27,13 @@ namespace mir2::logic {
 
 class PlayerPresenceService;
 class ResponseSender;
+class RoleStore;
 
 class ChatHandler {
  public:
   ChatHandler(ResponseSender& response_sender,
               PlayerPresenceService& player_presence_service,
+              RoleStore& role_store,
               mir2::game::map::AOIManager& aoi_mgr,
               entt::registry& ecs_registry,
               bool batch_send_enabled = true);
@@ -56,6 +58,7 @@ class ChatHandler {
                                 const mir2::game::chat::ChatDispatchList& dispatches);
 
   ResponseSender& response_sender_;
+  RoleStore& role_store_;
   mir2::game::map::AOIManager& aoi_mgr_;
   entt::registry& ecs_registry_;
   bool batch_send_enabled_ = true;

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -414,11 +415,14 @@ TEST(GatewayUniversalForwardTest, ConnectionHolderBuffersWhenLogicDisconnected) 
                              std::vector<uint8_t>{7, 7});
   DrainIoContext(io_context);
 
-  auto holder_it = server.connection_holders_.find(1501);
-  ASSERT_NE(holder_it, server.connection_holders_.end());
-  ASSERT_NE(holder_it->second, nullptr);
-  EXPECT_TRUE(holder_it->second->HasBufferedMessages());
-  EXPECT_EQ(server.holder_state_, ConnectionHolder::State::HOLDING);
+  {
+    std::shared_lock<std::shared_mutex> lock(server.holder_lock_);
+    auto holder_it = server.connection_holders_.find(1501);
+    ASSERT_NE(holder_it, server.connection_holders_.end());
+    ASSERT_NE(holder_it->second, nullptr);
+    EXPECT_TRUE(holder_it->second->HasBufferedMessages());
+    EXPECT_EQ(server.holder_state_, ConnectionHolder::State::HOLDING);
+  }
 }
 
 // 验证session_id为0的消息直接被丢弃。

@@ -213,6 +213,7 @@ class CoroutineExecutor {
   Task<void> SleepFor(std::chrono::steady_clock::duration duration,
                       std::stop_token stop_token = {});
 
+  // Empty input is treated as already completed.
   Task<void> WhenAll(std::vector<Task<void>> tasks,
                      ParallelSpawnRejectedCallback on_spawn_rejected = {});
 
@@ -220,6 +221,7 @@ class CoroutineExecutor {
                      ParallelSpawnRejectedCallback on_spawn_rejected,
                      WhenAllOptions options);
 
+  // Empty input returns kWhenAnyNoTaskIndex.
   Task<size_t> WhenAny(std::vector<Task<void>> tasks,
                        ParallelSpawnRejectedCallback on_spawn_rejected = {});
 

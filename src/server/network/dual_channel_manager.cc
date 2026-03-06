@@ -1,11 +1,14 @@
 #include "network/dual_channel_manager.h"
 
+#include <algorithm>
 #include <cassert>
 #include <utility>
 #include <flatbuffers/flatbuffers.h>
 
 #include "common/enums.h"
 #include "common/time_utils.h"
+#include "monitor/metrics.h"
+#include "network/control_message_parser.h"
 #include "network/handlers/kcp_upgrade_handler.h"
 #include "network/network_manager.h"
 #include "system_generated.h"
@@ -19,6 +22,10 @@ constexpr uint16_t kMsgIdKcpHeartbeatAck =
     static_cast<uint16_t>(mir2::common::MsgId::kKcpHeartbeatAck);
 constexpr uint16_t kMsgIdKcpUpgradeRequest =
     static_cast<uint16_t>(mir2::common::MsgId::kKcpUpgradeRequest);
+constexpr const char* kMetricKcpBindingCount = "network.kcp.binding_count";
+constexpr const char* kMetricKcpStaleBindingRemovedTotal =
+    "network.kcp.stale_binding_removed_total";
+constexpr const char* kMetricKcpFallbackTotal = "network.send.kcp_fallback_total";
 
 class NetworkManagerAdapter : public INetworkManager {
  public:
@@ -51,6 +58,22 @@ class NetworkManagerAdapter : public INetworkManager {
   size_t GetConnectionCount() const override { return manager_.GetConnectionCount(); }
 
   void Tick() override { manager_.Tick(); }
+
+  void SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size) {
+    manager_.SetAcceptedConnectionWriteQueueSize(max_write_queue_size);
+  }
+
+  void SetAcceptedConnectionWriteBatchOptions(size_t max_batch_bytes,
+                                              int64_t flush_interval_us) {
+    manager_.SetAcceptedConnectionWriteBatchOptions(
+        TcpConnection::WriteBatchOptions{
+            .max_batch_bytes = max_batch_bytes,
+            .flush_interval_us = flush_interval_us});
+  }
+
+  void SetAcceptedConnectionLowCopySendEnabled(bool enabled) {
+    manager_.SetAcceptedConnectionLowCopySendEnabled(enabled);
+  }
 
  private:
   NetworkManager manager_;
@@ -88,6 +111,7 @@ bool DualChannelManager::Start(const std::string& bind_ip,
                                uint16_t tcp_port,
                                uint16_t udp_port,
                                int max_connections) {
+  monitor::Metrics::Instance().SetGauge(kMetricKcpBindingCount, 0);
   if (!tcp_manager_->Start(bind_ip, tcp_port, max_connections)) {
     return false;
   }
@@ -112,8 +136,12 @@ void DualChannelManager::Stop() {
   tcp_manager_->Stop();
   kcp_upgrade_handler_.reset();
   udp_port_ = 0;
-  std::lock_guard<std::mutex> lock(mutex_);
-  kcp_sessions_.clear();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    kcp_sessions_.clear();
+    PublishKcpBindingCountLocked();
+  }
+  last_kcp_cleanup_ms_.store(0, std::memory_order_release);
 }
 
 void DualChannelManager::RegisterHandler(uint16_t msg_id, MessageHandler handler) {
@@ -159,16 +187,62 @@ void DualChannelManager::SetDefaultChannel(mir2::common::ChannelType channel) {
   router_.SetDefaultChannel(channel);
 }
 
+void DualChannelManager::SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size) {
+  auto* adapter = dynamic_cast<NetworkManagerAdapter*>(tcp_manager_.get());
+  if (!adapter) {
+    return;
+  }
+  adapter->SetAcceptedConnectionWriteQueueSize(max_write_queue_size);
+}
+
+void DualChannelManager::SetAcceptedConnectionWriteBatchOptions(
+    size_t max_batch_bytes,
+    int64_t flush_interval_us) {
+  auto* adapter = dynamic_cast<NetworkManagerAdapter*>(tcp_manager_.get());
+  if (!adapter) {
+    return;
+  }
+  adapter->SetAcceptedConnectionWriteBatchOptions(
+      max_batch_bytes, std::max<int64_t>(flush_interval_us, 0));
+}
+
+void DualChannelManager::SetAcceptedConnectionLowCopySendEnabled(bool enabled) {
+  auto* adapter = dynamic_cast<NetworkManagerAdapter*>(tcp_manager_.get());
+  if (!adapter) {
+    return;
+  }
+  adapter->SetAcceptedConnectionLowCopySendEnabled(enabled);
+}
+
+void DualChannelManager::SetKcpCleanupIntervalMs(int64_t interval_ms) {
+  kcp_cleanup_interval_ms_ = std::max<int64_t>(interval_ms, 1);
+  last_kcp_cleanup_ms_.store(0, std::memory_order_release);
+}
+
 void DualChannelManager::Send(uint64_t session_id,
                               uint16_t msg_id,
                               const std::vector<uint8_t>& payload) {
-  const auto kcp_session = GetKcpSession(session_id);
-  const bool kcp_available = kcp_session && kcp_session->HasRemoteEndpoint();
+  const bool prefer_kcp = router_.GetChannel(msg_id) == mir2::common::ChannelType::kKcp;
+  auto kcp_session = GetKcpSession(session_id);
+  bool kcp_available = kcp_session && kcp_session->HasRemoteEndpoint();
+  if (kcp_available) {
+    auto tcp_session = tcp_manager_->GetSession(session_id);
+    if (!tcp_session ||
+        tcp_session->GetState() == TcpSession::SessionState::kClosed) {
+      RemoveKcpBinding(session_id, /*stale=*/true);
+      kcp_session.reset();
+      kcp_available = false;
+    }
+  }
   const auto channel = router_.GetChannelWithFallback(msg_id, kcp_available);
 
   if (channel == mir2::common::ChannelType::kKcp && kcp_available) {
     kcp_session->Send(msg_id, payload);
     return;
+  }
+
+  if (prefer_kcp && !kcp_available) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricKcpFallbackTotal);
   }
 
   tcp_manager_->Send(session_id, msg_id, payload);
@@ -212,6 +286,15 @@ size_t DualChannelManager::GetConnectionCount() const {
 
 void DualChannelManager::Tick() {
   tcp_manager_->Tick();
+  const int64_t now_ms = static_cast<int64_t>(mir2::common::now_ms());
+  const int64_t last_cleanup_ms =
+      last_kcp_cleanup_ms_.load(std::memory_order_acquire);
+  const int64_t cleanup_interval_ms = std::max<int64_t>(kcp_cleanup_interval_ms_, 1);
+  if (last_cleanup_ms != 0 && now_ms >= last_cleanup_ms &&
+      now_ms - last_cleanup_ms < cleanup_interval_ms) {
+    return;
+  }
+  last_kcp_cleanup_ms_.store(now_ms, std::memory_order_release);
   CleanupKcpSessions();
 }
 
@@ -234,19 +317,71 @@ bool DualChannelManager::BindKcpSession(uint64_t session_id,
     }
   }
 
-  std::lock_guard<std::mutex> lock(mutex_);
-  kcp_sessions_[session_id] = KcpBinding{ kcp_session, kcp_session->GetConvId() };
+  const uint32_t new_conv_id = kcp_session->GetConvId();
+  uint32_t old_conv_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = kcp_sessions_.find(session_id);
+    if (it != kcp_sessions_.end()) {
+      old_conv_id = it->second.conv_id;
+    }
+    kcp_sessions_[session_id] = KcpBinding{kcp_session, new_conv_id};
+    PublishKcpBindingCountLocked();
+  }
+
+  if (old_conv_id != 0 && old_conv_id != new_conv_id) {
+    kcp_server_->RemoveSession(old_conv_id);
+  }
+  return true;
+}
+
+bool DualChannelManager::TryBindKcpSessionIfAbsent(
+    uint64_t session_id,
+    const std::shared_ptr<KcpSession>& kcp_session) {
+  if (!kcp_session) {
+    return false;
+  }
+
+  auto tcp_session = tcp_manager_->GetSession(session_id);
+  if (!tcp_session) {
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (kcp_sessions_.find(session_id) != kcp_sessions_.end()) {
+      return false;
+    }
+  }
+
+  kcp_session->BindTcpSession(tcp_session);
+  if (!kcp_server_->AddSession(kcp_session)) {
+    auto existing = kcp_server_->GetSession(kcp_session->GetConvId());
+    if (existing != kcp_session) {
+      return false;
+    }
+  }
+
+  bool inserted = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto [it, ok] = kcp_sessions_.emplace(
+        session_id, KcpBinding{kcp_session, kcp_session->GetConvId()});
+    if (ok) {
+      inserted = true;
+      PublishKcpBindingCountLocked();
+    }
+  }
+
+  if (!inserted) {
+    kcp_server_->RemoveSession(kcp_session->GetConvId());
+    return false;
+  }
   return true;
 }
 
 void DualChannelManager::UnbindKcpSession(uint64_t session_id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = kcp_sessions_.find(session_id);
-  if (it == kcp_sessions_.end()) {
-    return;
-  }
-  kcp_server_->RemoveSession(it->second.conv_id);
-  kcp_sessions_.erase(it);
+  (void)RemoveKcpBinding(session_id, /*stale=*/false);
 }
 
 std::shared_ptr<KcpSession> DualChannelManager::GetKcpSession(uint64_t session_id) const {
@@ -266,16 +401,8 @@ void DualChannelManager::HandleKcpMessage(const std::shared_ptr<KcpSession>& ses
 
   if (packet.msg_id == kMsgIdKcpHeartbeat) {
     uint32_t timestamp = static_cast<uint32_t>(mir2::common::now_ms());
-    if (!packet.payload.empty()) {
-      flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
-      if (verifier.VerifyBuffer<mir2::proto::KcpHeartbeat>(nullptr)) {
-        const auto* heartbeat =
-            flatbuffers::GetRoot<mir2::proto::KcpHeartbeat>(packet.payload.data());
-        if (heartbeat) {
-          timestamp = heartbeat->timestamp();
-        }
-      }
-    }
+    (void)ControlMessageParser::ParseKcpHeartbeatTimestamp(
+        packet.payload, timestamp, &timestamp);
 
     flatbuffers::FlatBufferBuilder builder;
     const auto ack = mir2::proto::CreateKcpHeartbeatAck(builder, timestamp);
@@ -294,39 +421,64 @@ void DualChannelManager::HandleKcpMessage(const std::shared_ptr<KcpSession>& ses
   kcp_dispatcher_.Dispatch(tcp_session, packet.msg_id, packet.payload);
 }
 
-void DualChannelManager::CleanupKcpSessions() {
-  std::vector<std::pair<uint64_t, KcpBinding>> snapshot;
+bool DualChannelManager::RemoveKcpBinding(uint64_t session_id, bool stale) {
+  uint32_t conv_id = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    snapshot.reserve(kcp_sessions_.size());
-    for (const auto& entry : kcp_sessions_) {
-      snapshot.push_back(entry);
+    auto it = kcp_sessions_.find(session_id);
+    if (it == kcp_sessions_.end()) {
+      return false;
     }
+    conv_id = it->second.conv_id;
+    kcp_sessions_.erase(it);
+    PublishKcpBindingCountLocked();
   }
-
-  std::vector<uint64_t> expired;
-  std::vector<uint32_t> convs_to_remove;
-  for (const auto& entry : snapshot) {
-    const uint64_t session_id = entry.first;
-    const auto& binding = entry.second;
-    auto kcp_session = binding.session.lock();
-    auto tcp_session = tcp_manager_->GetSession(session_id);
-    if (!kcp_session || !tcp_session ||
-        tcp_session->GetState() != TcpSession::SessionState::kActive) {
-      expired.push_back(session_id);
-      convs_to_remove.push_back(binding.conv_id);
-    }
-  }
-
-  if (!expired.empty()) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (uint64_t session_id : expired) {
-      kcp_sessions_.erase(session_id);
-    }
-  }
-
-  for (uint32_t conv_id : convs_to_remove) {
+  if (conv_id != 0) {
     kcp_server_->RemoveSession(conv_id);
+  }
+  if (stale) {
+    monitor::Metrics::Instance().IncrementCounter(kMetricKcpStaleBindingRemovedTotal);
+  }
+  return true;
+}
+
+void DualChannelManager::PublishKcpBindingCountLocked() const {
+  monitor::Metrics::Instance().SetGauge(
+      kMetricKcpBindingCount, static_cast<double>(kcp_sessions_.size()));
+}
+
+void DualChannelManager::CleanupKcpSessions() {
+  std::vector<uint64_t> expired;
+  std::vector<uint64_t> active;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    expired.reserve(kcp_sessions_.size());
+    active.reserve(kcp_sessions_.size());
+    for (const auto& [session_id, binding] : kcp_sessions_) {
+      if (binding.session.expired()) {
+        expired.push_back(session_id);
+      } else {
+        active.push_back(session_id);
+      }
+    }
+  }
+
+  for (uint64_t session_id : expired) {
+    RemoveKcpBinding(session_id, /*stale=*/true);
+  }
+
+  std::vector<uint64_t> tcp_gone;
+  tcp_gone.reserve(active.size());
+  for (uint64_t session_id : active) {
+    auto tcp_session = tcp_manager_->GetSession(session_id);
+    if (!tcp_session ||
+        tcp_session->GetState() == TcpSession::SessionState::kClosed) {
+      tcp_gone.push_back(session_id);
+    }
+  }
+
+  for (uint64_t session_id : tcp_gone) {
+    RemoveKcpBinding(session_id, /*stale=*/true);
   }
 }
 

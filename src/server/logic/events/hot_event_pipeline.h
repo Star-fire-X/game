@@ -32,6 +32,7 @@ class HotEventPipeline {
   HotEventPipeline() = default;
 
   void InitializeFromEnv();
+  void ForceEnable() noexcept { enabled_ = true; }
   bool enabled() const { return enabled_; }
 
   EnqueueResult TryEnqueue(const HandlerContext& ctx,

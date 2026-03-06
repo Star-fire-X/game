@@ -1,7 +1,9 @@
 #include "network/tcp_server.h"
 
+#include <algorithm>
 #include <filesystem>
-#include <iostream>
+
+#include "log/logger.h"
 
 namespace mir2::network {
 
@@ -13,24 +15,35 @@ bool TcpServer::Start(const std::string& bind_ip, uint16_t port, int max_connect
   StopAndResetAcceptors();
   CleanupUnixSocketPath();
 
-  asio::ip::tcp::endpoint endpoint(asio::ip::make_address(bind_ip), port);
+  asio::error_code ec;
+  asio::ip::address bind_address = asio::ip::address_v4::any();
+  if (!bind_ip.empty()) {
+    bind_address = asio::ip::make_address(bind_ip, ec);
+    if (ec) {
+      SYSLOG_ERROR("Invalid bind IP '{}': {}", bind_ip, ec.message());
+      return false;
+    }
+  }
+  asio::ip::tcp::endpoint endpoint(bind_address, port);
   tcp_acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(io_context_);
 
-  asio::error_code ec;
   tcp_acceptor_->open(endpoint.protocol(), ec);
   if (ec) {
-    std::cerr << "Failed to open acceptor: " << ec.message() << std::endl;
+    SYSLOG_ERROR("Failed to open TCP acceptor: {}", ec.message());
     return false;
   }
   tcp_acceptor_->set_option(asio::socket_base::reuse_address(true), ec);
   tcp_acceptor_->bind(endpoint, ec);
   if (ec) {
-    std::cerr << "Failed to bind acceptor: " << ec.message() << std::endl;
+    SYSLOG_ERROR("Failed to bind TCP acceptor {}:{}: {}",
+                 endpoint.address().to_string(),
+                 endpoint.port(),
+                 ec.message());
     return false;
   }
   tcp_acceptor_->listen(asio::socket_base::max_listen_connections, ec);
   if (ec) {
-    std::cerr << "Failed to listen: " << ec.message() << std::endl;
+    SYSLOG_ERROR("Failed to listen on TCP acceptor: {}", ec.message());
     return false;
   }
 
@@ -45,7 +58,7 @@ bool TcpServer::StartUnix(const std::string& socket_path, int max_connections) {
   CleanupUnixSocketPath();
 
   if (socket_path.empty()) {
-    std::cerr << "Failed to start uds server: socket_path is empty" << std::endl;
+    SYSLOG_ERROR("Failed to start UDS server: socket_path is empty");
     return false;
   }
 
@@ -55,7 +68,9 @@ bool TcpServer::StartUnix(const std::string& socket_path, int max_connections) {
   if (!parent.empty()) {
     std::filesystem::create_directories(parent, fs_ec);
     if (fs_ec) {
-      std::cerr << "Failed to create uds parent dir: " << fs_ec.message() << std::endl;
+      SYSLOG_ERROR("Failed to create UDS parent directory '{}': {}",
+                   parent.string(),
+                   fs_ec.message());
       return false;
     }
   }
@@ -69,19 +84,25 @@ bool TcpServer::StartUnix(const std::string& socket_path, int max_connections) {
   asio::error_code ec;
   uds_acceptor_->open(endpoint.protocol(), ec);
   if (ec) {
-    std::cerr << "Failed to open uds acceptor: " << ec.message() << std::endl;
+    SYSLOG_ERROR("Failed to open UDS acceptor '{}': {}",
+                 socket_path,
+                 ec.message());
     return false;
   }
   uds_acceptor_->bind(endpoint, ec);
   if (ec) {
     std::filesystem::remove(path, fs_ec);
-    std::cerr << "Failed to bind uds acceptor: " << ec.message() << std::endl;
+    SYSLOG_ERROR("Failed to bind UDS acceptor '{}': {}",
+                 socket_path,
+                 ec.message());
     return false;
   }
   uds_acceptor_->listen(asio::socket_base::max_listen_connections, ec);
   if (ec) {
     std::filesystem::remove(path, fs_ec);
-    std::cerr << "Failed to listen uds acceptor: " << ec.message() << std::endl;
+    SYSLOG_ERROR("Failed to listen on UDS acceptor '{}': {}",
+                 socket_path,
+                 ec.message());
     return false;
   }
 
@@ -100,6 +121,20 @@ bool TcpServer::StartUnix(const std::string& socket_path, int max_connections) {
 void TcpServer::Stop() {
   StopAndResetAcceptors();
   CleanupUnixSocketPath();
+}
+
+void TcpServer::SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size) {
+  accepted_connection_write_queue_size_ = std::max<size_t>(max_write_queue_size, 1);
+}
+
+void TcpServer::SetAcceptedConnectionWriteBatchOptions(
+    TcpConnection::WriteBatchOptions options) {
+  options.flush_interval_us = std::max<int64_t>(options.flush_interval_us, 0);
+  accepted_connection_write_batch_options_ = options;
+}
+
+void TcpServer::SetAcceptedConnectionLowCopySendEnabled(bool enabled) {
+  accepted_connection_low_copy_send_enabled_ = enabled;
 }
 
 void TcpServer::StopAndResetAcceptors() {
@@ -133,7 +168,10 @@ void TcpServer::DoAccept() {
         uint64_t connection_id = next_connection_id_.fetch_add(1);
         auto connection = std::make_shared<TcpConnection>(
             std::make_unique<AsioSocketAdapter>(std::move(socket)),
-            connection_id);
+            connection_id,
+            accepted_connection_write_queue_size_,
+            accepted_connection_write_batch_options_);
+        connection->SetLowCopySendEnabled(accepted_connection_low_copy_send_enabled_);
         if (connect_handler_) {
           connect_handler_(connection);
         } else {
@@ -153,7 +191,10 @@ void TcpServer::DoAccept() {
             uint64_t connection_id = next_connection_id_.fetch_add(1);
             auto connection = std::make_shared<TcpConnection>(
                 std::make_unique<UdsSocketAdapter>(std::move(socket)),
-                connection_id);
+                connection_id,
+                accepted_connection_write_queue_size_,
+                accepted_connection_write_batch_options_);
+            connection->SetLowCopySendEnabled(accepted_connection_low_copy_send_enabled_);
             if (connect_handler_) {
               connect_handler_(connection);
             } else {

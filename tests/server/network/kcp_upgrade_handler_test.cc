@@ -2,7 +2,9 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <flatbuffers/flatbuffers.h>
@@ -33,6 +35,7 @@ constexpr uint16_t kMsgIdKcpUpgradeResponse =
 constexpr uint16_t kErrorUnsupported = 1;
 constexpr uint16_t kErrorInvalidRequest = 2;
 constexpr uint16_t kErrorServerFailed = 3;
+constexpr uint16_t kErrorAlreadyBound = 4;
 
 class MockKcpServer : public IKcpServer {
  public:
@@ -52,7 +55,12 @@ class MockKcpServer : public IKcpServer {
 class MockDualChannelManager : public IDualChannelManager {
  public:
   MOCK_METHOD(IKcpServer&, GetKcpServer, (), (override));
+  MOCK_METHOD(std::shared_ptr<KcpSession>, GetKcpSession, (uint64_t session_id),
+              (const, override));
   MOCK_METHOD(bool, BindKcpSession,
+              (uint64_t session_id, const std::shared_ptr<KcpSession>& kcp_session),
+              (override));
+  MOCK_METHOD(bool, TryBindKcpSessionIfAbsent,
               (uint64_t session_id, const std::shared_ptr<KcpSession>& kcp_session),
               (override));
 };
@@ -141,7 +149,7 @@ TEST(KcpUpgradeHandlerTest, V1Protocol_Disallowed_ReturnsUnsupported) {
   EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
   EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(false));
   EXPECT_CALL(kcp_server, AllocateConvId()).Times(0);
-  EXPECT_CALL(manager, BindKcpSession(_, _)).Times(0);
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(_, _)).Times(0);
 
   std::vector<uint8_t> payload;
   EXPECT_CALL(*session, Send(kMsgIdKcpUpgradeResponse, _))
@@ -167,8 +175,10 @@ TEST(KcpUpgradeHandlerTest, InvalidPayload_ReturnsInvalidRequest) {
       .WillRepeatedly(ReturnRef(kcp_server));
   EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
   EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(*session, GetSessionId()).WillOnce(Return(5100));
+  EXPECT_CALL(manager, GetKcpSession(_)).WillOnce(Return(nullptr));
   EXPECT_CALL(kcp_server, AllocateConvId()).Times(0);
-  EXPECT_CALL(manager, BindKcpSession(_, _)).Times(0);
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(_, _)).Times(0);
 
   std::vector<uint8_t> invalid_payload = {0x01, 0x02, 0x03};
   std::vector<uint8_t> payload;
@@ -195,9 +205,11 @@ TEST(KcpUpgradeHandlerTest, CreateSessionFailure_ReturnsServerFailed) {
       .WillRepeatedly(ReturnRef(kcp_server));
   EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
   EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(*session, GetSessionId()).WillOnce(Return(5200));
+  EXPECT_CALL(manager, GetKcpSession(_)).WillOnce(Return(nullptr));
   EXPECT_CALL(kcp_server, AllocateConvId()).WillOnce(Return(42));
   EXPECT_CALL(kcp_server, CreateSession(42, _)).WillOnce(Return(nullptr));
-  EXPECT_CALL(manager, BindKcpSession(_, _)).Times(0);
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(_, _)).Times(0);
   EXPECT_CALL(kcp_server, RemoveSession(_)).Times(0);
 
   std::vector<uint8_t> payload;
@@ -227,10 +239,14 @@ TEST(KcpUpgradeHandlerTest, BindFailure_RemovesSessionAndReturnsServerFailed) {
       .WillRepeatedly(ReturnRef(kcp_server));
   EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
   EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(manager, GetKcpSession(_))
+      .WillOnce(Return(nullptr))
+      .WillOnce(Return(nullptr));
   EXPECT_CALL(*session, GetSessionId()).WillRepeatedly(Return(5000));
   EXPECT_CALL(kcp_server, AllocateConvId()).WillOnce(Return(100));
   EXPECT_CALL(kcp_server, CreateSession(100, _)).WillOnce(Return(kcp_session));
-  EXPECT_CALL(manager, BindKcpSession(5000, kcp_session)).WillOnce(Return(false));
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(5000, kcp_session))
+      .WillOnce(Return(false));
   EXPECT_CALL(kcp_server, RemoveSession(100)).Times(1);
 
   std::vector<uint8_t> payload;
@@ -244,6 +260,44 @@ TEST(KcpUpgradeHandlerTest, BindFailure_RemovesSessionAndReturnsServerFailed) {
   EXPECT_EQ(response.error_code, kErrorServerFailed);
   EXPECT_EQ(response.conv_id, 0u);
   EXPECT_EQ(response.server_udp_port, 9101);
+}
+
+TEST(KcpUpgradeHandlerTest, BindRaceFailure_ReturnsAlreadyBound) {
+  StrictMock<MockDualChannelManager> manager;
+  StrictMock<MockKcpServer> kcp_server;
+  KcpUpgradeHandler handler(manager, 9102);
+  auto session = std::make_shared<StrictMock<MockTcpSession>>();
+  auto existing_kcp_session = std::make_shared<KcpSession>(
+      101, std::array<uint8_t, KcpSession::kTokenSize>{});
+  auto created_kcp_session = std::make_shared<KcpSession>(
+      102, std::array<uint8_t, KcpSession::kTokenSize>{});
+
+  EXPECT_CALL(manager, GetKcpServer())
+      .Times(testing::AtLeast(1))
+      .WillRepeatedly(ReturnRef(kcp_server));
+  EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
+  EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(*session, GetSessionId()).WillRepeatedly(Return(5001));
+  EXPECT_CALL(manager, GetKcpSession(_))
+      .WillOnce(Return(nullptr))
+      .WillOnce(Return(existing_kcp_session));
+  EXPECT_CALL(kcp_server, AllocateConvId()).WillOnce(Return(102));
+  EXPECT_CALL(kcp_server, CreateSession(102, _)).WillOnce(Return(created_kcp_session));
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(5001, created_kcp_session))
+      .WillOnce(Return(false));
+  EXPECT_CALL(kcp_server, RemoveSession(102)).Times(1);
+
+  std::vector<uint8_t> payload;
+  EXPECT_CALL(*session, Send(kMsgIdKcpUpgradeResponse, _))
+      .WillOnce(SaveArg<1>(&payload));
+
+  handler.HandleKcpUpgradeRequest(session, BuildValidRequest(2002));
+
+  const auto response = ParseResponse(payload);
+  EXPECT_FALSE(response.success);
+  EXPECT_EQ(response.error_code, kErrorAlreadyBound);
+  EXPECT_EQ(response.conv_id, 0u);
+  EXPECT_EQ(response.server_udp_port, 9102);
 }
 
 TEST(KcpUpgradeHandlerTest, V2Protocol_Success_AllocatesConvAndToken) {
@@ -261,11 +315,13 @@ TEST(KcpUpgradeHandlerTest, V2Protocol_Success_AllocatesConvAndToken) {
       .WillRepeatedly(ReturnRef(kcp_server));
   EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
   EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(manager, GetKcpSession(_)).WillOnce(Return(nullptr));
   EXPECT_CALL(*session, GetSessionId()).WillRepeatedly(Return(7000));
   EXPECT_CALL(kcp_server, AllocateConvId()).WillOnce(Return(321));
   EXPECT_CALL(kcp_server, CreateSession(321, _))
       .WillOnce(DoAll(SaveArg<1>(&captured_token), Return(kcp_session)));
-  EXPECT_CALL(manager, BindKcpSession(7000, kcp_session)).WillOnce(Return(true));
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(7000, kcp_session))
+      .WillOnce(Return(true));
 
   std::vector<uint8_t> payload;
   EXPECT_CALL(*session, Send(kMsgIdKcpUpgradeResponse, _))
@@ -283,6 +339,120 @@ TEST(KcpUpgradeHandlerTest, V2Protocol_Success_AllocatesConvAndToken) {
                                    captured_token.size());
   EXPECT_EQ(response.session_token, expected_token);
   EXPECT_EQ(response.session_token.size(), captured_token.size());
+}
+
+TEST(KcpUpgradeHandlerTest, RepeatedUpgradeRequest_ReturnsAlreadyBound) {
+  StrictMock<MockDualChannelManager> manager;
+  StrictMock<MockKcpServer> kcp_server;
+  KcpUpgradeHandler handler(manager, 9300);
+  auto session = std::make_shared<StrictMock<MockTcpSession>>();
+  auto existing_kcp_session = std::make_shared<KcpSession>(
+      911, std::array<uint8_t, KcpSession::kTokenSize>{});
+
+  EXPECT_CALL(manager, GetKcpServer())
+      .Times(testing::AtLeast(1))
+      .WillRepeatedly(ReturnRef(kcp_server));
+  EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
+  EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(*session, GetSessionId()).WillOnce(Return(8000));
+  EXPECT_CALL(manager, GetKcpSession(8000)).WillOnce(Return(existing_kcp_session));
+  EXPECT_CALL(kcp_server, AllocateConvId()).Times(0);
+  EXPECT_CALL(kcp_server, CreateSession(_, _)).Times(0);
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(_, _)).Times(0);
+
+  std::vector<uint8_t> payload;
+  EXPECT_CALL(*session, Send(kMsgIdKcpUpgradeResponse, _))
+      .WillOnce(SaveArg<1>(&payload));
+
+  handler.HandleKcpUpgradeRequest(session, BuildValidRequest(3001));
+
+  const auto response = ParseResponse(payload);
+  EXPECT_FALSE(response.success);
+  EXPECT_EQ(response.error_code, kErrorAlreadyBound);
+  EXPECT_EQ(response.conv_id, 0u);
+  EXPECT_EQ(response.server_udp_port, 9300);
+}
+
+TEST(KcpUpgradeHandlerTest, StaleUnconfirmedBinding_AllowsRebind) {
+  using namespace std::chrono_literals;
+
+  StrictMock<MockDualChannelManager> manager;
+  StrictMock<MockKcpServer> kcp_server;
+  KcpUpgradeHandler handler(manager, 9400);
+  auto session = std::make_shared<StrictMock<MockTcpSession>>();
+  auto existing_kcp_session = std::make_shared<KcpSession>(
+      1001, std::array<uint8_t, KcpSession::kTokenSize>{});
+  auto replacement_kcp_session = std::make_shared<KcpSession>(
+      1002, std::array<uint8_t, KcpSession::kTokenSize>{});
+
+  std::this_thread::sleep_for(1100ms);
+
+  EXPECT_CALL(manager, GetKcpServer())
+      .Times(testing::AtLeast(1))
+      .WillRepeatedly(ReturnRef(kcp_server));
+  EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
+  EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(*session, GetSessionId()).WillRepeatedly(Return(8100));
+  EXPECT_CALL(manager, GetKcpSession(8100)).WillOnce(Return(existing_kcp_session));
+  EXPECT_CALL(kcp_server, AllocateConvId()).WillOnce(Return(1002));
+  EXPECT_CALL(kcp_server, CreateSession(1002, _)).WillOnce(Return(replacement_kcp_session));
+  EXPECT_CALL(manager, BindKcpSession(8100, replacement_kcp_session)).WillOnce(Return(true));
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(_, _)).Times(0);
+  EXPECT_CALL(kcp_server, RemoveSession(_)).Times(0);
+
+  std::vector<uint8_t> payload;
+  EXPECT_CALL(*session, Send(kMsgIdKcpUpgradeResponse, _))
+      .WillOnce(SaveArg<1>(&payload));
+
+  handler.HandleKcpUpgradeRequest(session, BuildValidRequest(3002));
+
+  const auto response = ParseResponse(payload);
+  EXPECT_TRUE(response.success);
+  EXPECT_EQ(response.error_code, 0u);
+  EXPECT_EQ(response.conv_id, 1002u);
+  EXPECT_EQ(response.server_udp_port, 9400);
+}
+
+TEST(KcpUpgradeHandlerTest, StaleConfirmedBinding_AllowsRebind) {
+  using namespace std::chrono_literals;
+
+  StrictMock<MockDualChannelManager> manager;
+  StrictMock<MockKcpServer> kcp_server;
+  KcpUpgradeHandler handler(manager, 9401);
+  auto session = std::make_shared<StrictMock<MockTcpSession>>();
+  auto existing_kcp_session = std::make_shared<KcpSession>(
+      1003, std::array<uint8_t, KcpSession::kTokenSize>{});
+  existing_kcp_session->SetRemoteEndpoint(
+      asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9001));
+  auto replacement_kcp_session = std::make_shared<KcpSession>(
+      1004, std::array<uint8_t, KcpSession::kTokenSize>{});
+
+  std::this_thread::sleep_for(1100ms);
+
+  EXPECT_CALL(manager, GetKcpServer())
+      .Times(testing::AtLeast(1))
+      .WillRepeatedly(ReturnRef(kcp_server));
+  EXPECT_CALL(kcp_server, IsRunning()).WillOnce(Return(true));
+  EXPECT_CALL(*session, IsKcpUpgradeAllowed()).WillOnce(Return(true));
+  EXPECT_CALL(*session, GetSessionId()).WillRepeatedly(Return(8101));
+  EXPECT_CALL(manager, GetKcpSession(8101)).WillOnce(Return(existing_kcp_session));
+  EXPECT_CALL(kcp_server, AllocateConvId()).WillOnce(Return(1004));
+  EXPECT_CALL(kcp_server, CreateSession(1004, _)).WillOnce(Return(replacement_kcp_session));
+  EXPECT_CALL(manager, BindKcpSession(8101, replacement_kcp_session)).WillOnce(Return(true));
+  EXPECT_CALL(manager, TryBindKcpSessionIfAbsent(_, _)).Times(0);
+  EXPECT_CALL(kcp_server, RemoveSession(_)).Times(0);
+
+  std::vector<uint8_t> payload;
+  EXPECT_CALL(*session, Send(kMsgIdKcpUpgradeResponse, _))
+      .WillOnce(SaveArg<1>(&payload));
+
+  handler.HandleKcpUpgradeRequest(session, BuildValidRequest(3003));
+
+  const auto response = ParseResponse(payload);
+  EXPECT_TRUE(response.success);
+  EXPECT_EQ(response.error_code, 0u);
+  EXPECT_EQ(response.conv_id, 1004u);
+  EXPECT_EQ(response.server_udp_port, 9401);
 }
 
 }  // namespace mir2::network

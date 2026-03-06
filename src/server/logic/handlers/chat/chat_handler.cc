@@ -21,6 +21,7 @@
 #include "logic/handlers/handler_error_utils.h"
 #include "logic/response_sender.h"
 #include "logic/services/player_presence_service.h"
+#include "logic/services/session_role_store.h"
 #include "monitor/metrics.h"
 
 namespace mir2::logic {
@@ -111,10 +112,12 @@ uint64_t HashPayload(const std::vector<uint8_t>& payload) {
 
 ChatHandler::ChatHandler(ResponseSender& response_sender,
                          PlayerPresenceService& player_presence_service,
+                         RoleStore& role_store,
                          mir2::game::map::AOIManager& aoi_mgr,
                          entt::registry& ecs_registry,
                          bool batch_send_enabled)
     : response_sender_(response_sender),
+      role_store_(role_store),
       aoi_mgr_(aoi_mgr),
       ecs_registry_(ecs_registry),
       batch_send_enabled_(batch_send_enabled),
@@ -474,12 +477,19 @@ Task<void> ChatHandler::SendChatDispatches(
 
   if (!batch_send_enabled_) {
     for (const auto& dispatch : dispatches) {
-      const uint64_t client_id = dispatch.first;
+      const uint64_t role_id = dispatch.first;
       const auto& payload = dispatch.second;
-      if (client_id == 0 || payload.empty()) {
+      if (role_id == 0 || payload.empty()) {
         ++dropped;
         continue;
       }
+
+      const auto client_id_opt = role_store_.GetClientIdByRoleId(role_id);
+      if (!client_id_opt.has_value()) {
+        ++dropped;
+        continue;
+      }
+      const uint64_t client_id = *client_id_opt;
 
       ++recipient_total;
       try {
@@ -504,13 +514,20 @@ Task<void> ChatHandler::SendChatDispatches(
     hash_to_batch_indices.reserve(dispatches.size());
 
     for (const auto& dispatch : dispatches) {
-      const uint64_t client_id = dispatch.first;
+      const uint64_t role_id = dispatch.first;
       const auto& payload = dispatch.second;
 
-      if (client_id == 0 || payload.empty()) {
+      if (role_id == 0 || payload.empty()) {
         ++dropped;
         continue;
       }
+
+      const auto client_id_opt = role_store_.GetClientIdByRoleId(role_id);
+      if (!client_id_opt.has_value()) {
+        ++dropped;
+        continue;
+      }
+      const uint64_t client_id = *client_id_opt;
 
       const uint64_t payload_hash = HashPayload(payload);
       bool grouped = false;

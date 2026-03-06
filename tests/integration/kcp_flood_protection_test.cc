@@ -14,13 +14,7 @@
 
 #include "common/enums.h"
 #include "common/time_utils.h"
-
-// Expose KcpServer internals for stress validation.
-#define private public
-#define protected public
 #include "network/kcp_server.h"
-#undef private
-#undef protected
 
 namespace mir2::test::integration {
 namespace {
@@ -75,12 +69,12 @@ class KcpUdpClient {
 
     session_.SetRemoteEndpoint(server_endpoint);
     session_.SetOutputHandler(
-        [this](const asio::ip::udp::endpoint& endpoint, const uint8_t* data, size_t size) {
+        [this](const asio::ip::udp::endpoint& endpoint, std::vector<uint8_t>&& packet) {
           if (last_error_) {
             return;
           }
           asio::error_code send_ec;
-          socket_.send_to(asio::buffer(data, size), endpoint, 0, send_ec);
+          socket_.send_to(asio::buffer(packet), endpoint, 0, send_ec);
         });
   }
 
@@ -122,16 +116,16 @@ class KcpFloodProtectionTest : public ::testing::Test {
     limiter_config.max_packets_per_sec = kRateLimitPps;
     limiter_config.window_ms = 1000;
     limiter_config.idle_expire_ms = 60000;
-    server_->rate_limiter_.config_ = limiter_config;
+    server_->SetRateLimiterConfig(limiter_config);
 
     ConvBlacklist::Config blacklist_config{};
     blacklist_config.max_failures = 3;
     blacklist_config.blacklist_ttl_ms = 5 * 60 * 1000;
     blacklist_config.failure_ttl_ms = 5 * 60 * 1000;
-    server_->blacklist_.config_ = blacklist_config;
+    server_->SetConvBlacklistConfig(blacklist_config);
 
     ASSERT_TRUE(server_->Start("127.0.0.1", 0));
-    port_ = server_->socket_.local_endpoint().port();
+    port_ = server_->GetBoundPort();
 
     io_thread_ = std::thread([this]() { io_context_.run(); });
   }
@@ -343,15 +337,19 @@ TEST_F(KcpFloodProtectionTest, ConvBlacklistProtection) {
   for (int i = 0; i < 3; ++i) {
     SendInvalidTokenPacket(raw_socket, server_endpoint, bad_conv, wrong_token);
   }
+  const uint32_t attacker_ip_u32 = asio::ip::make_address_v4(attacker_ip).to_uint();
+  const uint32_t legit_ip_u32 = asio::ip::make_address_v4(legit_ip).to_uint();
   const auto blacklist_deadline = std::chrono::steady_clock::now() +
       std::chrono::milliseconds(200);
   while (std::chrono::steady_clock::now() < blacklist_deadline) {
-    if (server().blacklist_.IsBlacklisted(bad_conv, mir2::common::now_ms())) {
+    if (server().IsConvBlacklisted(
+            bad_conv, attacker_ip_u32, mir2::common::now_ms())) {
       break;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  EXPECT_TRUE(server().blacklist_.IsBlacklisted(bad_conv, mir2::common::now_ms()));
+  EXPECT_TRUE(server().IsConvBlacklisted(
+      bad_conv, attacker_ip_u32, mir2::common::now_ms()));
 
   bad_client.Send(kTestMsgId, {});
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -365,7 +363,8 @@ TEST_F(KcpFloodProtectionTest, ConvBlacklistProtection) {
 
   good_client.Send(kTestMsgId, {});
   EXPECT_TRUE(WaitForCount(good_processed, 1, std::chrono::milliseconds(200)));
-  EXPECT_FALSE(server().blacklist_.IsBlacklisted(good_conv, mir2::common::now_ms()));
+  EXPECT_FALSE(server().IsConvBlacklisted(
+      good_conv, legit_ip_u32, mir2::common::now_ms()));
 }
 
 }  // namespace mir2::test::integration

@@ -5,6 +5,13 @@ namespace mir2::network {
 IpRateLimiter::IpRateLimiter() : config_({}) {}
 IpRateLimiter::IpRateLimiter(Config config) : config_(config) {}
 
+void IpRateLimiter::SetConfig(Config config) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  config_ = config;
+  buckets_.clear();
+  last_cleanup_ms_ = 0;
+}
+
 bool IpRateLimiter::Allow(uint32_t ip, int64_t now_ms) {
   std::lock_guard<std::mutex> lock(mutex_);
 

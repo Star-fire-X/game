@@ -1,17 +1,11 @@
 #include "network/network_manager.h"
 
+#include <algorithm>
 #include <asio/post.hpp>
 
 #include <shared_mutex>
 
 #include "monitor/metrics.h"
-
-namespace {
-
-constexpr int64_t kHeartbeatCheckIntervalMs = 30000;
-constexpr int64_t kHeartbeatTimeoutMs = 90000;
-
-}  // namespace
 
 namespace mir2::network {
 
@@ -23,10 +17,12 @@ NetworkManager::NetworkManager(asio::io_context& io_context)
 }
 
 bool NetworkManager::Start(const std::string& bind_ip, uint16_t port, int max_connections) {
+  max_connections_.store(std::max(max_connections, 0), std::memory_order_release);
   return server_.Start(bind_ip, port, max_connections);
 }
 
 bool NetworkManager::StartUnix(const std::string& socket_path, int max_connections) {
+  max_connections_.store(std::max(max_connections, 0), std::memory_order_release);
   return server_.StartUnix(socket_path, max_connections);
 }
 
@@ -100,13 +96,20 @@ size_t NetworkManager::GetConnectionCount() const {
 
 void NetworkManager::Tick() {
   const int64_t now_ms = TcpSession::NowMs();
-  if (now_ms - last_heartbeat_check_ms_ < kHeartbeatCheckIntervalMs) {
+  const int64_t heartbeat_check_interval_ms =
+      heartbeat_check_interval_ms_.load(std::memory_order_acquire);
+  const int64_t heartbeat_timeout_ms =
+      heartbeat_timeout_ms_.load(std::memory_order_acquire);
+  if (heartbeat_check_interval_ms <= 0 || heartbeat_timeout_ms <= 0) {
+    return;
+  }
+  if (now_ms - last_heartbeat_check_ms_ < heartbeat_check_interval_ms) {
     return;
   }
 
   last_heartbeat_check_ms_ = now_ms;
 
-  asio::post(io_context_, [this]() {
+  asio::post(io_context_, [this, heartbeat_timeout_ms]() {
     const int64_t now_ms = TcpSession::NowMs();
     std::vector<std::shared_ptr<TcpSession>> expired_sessions;
     size_t timeout_count = 0;
@@ -116,9 +119,12 @@ void NetworkManager::Tick() {
         if (!session) {
           continue;
         }
+        if (session->IsServiceSession()) {
+          continue;
+        }
         const int64_t last_heartbeat_ms = session->GetLastHeartbeatMs();
         if (now_ms < last_heartbeat_ms ||
-            now_ms - last_heartbeat_ms >= kHeartbeatTimeoutMs) {
+            now_ms - last_heartbeat_ms >= heartbeat_timeout_ms) {
           expired_sessions.push_back(session);
           ++timeout_count;
         }
@@ -136,6 +142,40 @@ void NetworkManager::Tick() {
   });
 }
 
+void NetworkManager::SetIdlePolicy(int64_t check_interval_ms, int64_t timeout_ms) {
+  heartbeat_check_interval_ms_.store(
+      std::max<int64_t>(check_interval_ms, 1), std::memory_order_release);
+  heartbeat_timeout_ms_.store(std::max<int64_t>(timeout_ms, 1), std::memory_order_release);
+}
+
+void NetworkManager::SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size) {
+  server_.SetAcceptedConnectionWriteQueueSize(std::max<size_t>(max_write_queue_size, 1));
+}
+
+void NetworkManager::SetAcceptedConnectionWriteBatchOptions(
+    TcpConnection::WriteBatchOptions options) {
+  options.flush_interval_us = std::max<int64_t>(options.flush_interval_us, 0);
+  server_.SetAcceptedConnectionWriteBatchOptions(options);
+}
+
+void NetworkManager::SetAcceptedConnectionLowCopySendEnabled(bool enabled) {
+  server_.SetAcceptedConnectionLowCopySendEnabled(enabled);
+}
+
+void NetworkManager::SetMaxConnectionsForTest(int max_connections) {
+  max_connections_.store(std::max(max_connections, 0), std::memory_order_release);
+}
+
+void NetworkManager::AddConnectionForTest(
+    const std::shared_ptr<TcpConnection>& connection) {
+  AddConnection(connection);
+}
+
+size_t NetworkManager::GetTrackedConnectionCountForTest() const {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  return connections_.size();
+}
+
 void NetworkManager::AddConnection(const std::shared_ptr<TcpConnection>& connection) {
   if (!connection) {
     return;
@@ -147,6 +187,13 @@ void NetworkManager::AddConnection(const std::shared_ptr<TcpConnection>& connect
 
   {
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    const int max_connections = max_connections_.load(std::memory_order_acquire);
+    if (max_connections > 0 &&
+        connections_.size() >= static_cast<size_t>(max_connections)) {
+      monitor::Metrics::Instance().IncrementError("connection_limit");
+      connection->Close();
+      return;
+    }
     connections_[connection->GetConnectionId()] = connection;
   }
 

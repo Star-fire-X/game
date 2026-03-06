@@ -274,6 +274,51 @@ TEST(KcpChannelTest, ReceiveRejectsMismatchedToken) {
   channel.Disconnect();
 }
 
+TEST(KcpChannelTest, ReceiveRejectsTcpFlaggedPacket) {
+  auto channel_pack = MakeChannel();
+  auto& channel = *channel_pack.channel;
+
+  constexpr uint32_t kConv = 17;
+  const std::array<uint8_t, KcpChannel::kTokenSize> token = {'k', 'c', 'p', 'f',
+                                                             'l', 'a', 'g', '!'};
+  channel.SetConvId(kConv);
+  channel.SetSessionToken(token);
+  channel.state_.store(mir2::common::ChannelState::Connected);
+
+  channel.kcp_ = ikcp_create(kConv, &channel);
+  ASSERT_NE(channel.kcp_, nullptr);
+
+  const std::vector<uint8_t> payload = BuildHeartbeatPayload(11, 22);
+  const auto encoded = mir2::common::EncodePacketV2(
+      static_cast<uint16_t>(mir2::common::MsgId::kHeartbeat),
+      payload.data(),
+      payload.size(),
+      5,
+      /*flags=*/0);
+  ASSERT_FALSE(encoded.empty());
+
+  const auto kcp_segment = BuildKcpSegment(kConv, encoded);
+  ASSERT_FALSE(kcp_segment.empty());
+  const auto udp_packet = BuildUdpPacket(kConv, token, kcp_segment);
+
+  bool got_message = false;
+  channel.SetOnMessage([&](const mir2::common::NetworkPacket& /*packet*/) {
+    got_message = true;
+  });
+
+  asio::ip::udp::endpoint endpoint(asio::ip::address_v4::loopback(), 10005);
+  channel.HandleUdpPacket(endpoint, udp_packet.data(), udp_packet.size());
+  channel.Update();
+
+  EXPECT_FALSE(got_message);
+  {
+    std::lock_guard<std::mutex> lock(channel.receive_mutex_);
+    EXPECT_TRUE(channel.receive_queue_.empty());
+  }
+
+  channel.Disconnect();
+}
+
 TEST(KcpChannelTest, ReceiveQueueCapsAtMaxSize) {
   auto channel_pack = MakeChannel();
   auto& channel = *channel_pack.channel;

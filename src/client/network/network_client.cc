@@ -127,7 +127,7 @@ void NetworkClient::disconnect() {
 
     // Stop IO thread
     stop_io_thread();
-    write_in_progress_ = false;
+    write_in_progress_.store(false, std::memory_order_release);
 
     // Clear queues
     {
@@ -183,15 +183,13 @@ void NetworkClient::send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
     // Post write operation to IO thread (serialize writes to avoid interleaving frames).
     asio::post(io_context_, [this]() {
         if (state_ != ConnectionState::CONNECTED || !socket_) {
-            write_in_progress_ = false;
+            write_in_progress_.store(false, std::memory_order_release);
             return;
         }
 
-        if (write_in_progress_) {
+        if (write_in_progress_.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
-
-        write_in_progress_ = true;
         do_write();
     });
 }
@@ -564,7 +562,7 @@ bool NetworkClient::check_recv_sequence(uint16_t seq) {
  */
 void NetworkClient::do_write() {
     if (state_ != ConnectionState::CONNECTED || !socket_) {
-        write_in_progress_ = false;
+        write_in_progress_.store(false, std::memory_order_release);
         return;
     }
 
@@ -572,7 +570,7 @@ void NetworkClient::do_write() {
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
         if (send_queue_.empty()) {
-            write_in_progress_ = false;
+            write_in_progress_.store(false, std::memory_order_release);
             return;
         }
         data = std::move(send_queue_.front());
@@ -586,7 +584,7 @@ void NetworkClient::do_write() {
                 // Continue draining the queue (only one async_write in-flight at a time).
                 do_write();
             } else {
-                write_in_progress_ = false;
+                write_in_progress_.store(false, std::memory_order_release);
                 handle_disconnect(ec);
             }
         });
@@ -718,7 +716,7 @@ void NetworkClient::handle_disconnect(const asio::error_code& ec) {
     }
 
     state_ = ConnectionState::DISCONNECTED;
-    write_in_progress_ = false;
+    write_in_progress_.store(false, std::memory_order_release);
 
     // Drop queued messages to avoid sending stale frames after reconnect.
     {

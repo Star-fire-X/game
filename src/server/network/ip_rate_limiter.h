@@ -27,6 +27,8 @@ class IpRateLimiter {
   IpRateLimiter();
   explicit IpRateLimiter(Config config);
 
+  void SetConfig(Config config);
+
   /**
    * @brief Check whether a packet from the IP should be allowed.
    */

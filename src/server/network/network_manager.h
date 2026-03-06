@@ -6,6 +6,8 @@
 #ifndef MIR2_NETWORK_NETWORK_MANAGER_H
 #define MIR2_NETWORK_NETWORK_MANAGER_H
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -68,6 +70,17 @@ class NetworkManager {
    */
   void Tick();
 
+  void SetIdlePolicy(int64_t check_interval_ms, int64_t timeout_ms);
+  void SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size);
+  void SetAcceptedConnectionWriteBatchOptions(
+      TcpConnection::WriteBatchOptions options);
+  void SetAcceptedConnectionLowCopySendEnabled(bool enabled);
+
+  // Testing hooks: behavior-preserving wrappers for removing white-box access.
+  void SetMaxConnectionsForTest(int max_connections);
+  void AddConnectionForTest(const std::shared_ptr<TcpConnection>& connection);
+  size_t GetTrackedConnectionCountForTest() const;
+
   size_t GetConnectionCount() const;
 
  private:
@@ -90,7 +103,10 @@ class NetworkManager {
   mutable std::shared_mutex mutex_;
   std::unordered_map<uint64_t, std::shared_ptr<TcpConnection>> connections_;
   std::unordered_map<uint64_t, std::shared_ptr<TcpSession>> sessions_;
+  std::atomic<int> max_connections_{0};
   int64_t last_heartbeat_check_ms_ = 0;
+  std::atomic<int64_t> heartbeat_check_interval_ms_{30000};
+  std::atomic<int64_t> heartbeat_timeout_ms_{90000};
 };
 
 }  // namespace mir2::network

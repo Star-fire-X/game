@@ -23,13 +23,7 @@
 
 #include "common/time_utils.h"
 #include "common/enums.h"
-
-// Expose private members for white-box tests.
-#define private public
-#define protected public
 #include "network/kcp_server.h"
-#undef private
-#undef protected
 
 namespace {
 
@@ -58,21 +52,15 @@ void InjectPacket(KcpServer& server,
                   uint32_t conv,
                   const std::array<uint8_t, KcpSession::kTokenSize>& token,
                   const std::vector<uint8_t>& payload) {
-  server.remote_endpoint_ = endpoint;
   const size_t header_size = sizeof(uint32_t) + KcpSession::kTokenSize;
   const size_t total_size = header_size + payload.size();
-  if (total_size > server.recv_buffer_.size()) {
-    ADD_FAILURE() << "Packet exceeds receive buffer";
-    return;
-  }
-
-  std::memcpy(server.recv_buffer_.data(), &conv, sizeof(conv));
-  std::memcpy(server.recv_buffer_.data() + sizeof(conv), token.data(), token.size());
+  std::vector<uint8_t> raw(total_size);
+  std::memcpy(raw.data(), &conv, sizeof(conv));
+  std::memcpy(raw.data() + sizeof(conv), token.data(), token.size());
   if (!payload.empty()) {
-    std::memcpy(server.recv_buffer_.data() + header_size, payload.data(), payload.size());
+    std::memcpy(raw.data() + header_size, payload.data(), payload.size());
   }
-
-  server.HandleReceive(asio::error_code{}, total_size);
+  server.HandleRawPacketForTesting(endpoint, raw.data(), raw.size());
 }
 
 void RunIoContextFor(asio::io_context& io_context, std::chrono::milliseconds duration) {
@@ -93,8 +81,8 @@ std::vector<uint8_t> BuildKcpPacket(uint32_t conv,
 
   std::vector<uint8_t> packet;
   client->SetOutputHandler(
-      [&packet](const asio::ip::udp::endpoint&, const uint8_t* data, size_t size) {
-        packet.assign(data, data + size);
+      [&packet](const asio::ip::udp::endpoint&, std::vector<uint8_t>&& udp_packet) {
+        packet = std::move(udp_packet);
       });
 
   client->Send(msg_id, payload);
@@ -154,14 +142,14 @@ TEST(KcpServerTest, UpdateTimerUsesConfiguredInterval) {
   KcpServer server(io_context, config);
 
   const auto start = std::chrono::steady_clock::now();
-  server.StartUpdateTimer();
-  const auto expiry = server.update_timer_.expiry();
+  server.StartUpdateTimerForTesting();
+  const auto expiry = server.GetUpdateTimerExpiryForTesting();
   const auto delta_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(expiry - start).count();
 
   EXPECT_GE(delta_ms, config.interval);
   EXPECT_LE(delta_ms, config.interval + 10);
-  server.update_timer_.cancel();
+  server.CancelUpdateTimerForTesting();
 }
 
 TEST(KcpServerTest, UpdateTimerRemovesExpiredHandshakeSessions) {
@@ -172,13 +160,12 @@ TEST(KcpServerTest, UpdateTimerRemovesExpiredHandshakeSessions) {
   ASSERT_TRUE(server.AddSession(session));
 
   const int64_t now_ms = mir2::common::now_ms();
-  session->has_endpoint_.store(false, std::memory_order_relaxed);
-  session->last_active_ms_.store(now_ms - (kHandshakeTimeoutMs + 1000),
-                                 std::memory_order_relaxed);
+  session->SetHasRemoteEndpointForTesting(false);
+  session->SetLastActiveMsForTesting(now_ms - (kHandshakeTimeoutMs + 1000));
 
-  server.StartUpdateTimer();
+  server.StartUpdateTimerForTesting();
   RunIoContextFor(io_context, std::chrono::milliseconds(20));
-  server.update_timer_.cancel();
+  server.CancelUpdateTimerForTesting();
 
   EXPECT_EQ(server.GetSession(200), nullptr);
 }
@@ -190,17 +177,15 @@ TEST(KcpServerTest, HandshakeTimeoutUsesThirtySeconds) {
   auto session = std::make_shared<KcpSession>(300, token);
   ASSERT_TRUE(server.AddSession(session));
 
-  session->has_endpoint_.store(false, std::memory_order_relaxed);
+  session->SetHasRemoteEndpointForTesting(false);
 
   const int64_t now_ms = mir2::common::now_ms();
-  session->last_active_ms_.store(now_ms - (kHandshakeTimeoutMs - 1000),
-                                 std::memory_order_relaxed);
-  server.UpdateAllSessions();
+  session->SetLastActiveMsForTesting(now_ms - (kHandshakeTimeoutMs - 1000));
+  server.UpdateAllSessionsForTesting();
   EXPECT_NE(server.GetSession(300), nullptr);
 
-  session->last_active_ms_.store(now_ms - (kHandshakeTimeoutMs + 1),
-                                 std::memory_order_relaxed);
-  server.UpdateAllSessions();
+  session->SetLastActiveMsForTesting(now_ms - (kHandshakeTimeoutMs + 1));
+  server.UpdateAllSessionsForTesting();
   EXPECT_EQ(server.GetSession(300), nullptr);
 }
 
@@ -212,24 +197,24 @@ TEST(KcpServerTest, RateLimiterBlocksExcessPackets) {
   config.max_packets_per_sec = 1;
   config.window_ms = 1000;
   config.cleanup_interval_ms = 0;
-  server.rate_limiter_.config_ = config;
+  server.SetRateLimiterConfig(config);
 
   auto token = MakeToken(6);
   auto session = std::make_shared<KcpSession>(400, token);
   ASSERT_TRUE(server.AddSession(session));
-  session->last_active_ms_.store(0, std::memory_order_relaxed);
+  session->SetLastActiveMsForTesting(0);
 
   const auto endpoint = MakeEndpoint(9001);
   const std::vector<uint8_t> payload = {0x01};
 
   InjectPacket(server, endpoint, 400, token, payload);
-  const int64_t first_active = session->last_active_ms_.load(std::memory_order_relaxed);
+  const int64_t first_active = session->GetLastActiveMs();
   EXPECT_GT(first_active, 0);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(2));
   InjectPacket(server, endpoint, 400, token, payload);
 
-  const int64_t second_active = session->last_active_ms_.load(std::memory_order_relaxed);
+  const int64_t second_active = session->GetLastActiveMs();
   EXPECT_EQ(second_active, first_active);
 }
 
@@ -242,12 +227,12 @@ TEST(KcpServerTest, BlacklistBlocksAfterInvalidToken) {
   config.blacklist_ttl_ms = 60000;
   config.failure_ttl_ms = 60000;
   config.cleanup_interval_ms = 0;
-  server.blacklist_.config_ = config;
+  server.SetConvBlacklistConfig(config);
 
   auto token = MakeToken(7);
   auto session = std::make_shared<KcpSession>(500, token);
   ASSERT_TRUE(server.AddSession(session));
-  session->last_active_ms_.store(0, std::memory_order_relaxed);
+  session->SetLastActiveMsForTesting(0);
 
   const auto endpoint = MakeEndpoint(9002);
   const std::vector<uint8_t> payload = {0x02};
@@ -256,11 +241,84 @@ TEST(KcpServerTest, BlacklistBlocksAfterInvalidToken) {
   InjectPacket(server, endpoint, 500, bad_token, payload);
   InjectPacket(server, endpoint, 500, bad_token, payload);
 
-  EXPECT_EQ(session->last_active_ms_.load(std::memory_order_relaxed), 0);
-  EXPECT_TRUE(server.blacklist_.IsBlacklisted(500, mir2::common::now_ms()));
+  EXPECT_EQ(session->GetLastActiveMs(), 0);
+  const uint32_t endpoint_ip = endpoint.address().to_v4().to_uint();
+  EXPECT_TRUE(server.IsConvBlacklisted(500, endpoint_ip, mir2::common::now_ms()));
 
   InjectPacket(server, endpoint, 500, token, payload);
-  EXPECT_EQ(session->last_active_ms_.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(session->GetLastActiveMs(), 0);
+}
+
+TEST(KcpServerTest, BlacklistIsScopedByConvAndSourceIp) {
+  asio::io_context io_context;
+  KcpServer server(io_context);
+
+  ConvBlacklist::Config config{};
+  config.max_failures = 1;
+  config.blacklist_ttl_ms = 60000;
+  config.failure_ttl_ms = 60000;
+  config.cleanup_interval_ms = 0;
+  server.SetConvBlacklistConfig(config);
+
+  auto token = MakeToken(17);
+  auto session = std::make_shared<KcpSession>(517, token);
+  ASSERT_TRUE(server.AddSession(session));
+  session->SetLastActiveMsForTesting(0);
+
+  const auto endpoint_a =
+      asio::ip::udp::endpoint(asio::ip::make_address("127.0.0.1"), 9010);
+  const auto endpoint_b =
+      asio::ip::udp::endpoint(asio::ip::make_address("127.0.0.2"), 9011);
+  const auto bad_token = MakeToken(199);
+  const std::vector<uint8_t> payload = {0xAA};
+
+  InjectPacket(server, endpoint_a, 517, bad_token, payload);
+  const uint32_t ip_a = endpoint_a.address().to_v4().to_uint();
+  const uint32_t ip_b = endpoint_b.address().to_v4().to_uint();
+  EXPECT_TRUE(server.IsConvBlacklisted(517, ip_a, mir2::common::now_ms()));
+  EXPECT_FALSE(server.IsConvBlacklisted(517, ip_b, mir2::common::now_ms()));
+
+  InjectPacket(server, endpoint_b, 517, token, payload);
+  EXPECT_GT(session->GetLastActiveMs(), 0);
+}
+
+TEST(KcpServerTest, EndpointPinningRejectsMigrationAndSkipsEmptyPayloadBinding) {
+  asio::io_context io_context;
+  KcpServer server(io_context);
+
+  ConvBlacklist::Config config{};
+  config.max_failures = 1;
+  config.blacklist_ttl_ms = 60000;
+  config.failure_ttl_ms = 60000;
+  config.cleanup_interval_ms = 0;
+  server.SetConvBlacklistConfig(config);
+
+  auto token = MakeToken(27);
+  auto session = std::make_shared<KcpSession>(527, token);
+  ASSERT_TRUE(server.AddSession(session));
+  session->SetLastActiveMsForTesting(0);
+
+  const auto endpoint_a = MakeEndpoint(9020);
+  const auto endpoint_b = MakeEndpoint(9021);
+  const std::vector<uint8_t> payload = {0x01, 0x02};
+
+  // Empty KCP payload should not bind endpoint.
+  InjectPacket(server, endpoint_a, 527, token, {});
+  EXPECT_FALSE(session->HasRemoteEndpoint());
+
+  InjectPacket(server, endpoint_a, 527, token, payload);
+  EXPECT_TRUE(session->HasRemoteEndpoint());
+  EXPECT_EQ(session->GetRemoteEndpoint(), endpoint_a);
+  const int64_t first_active = session->GetLastActiveMs();
+  EXPECT_GT(first_active, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  InjectPacket(server, endpoint_b, 527, token, payload);
+  EXPECT_EQ(session->GetRemoteEndpoint(), endpoint_a);
+  EXPECT_EQ(session->GetLastActiveMs(), first_active);
+
+  const uint32_t ip_b = endpoint_b.address().to_v4().to_uint();
+  EXPECT_TRUE(server.IsConvBlacklisted(527, ip_b, mir2::common::now_ms()));
 }
 
 TEST(KcpServerTest, HandleReceiveDispatchesValidPacket) {
@@ -284,7 +342,6 @@ TEST(KcpServerTest, HandleReceiveDispatchesValidPacket) {
 
   auto packet = BuildKcpPacket(600, token, endpoint, msg_id, payload);
   ASSERT_FALSE(packet.empty());
-  ASSERT_LE(packet.size(), server.recv_buffer_.size());
 
   EXPECT_CALL(mock, OnMessage(testing::_, testing::_))
       .WillOnce([&](const std::shared_ptr<KcpSession>& sess,
@@ -294,9 +351,7 @@ TEST(KcpServerTest, HandleReceiveDispatchesValidPacket) {
         EXPECT_EQ(pkt.payload, payload);
       });
 
-  server.remote_endpoint_ = endpoint;
-  std::memcpy(server.recv_buffer_.data(), packet.data(), packet.size());
-  server.HandleReceive(asio::error_code{}, packet.size());
+  server.HandleRawPacketForTesting(endpoint, packet.data(), packet.size());
 }
 
 TEST(KcpServerTest, SendRawRecordsUdpSendErrors) {
@@ -306,11 +361,11 @@ TEST(KcpServerTest, SendRawRecordsUdpSendErrors) {
 
   const auto endpoint = MakeEndpoint(9004);
   std::vector<uint8_t> oversized_payload(70000, 0xAB);
-  server.SendRaw(endpoint, oversized_payload.data(), oversized_payload.size());
+  server.SendRawForTesting(endpoint, oversized_payload.data(), oversized_payload.size());
 
   RunIoContextFor(io_context, std::chrono::milliseconds(50));
 
-  EXPECT_GE(server.udp_send_error_count_.load(std::memory_order_relaxed), 1u);
+  EXPECT_GE(server.GetUdpSendErrorCountForTesting(), 1u);
   server.Stop();
 }
 
@@ -324,10 +379,10 @@ TEST(KcpServerTest, SendRawFaultInjectionIncrementsUdpSendErrors) {
 
   const auto endpoint = MakeEndpoint(9005);
   std::vector<uint8_t> payload(64, 0x5A);
-  server.SendRaw(endpoint, payload.data(), payload.size());
-  server.SendRaw(endpoint, payload.data(), payload.size());
+  server.SendRawForTesting(endpoint, payload.data(), payload.size());
+  server.SendRawForTesting(endpoint, payload.data(), payload.size());
   RunIoContextFor(io_context, std::chrono::milliseconds(20));
 
-  EXPECT_GE(server.udp_send_error_count_.load(std::memory_order_relaxed), 1u);
+  EXPECT_GE(server.GetUdpSendErrorCountForTesting(), 1u);
   server.Stop();
 }

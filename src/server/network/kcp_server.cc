@@ -1,5 +1,6 @@
 #include "network/kcp_server.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <shared_mutex>
@@ -105,9 +106,8 @@ bool KcpServer::AddSession(const SessionPtr& session) {
   }
 
   session->SetOutputHandler([this](const asio::ip::udp::endpoint& endpoint,
-                                   const uint8_t* data,
-                                   size_t size) {
-    SendRaw(endpoint, data, size);
+                                   std::vector<uint8_t>&& packet) {
+    SendRaw(endpoint, std::move(packet));
   });
 
   if (message_handler_) {
@@ -164,6 +164,65 @@ void KcpServer::SetUdpSendFaultInjectEveryN(uint64_t every_n) {
 
 uint64_t KcpServer::GetUdpSendFaultInjectEveryN() const {
   return udp_send_fault_inject_every_n_.load(std::memory_order_relaxed);
+}
+
+void KcpServer::SetRateLimiterConfig(IpRateLimiter::Config config) {
+  rate_limiter_.SetConfig(config);
+}
+
+void KcpServer::SetConvBlacklistConfig(ConvBlacklist::Config config) {
+  blacklist_.SetConfig(config);
+}
+
+bool KcpServer::IsConvBlacklisted(uint32_t conv, uint32_t source_ip, int64_t now_ms) {
+  return blacklist_.IsBlacklisted(conv, source_ip, now_ms);
+}
+
+uint16_t KcpServer::GetBoundPort() const {
+  asio::error_code ec;
+  const auto endpoint = socket_.local_endpoint(ec);
+  if (ec) {
+    return 0;
+  }
+  return endpoint.port();
+}
+
+void KcpServer::HandleRawPacketForTesting(const asio::ip::udp::endpoint& endpoint,
+                                          const uint8_t* data,
+                                          size_t size) {
+  if (!data || size == 0 || size > recv_buffer_.size()) {
+    return;
+  }
+  remote_endpoint_ = endpoint;
+  std::memcpy(recv_buffer_.data(), data, size);
+  HandleReceive(asio::error_code{}, size);
+}
+
+void KcpServer::StartUpdateTimerForTesting() {
+  StartUpdateTimer();
+}
+
+std::chrono::steady_clock::time_point KcpServer::GetUpdateTimerExpiryForTesting() const {
+  return update_timer_.expiry();
+}
+
+void KcpServer::CancelUpdateTimerForTesting() {
+  asio::error_code ec;
+  update_timer_.cancel(ec);
+}
+
+void KcpServer::UpdateAllSessionsForTesting() {
+  UpdateAllSessions();
+}
+
+void KcpServer::SendRawForTesting(const asio::ip::udp::endpoint& endpoint,
+                                  const uint8_t* data,
+                                  size_t size) {
+  SendRaw(endpoint, data, size);
+}
+
+uint64_t KcpServer::GetUdpSendErrorCountForTesting() const {
+  return udp_send_error_count_.load(std::memory_order_relaxed);
 }
 
 void KcpServer::StartReceive() {
@@ -231,7 +290,7 @@ void KcpServer::HandleReceive(const asio::error_code& ec, std::size_t bytes) {
   const uint8_t* kcp_payload = recv_buffer_.data() + kHeaderSize;
   const size_t kcp_size = bytes - kHeaderSize;
 
-  if (blacklist_.IsBlacklisted(conv, now_ms)) {
+  if (blacklist_.IsBlacklisted(conv, ip, now_ms)) {
     SYSLOG_DEBUG("Dropping KCP packet for blacklisted conv={} (ip={}, port={})",
                  conv,
                  remote_endpoint_.address().to_string(),
@@ -261,7 +320,7 @@ void KcpServer::HandleReceive(const asio::error_code& ec, std::size_t bytes) {
                 conv,
                 remote_endpoint_.address().to_string(),
                 remote_endpoint_.port());
-    blacklist_.RecordFailure(conv, now_ms);
+    blacklist_.RecordFailure(conv, ip, now_ms);
     monitor::Metrics::Instance().IncrementError("kcp_token_invalid");
     if (socket_.is_open()) {
       StartReceive();
@@ -269,7 +328,36 @@ void KcpServer::HandleReceive(const asio::error_code& ec, std::size_t bytes) {
     return;
   }
 
-  session->SetRemoteEndpoint(remote_endpoint_);
+  if (kcp_size == 0) {
+    monitor::Metrics::Instance().IncrementError("kcp_empty_payload");
+    if (socket_.is_open()) {
+      StartReceive();
+    }
+    return;
+  }
+
+  if (!session->HasRemoteEndpoint()) {
+    session->SetRemoteEndpoint(remote_endpoint_);
+  } else {
+    const auto bound_endpoint = session->GetRemoteEndpoint();
+    if (bound_endpoint.address() != remote_endpoint_.address() ||
+        bound_endpoint.port() != remote_endpoint_.port()) {
+      SYSLOG_WARN("Dropping KCP packet due to endpoint mismatch (conv={}, expected={}:{},"
+                  " actual={}:{})",
+                  conv,
+                  bound_endpoint.address().to_string(),
+                  bound_endpoint.port(),
+                  remote_endpoint_.address().to_string(),
+                  remote_endpoint_.port());
+      blacklist_.RecordFailure(conv, ip, now_ms);
+      monitor::Metrics::Instance().IncrementError("kcp_endpoint_mismatch");
+      if (socket_.is_open()) {
+        StartReceive();
+      }
+      return;
+    }
+  }
+
   session->Input(kcp_payload, kcp_size);
 
   if (socket_.is_open()) {
@@ -292,33 +380,31 @@ void KcpServer::UpdateAllSessions() {
   const int64_t now_ms = mir2::common::now_ms();
   const uint32_t now_ms32 = static_cast<uint32_t>(now_ms);
 
-  std::vector<std::pair<uint32_t, SessionPtr>> sessions;
+  update_scan_sessions_.clear();
   {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    sessions.reserve(sessions_.size());
-    for (const auto& entry : sessions_) {
-      sessions.push_back(entry);
+    update_scan_sessions_.reserve(std::max(update_scan_sessions_.capacity(), sessions_.size()));
+    for (const auto& [_, session] : sessions_) {
+      if (session) {
+        update_scan_sessions_.push_back(session);
+      }
     }
   }
 
-  std::vector<uint32_t> expired;
-  for (const auto& entry : sessions) {
-    const auto& session = entry.second;
-    if (!session) {
-      continue;
-    }
+  update_expired_convs_.clear();
+  for (const auto& session : update_scan_sessions_) {
     session->Update(now_ms32);
     const int64_t timeout_ms = session->HasRemoteEndpoint()
                                   ? KcpSession::kDefaultTimeoutMs
                                   : kHandshakeTimeoutMs;
     if (session->IsTimedOut(now_ms, timeout_ms)) {
-      expired.push_back(entry.first);
+      update_expired_convs_.push_back(session->GetConvId());
     }
   }
 
-  if (!expired.empty()) {
+  if (!update_expired_convs_.empty()) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    for (uint32_t conv : expired) {
+    for (uint32_t conv : update_expired_convs_) {
       sessions_.erase(conv);
     }
   }
@@ -328,6 +414,68 @@ void KcpServer::UpdateAllSessions() {
     blacklist_.Cleanup(now_ms);
     last_cleanup_ms_ = now_ms;
   }
+}
+
+void KcpServer::SendRaw(const asio::ip::udp::endpoint& endpoint,
+                        std::vector<uint8_t>&& packet) {
+  if (packet.empty()) {
+    return;
+  }
+
+  if (!socket_.is_open()) {
+    return;
+  }
+
+  monitor::Metrics::Instance().AddBytesOut(packet.size());
+  auto on_send = [this, endpoint, size = packet.size()](const asio::error_code& ec,
+                                                         std::size_t /*bytes*/) {
+    if (!ec) {
+      return;
+    }
+
+    monitor::Metrics::Instance().IncrementError("udp_send");
+
+    const uint64_t error_count =
+        udp_send_error_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    const int64_t now_ms = mir2::common::now_ms();
+    bool should_log = (error_count % kUdpSendWarnEveryN) == 1;
+
+    int64_t last_warn_ms = last_udp_send_warn_ms_.load(std::memory_order_relaxed);
+    if (!should_log && now_ms - last_warn_ms >= kUdpSendWarnIntervalMs) {
+      should_log = last_udp_send_warn_ms_.compare_exchange_strong(
+          last_warn_ms, now_ms, std::memory_order_relaxed);
+    } else if (should_log) {
+      last_udp_send_warn_ms_.store(now_ms, std::memory_order_relaxed);
+    }
+
+    if (should_log) {
+      SYSLOG_WARN("UDP send failed (ec={}, endpoint={}:{}, size={}, error_count={})",
+                  ec.message(),
+                  endpoint.address().to_string(),
+                  endpoint.port(),
+                  size,
+                  error_count);
+    }
+  };
+
+  const uint64_t inject_every_n =
+      udp_send_fault_inject_every_n_.load(std::memory_order_relaxed);
+  if (inject_every_n > 0) {
+    const uint64_t send_attempt =
+        udp_send_attempt_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((send_attempt % inject_every_n) == 0) {
+      on_send(asio::error::operation_aborted, 0);
+      return;
+    }
+  }
+
+  auto buffer = std::make_shared<std::vector<uint8_t>>(std::move(packet));
+  socket_.async_send_to(
+      asio::buffer(*buffer),
+      endpoint,
+      [buffer, on_send](const asio::error_code& ec, std::size_t bytes) {
+        on_send(ec, bytes);
+      });
 }
 
 void KcpServer::SendRaw(const asio::ip::udp::endpoint& endpoint,

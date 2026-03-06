@@ -5,6 +5,8 @@
 #include <flatbuffers/flatbuffers.h>
 
 #include "common/enums.h"
+#include "common/time_utils.h"
+#include "network/control_message_parser.h"
 #include "network/dual_channel_manager.h"
 #include "network/tcp_session.h"
 #include "system_generated.h"
@@ -19,6 +21,8 @@ constexpr uint16_t kMsgIdKcpUpgradeResponse =
 constexpr uint16_t kErrorUnsupported = 1;
 constexpr uint16_t kErrorInvalidRequest = 2;
 constexpr uint16_t kErrorServerFailed = 3;
+constexpr uint16_t kErrorAlreadyBound = 4;
+constexpr int64_t kRebindAfterInactivityMs = 1000;
 
 std::string TokenToString(const std::array<uint8_t, KcpSession::kTokenSize>& token) {
   return std::string(reinterpret_cast<const char*>(token.data()), token.size());
@@ -47,12 +51,24 @@ void KcpUpgradeHandler::HandleKcpUpgradeRequest(
     return;
   }
 
-  if (!payload.empty()) {
-    flatbuffers::Verifier verifier(payload.data(), payload.size());
-    if (!verifier.VerifyBuffer<mir2::proto::KcpUpgradeRequest>(nullptr)) {
-      SendUpgradeResponse(session, false, 0, std::string(), kErrorInvalidRequest);
+  const uint64_t session_id = session->GetSessionId();
+  const auto existing_session = manager_.GetKcpSession(session_id);
+  bool allow_rebind = false;
+  if (existing_session) {
+    const int64_t age_ms = mir2::common::now_ms() -
+                           existing_session->GetLastActiveMs();
+    if (age_ms >= kRebindAfterInactivityMs) {
+      allow_rebind = true;
+    } else {
+      SendUpgradeResponse(session, false, 0, std::string(), kErrorAlreadyBound);
       return;
     }
+  }
+
+  if (ControlMessageParser::ParseKcpUpgradeRequest(payload) !=
+      KcpUpgradeRequestStatus::kOk) {
+    SendUpgradeResponse(session, false, 0, std::string(), kErrorInvalidRequest);
+    return;
   }
 
   const uint32_t conv_id = manager_.GetKcpServer().AllocateConvId();
@@ -63,9 +79,22 @@ void KcpUpgradeHandler::HandleKcpUpgradeRequest(
     return;
   }
 
-  if (!manager_.BindKcpSession(session->GetSessionId(), kcp_session)) {
+  bool bind_ok = false;
+  if (allow_rebind) {
+    bind_ok = manager_.BindKcpSession(session_id, kcp_session);
+  } else {
+    bind_ok = manager_.TryBindKcpSessionIfAbsent(session_id, kcp_session);
+  }
+
+  if (!bind_ok) {
     manager_.GetKcpServer().RemoveSession(conv_id);
-    SendUpgradeResponse(session, false, 0, std::string(), kErrorServerFailed);
+    const bool already_bound = static_cast<bool>(manager_.GetKcpSession(session_id));
+    SendUpgradeResponse(
+        session,
+        false,
+        0,
+        std::string(),
+        already_bound ? kErrorAlreadyBound : kErrorServerFailed);
     return;
   }
 

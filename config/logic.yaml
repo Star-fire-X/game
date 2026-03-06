@@ -9,6 +9,10 @@ server:
   max_connections: 5000
   tick_interval_ms: 50
   heartbeat_timeout_ms: 30000
+  service_link_write_queue_size: 8192
+  network_low_copy_send_enabled: true
+  network_session_idle_check_interval_ms: 30000
+  network_session_idle_timeout_ms: 90000
   hot_event_max_drain_per_tick: 2048
   hot_event_max_drain_ms_per_tick: 5
   mailbox_player_max_high_pending: 100
@@ -32,11 +36,6 @@ server:
     enabled: true
     scan_interval_ms: 5000
     idle_timeout_ms: 120000
-  legacy_fallback_enabled: true
-  legacy_fallback_allow_auth_whitelist: true
-  legacy_fallback_allow_critical_msgs: true
-  legacy_fallback_allow_normal_msgs: false
-  queue_full_fallback_non_best_effort_enabled: true
   chat_batch_send_enabled: true
   movement_speed_violation_severity: 10
   movement_teleport_violation_severity: 5
@@ -79,6 +78,8 @@ storage_engine:
   l2_max_background_flushes: 2
   l2_block_size: 4096
   l2_bloom_filter_bits_per_key: 10.0
+  l2_usage_soft_limit_ratio: 0.85
+  l2_usage_hard_limit_ratio: 0.95
   l2_path: "/var/lib/mir2/cache"
   l2_ttl_seconds: 604800
   l2_ttl_periodic_compaction_seconds: 21600
@@ -108,6 +109,17 @@ storage_engine:
   enable_audit_log: true
   audit_log_max_entries: 5000
   enable_new_write_path: true
+  enable_v2_encode: false
+  enable_v2_read_fallback: true
+  enable_data_encryption: false
+  encryption_active_key_id: ""
+  encryption_key_env: ""
+  startup_fail_on_validation_error: true
+  checkpoint_enabled: true
+  checkpoint_interval_minutes: 30
+  checkpoint_retention: 48
+  tombstone_retention_seconds: 604800
+  tombstone_gc_interval_seconds: 3600
   enable_access_control: false
   require_auth_for_reads: false
   access_control_token: ""

@@ -29,6 +29,7 @@
 #undef private
 #include "logic/mock_response_sender.h"
 #include "logic/services/player_presence_service.h"
+#include "logic/services/session_role_store.h"
 
 namespace mir2::logic::test {
 namespace {
@@ -125,6 +126,7 @@ class LogicChatHandlerTest : public ::testing::Test {
     response_sender_ = std::make_unique<ThrowOnceResponseSender>();
     player_presence_service_ =
         std::make_unique<PlayerPresenceService>(ecs_registry_);
+    role_store_ = std::make_unique<RoleStore>();
     aoi_mgr_ = std::make_unique<mir2::game::map::AOIManager>(100, 100);
     RebuildHandler(true);
   }
@@ -141,9 +143,20 @@ class LogicChatHandlerTest : public ::testing::Test {
   void RebuildHandler(bool batch_send_enabled) {
     handler_ = std::make_unique<ChatHandler>(*response_sender_,
                                              *player_presence_service_,
+                                             *role_store_,
                                              *aoi_mgr_,
                                              ecs_registry_,
                                              batch_send_enabled);
+  }
+
+  void BindDispatchRecipients(const mir2::game::chat::ChatDispatchList& dispatches) {
+    for (const auto& dispatch : dispatches) {
+      const uint64_t role_id = dispatch.first;
+      if (role_id == 0 || !role_store_) {
+        continue;
+      }
+      role_store_->BindClientRole(role_id, role_id);
+    }
   }
 
   asio::io_context io_context_;
@@ -152,6 +165,7 @@ class LogicChatHandlerTest : public ::testing::Test {
   std::unique_ptr<ThrowOnceResponseSender> response_sender_;
   ClientRegistry client_registry_;
   std::unique_ptr<PlayerPresenceService> player_presence_service_;
+  std::unique_ptr<RoleStore> role_store_;
   std::unique_ptr<mir2::game::map::AOIManager> aoi_mgr_;
   std::unique_ptr<ChatHandler> handler_;
 };
@@ -275,6 +289,7 @@ TEST_F(LogicChatHandlerTest, SendChatDispatchesBatchesSamePayload) {
   dispatches.emplace_back(2002u, std::vector<uint8_t>{0xAA, 0xBB});
   dispatches.emplace_back(2003u, std::vector<uint8_t>{0xCC});
   dispatches.emplace_back(2004u, std::vector<uint8_t>{0xAA, 0xBB});
+  BindDispatchRecipients(dispatches);
 
   executor_->Spawn(handler_->SendChatDispatches(
       static_cast<uint16_t>(mir2::common::MsgId::kChatReq), dispatches));
@@ -298,6 +313,7 @@ TEST_F(LogicChatHandlerTest, SendChatDispatchesFallsBackToSequentialWhenBatchDis
   dispatches.emplace_back(2102u, std::vector<uint8_t>{0xAA, 0xBB});
   dispatches.emplace_back(2103u, std::vector<uint8_t>{0xCC});
   dispatches.emplace_back(2104u, std::vector<uint8_t>{0xAA, 0xBB});
+  BindDispatchRecipients(dispatches);
 
   executor_->Spawn(handler_->SendChatDispatches(
       static_cast<uint16_t>(mir2::common::MsgId::kChatReq), dispatches));
@@ -324,6 +340,7 @@ TEST_F(LogicChatHandlerTest, WorldChatHighFanoutLatencyBenchmarkBatchOnVsOff) {
   for (size_t i = 0; i < kRecipients; ++i) {
     dispatches.emplace_back(100000u + i, shared_payload);
   }
+  BindDispatchRecipients(dispatches);
 
   auto run_benchmark = [&](bool batch_enabled) {
     RebuildHandler(batch_enabled);

@@ -50,6 +50,8 @@ class MockSocket : public SocketAdapter {
   }
 
   const std::vector<std::vector<uint8_t>>& GetWrites() const { return writes_; }
+  size_t GetWriteCallCount() const { return write_calls_; }
+  size_t GetWritevCallCount() const { return writev_calls_; }
   bool IsClosed() const { return closed_; }
   bool ShutdownCalled() const { return shutdown_called_; }
 
@@ -85,11 +87,35 @@ class MockSocket : public SocketAdapter {
       asio::post(executor_, [handler = std::move(handler), error]() { handler(error, 0); });
       return;
     }
+    ++write_calls_;
 
     const auto* data = static_cast<const uint8_t*>(buffer.data());
     writes_.emplace_back(data, data + buffer.size());
     const auto bytes = buffer.size();
     asio::post(executor_, [handler = std::move(handler), bytes]() { handler({}, bytes); });
+  }
+
+  void async_writev(const std::vector<asio::const_buffer>& buffers,
+                    IoHandler handler) override {
+    if (write_error_once_) {
+      const auto error = write_error_;
+      write_error_once_ = false;
+      asio::post(executor_, [handler = std::move(handler), error]() { handler(error, 0); });
+      return;
+    }
+    ++writev_calls_;
+
+    size_t total_bytes = 0;
+    std::vector<uint8_t> combined;
+    for (const auto& buffer : buffers) {
+      const auto* data = static_cast<const uint8_t*>(buffer.data());
+      const size_t size = buffer.size();
+      total_bytes += size;
+      combined.insert(combined.end(), data, data + size);
+    }
+    writes_.push_back(std::move(combined));
+    asio::post(executor_,
+               [handler = std::move(handler), total_bytes]() { handler({}, total_bytes); });
   }
 
   void shutdown(asio::socket_base::shutdown_type /*type*/, asio::error_code& ec) override {
@@ -174,6 +200,8 @@ class MockSocket : public SocketAdapter {
   asio::ip::tcp::endpoint endpoint_;
   std::deque<std::vector<uint8_t>> read_queue_;
   std::vector<std::vector<uint8_t>> writes_;
+  size_t write_calls_ = 0;
+  size_t writev_calls_ = 0;
   std::optional<PendingRead> pending_read_;
   asio::error_code read_error_;
   asio::error_code write_error_;

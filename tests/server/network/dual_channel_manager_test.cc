@@ -105,7 +105,7 @@ TEST_F(DualChannelManagerTest, SendRoutesToKcpWhenAvailable) {
 
   bool output_called = false;
   kcp_session->SetOutputHandler(
-      [&output_called](const asio::ip::udp::endpoint&, const uint8_t*, size_t) {
+      [&output_called](const asio::ip::udp::endpoint&, std::vector<uint8_t>&&) {
         output_called = true;
       });
 
@@ -135,6 +135,31 @@ TEST_F(DualChannelManagerTest, SendFallsBackToTcpWhenKcpUnavailable) {
   manager_->Send(session_id, msg_id, payload);
 }
 
+TEST_F(DualChannelManagerTest, SendDropsStaleKcpBindingAndFallsBackToTcp) {
+  const uint64_t session_id = 2600;
+  const uint16_t msg_id = 5601;
+  const std::vector<uint8_t> payload{0x10, 0x20};
+
+  auto tcp_session = MakeTcpSession(io_context_, session_id);
+  auto kcp_session = MakeKcpSession(99);
+  kcp_session->SetRemoteEndpoint(
+      asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9001));
+
+  EXPECT_CALL(*mock_network_ptr_, GetSession(session_id))
+      .WillOnce(Return(tcp_session))
+      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(*mock_kcp_ptr_, AddSession(kcp_session)).WillOnce(Return(true));
+  EXPECT_CALL(*mock_kcp_ptr_, RemoveSession(kcp_session->GetConvId())).Times(1);
+  EXPECT_CALL(*mock_network_ptr_, Send(session_id, msg_id, payload)).Times(1);
+
+  ASSERT_TRUE(manager_->BindKcpSession(session_id, kcp_session));
+  manager_->SetRoute(msg_id, mir2::common::ChannelType::kKcp);
+
+  manager_->Send(session_id, msg_id, payload);
+
+  EXPECT_EQ(manager_->GetKcpSession(session_id), nullptr);
+}
+
 TEST_F(DualChannelManagerTest, BindAndUnbindKcpSessionTracksAndRemoves) {
   const uint64_t session_id = 3003;
   auto tcp_session = MakeTcpSession(io_context_, session_id);
@@ -151,6 +176,23 @@ TEST_F(DualChannelManagerTest, BindAndUnbindKcpSessionTracksAndRemoves) {
   EXPECT_CALL(*mock_kcp_ptr_, RemoveSession(kcp_session->GetConvId())).Times(1);
   manager_->UnbindKcpSession(session_id);
   EXPECT_EQ(manager_->GetKcpSession(session_id), nullptr);
+}
+
+TEST_F(DualChannelManagerTest, TryBindKcpSessionIfAbsentRejectsExistingBinding) {
+  const uint64_t session_id = 3111;
+  auto tcp_session = MakeTcpSession(io_context_, session_id);
+  auto first_kcp_session = MakeKcpSession(177);
+  auto second_kcp_session = MakeKcpSession(178);
+
+  EXPECT_CALL(*mock_network_ptr_, GetSession(session_id))
+      .Times(2)
+      .WillRepeatedly(Return(tcp_session));
+  EXPECT_CALL(*mock_kcp_ptr_, AddSession(first_kcp_session)).WillOnce(Return(true));
+  EXPECT_CALL(*mock_kcp_ptr_, AddSession(second_kcp_session)).Times(0);
+
+  EXPECT_TRUE(manager_->TryBindKcpSessionIfAbsent(session_id, first_kcp_session));
+  EXPECT_FALSE(manager_->TryBindKcpSessionIfAbsent(session_id, second_kcp_session));
+  EXPECT_EQ(manager_->GetKcpSession(session_id), first_kcp_session);
 }
 
 TEST_F(DualChannelManagerTest, BroadcastSendsToAllSessions) {
@@ -206,6 +248,36 @@ TEST_F(DualChannelManagerTest, TickCleansUpKcpWhenTcpMissing) {
   EXPECT_EQ(manager_->GetKcpSession(session_id), nullptr);
 }
 
+TEST_F(DualChannelManagerTest, TickHonorsConfiguredKcpCleanupInterval) {
+  const uint64_t stale_session_id = 4101;
+  auto stale_tcp_session = MakeTcpSession(io_context_, stale_session_id);
+  auto stale_kcp_session = MakeKcpSession(181);
+
+  EXPECT_CALL(*mock_network_ptr_, GetSession(stale_session_id))
+      .WillOnce(Return(stale_tcp_session))
+      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(*mock_kcp_ptr_, AddSession(stale_kcp_session)).WillOnce(Return(true));
+  EXPECT_CALL(*mock_kcp_ptr_, RemoveSession(stale_kcp_session->GetConvId())).Times(1);
+  EXPECT_CALL(*mock_network_ptr_, Tick()).Times(2);
+
+  ASSERT_TRUE(manager_->BindKcpSession(stale_session_id, stale_kcp_session));
+  manager_->SetKcpCleanupIntervalMs(60000);
+  manager_->Tick();
+  EXPECT_EQ(manager_->GetKcpSession(stale_session_id), nullptr);
+
+  const uint64_t fresh_session_id = 4102;
+  auto fresh_tcp_session = MakeTcpSession(io_context_, fresh_session_id);
+  auto fresh_kcp_session = MakeKcpSession(182);
+  EXPECT_CALL(*mock_network_ptr_, GetSession(fresh_session_id))
+      .WillRepeatedly(Return(fresh_tcp_session));
+  EXPECT_CALL(*mock_kcp_ptr_, AddSession(fresh_kcp_session)).WillOnce(Return(true));
+
+  ASSERT_TRUE(manager_->BindKcpSession(fresh_session_id, fresh_kcp_session));
+  manager_->Tick();
+
+  EXPECT_EQ(manager_->GetKcpSession(fresh_session_id), fresh_kcp_session);
+}
+
 TEST_F(DualChannelManagerTest, KcpHeartbeatSendsAck) {
   ASSERT_TRUE(static_cast<bool>(kcp_handler_));
 
@@ -215,7 +287,7 @@ TEST_F(DualChannelManagerTest, KcpHeartbeatSendsAck) {
 
   bool output_called = false;
   kcp_session->SetOutputHandler(
-      [&output_called](const asio::ip::udp::endpoint&, const uint8_t*, size_t) {
+      [&output_called](const asio::ip::udp::endpoint&, std::vector<uint8_t>&&) {
         output_called = true;
       });
 

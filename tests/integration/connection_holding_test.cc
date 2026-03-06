@@ -387,12 +387,12 @@ class ConnectionHoldingIntegrationTest : public ::testing::Test {
   }
 
   ConnectionHolder::State GetHolderState() const {
-    std::shared_lock<std::shared_mutex> lock(gateway_->session_map_mutex_);
+    std::shared_lock<std::shared_mutex> lock(gateway_->holder_lock_);
     return gateway_->holder_state_;
   }
 
   bool HolderHasBufferedMessages(uint64_t connection_id) const {
-    std::shared_lock<std::shared_mutex> lock(gateway_->session_map_mutex_);
+    std::shared_lock<std::shared_mutex> lock(gateway_->holder_lock_);
     auto it = gateway_->connection_holders_.find(connection_id);
     if (it == gateway_->connection_holders_.end() || !it->second) {
       return false;

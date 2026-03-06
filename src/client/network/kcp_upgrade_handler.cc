@@ -161,7 +161,11 @@ void KcpUpgradeHandler::Update(int64_t now_ms,
     }
   }
 
-  if (kcp_confirmed && !heartbeat_timed_out_ && last_heartbeat_send_ms_ > 0 &&
+  // Timeout is evaluated only after the KCP channel is observed disconnected.
+  // While channel is still connected we keep sending heartbeats and wait for transport-level
+  // disconnect signals instead of using stale-ack age.
+  if (kcp_confirmed && heartbeat_confirmed_ && !kcp_connected &&
+      !heartbeat_timed_out_ && last_heartbeat_send_ms_ > 0 &&
       now_ms - last_heartbeat_send_ms_ >= kHeartbeatTimeoutMs) {
     heartbeat_timed_out_ = true;
     if (disconnect_callback_) {

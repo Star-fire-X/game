@@ -11,6 +11,8 @@ extern "C" {
 #include "common/3rd_party/ikcp.h"
 }
 
+#include "common/enums.h"
+
 namespace mir2::client {
 
 KcpChannel::KcpChannel(asio::io_context& io_context,
@@ -358,14 +360,14 @@ void KcpChannel::DrainKcpReceive() {
     if (status != mir2::common::DecodeStatus::kOk) {
       continue;
     }
-
-
+    if (!mir2::common::ValidateChannelFlag(flags, mir2::common::ChannelType::kKcp)) {
+      continue;
+    }
     (void)sequence;
-    (void)flags;
 
     std::lock_guard<std::mutex> lock(receive_mutex_);
     if (receive_queue_.size() >= kMaxReceiveQueueSize) {
-      break;
+      continue;
     }
     receive_queue_.push(std::move(packet));
   }

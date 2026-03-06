@@ -27,6 +27,63 @@ constexpr const char* kCfOutbox = "cf_outbox";
 constexpr const char* kCfDeadLetter = "cf_dead_letter";
 constexpr const char* kCfMeta = "cf_meta";
 constexpr const char* kSchemaVersionKey = "__storage_schema_version__";
+constexpr const char* kEncryptionEnv = "MIR2_TEST_STORAGE_ENCRYPTION_KEYS";
+
+std::optional<std::string> GetEnvVar(const std::string& name) {
+  const char* value = std::getenv(name.c_str());
+  if (value == nullptr) {
+    return std::nullopt;
+  }
+  return std::string(value);
+}
+
+void SetEnvVar(const std::string& name, const std::string& value) {
+#if defined(_WIN32)
+  _putenv_s(name.c_str(), value.c_str());
+#else
+  setenv(name.c_str(), value.c_str(), 1);
+#endif
+}
+
+void UnsetEnvVar(const std::string& name) {
+#if defined(_WIN32)
+  _putenv_s(name.c_str(), "");
+#else
+  unsetenv(name.c_str());
+#endif
+}
+
+class ScopedEnvVar {
+ public:
+  ScopedEnvVar(std::string name, std::string value)
+      : name_(std::move(name)),
+        old_value_(GetEnvVar(name_)),
+        had_old_value_(old_value_.has_value()) {
+    SetEnvVar(name_, value);
+  }
+
+  ~ScopedEnvVar() {
+    if (had_old_value_) {
+      SetEnvVar(name_, *old_value_);
+      return;
+    }
+    UnsetEnvVar(name_);
+  }
+
+ private:
+  std::string name_;
+  std::optional<std::string> old_value_;
+  bool had_old_value_ = false;
+};
+
+bool ContainsBytes(const std::string& haystack, const std::vector<uint8_t>& needle) {
+  if (needle.empty()) {
+    return true;
+  }
+  const auto it = std::search(haystack.begin(), haystack.end(),
+                              needle.begin(), needle.end());
+  return it != haystack.end();
+}
 
 std::vector<uint8_t> MakePayload(size_t bytes, uint8_t seed) {
   std::vector<uint8_t> payload(bytes, seed);
@@ -99,6 +156,48 @@ std::optional<std::string> ReadSchemaVersionMarker(const std::string& path) {
     return std::nullopt;
   }
   return marker;
+}
+
+std::optional<std::string> ReadRawDataValue(const std::string& path,
+                                            const std::string& key,
+                                            const std::string& cf_name) {
+  std::vector<rocksdb::ColumnFamilyDescriptor> descriptors{
+      {rocksdb::kDefaultColumnFamilyName, rocksdb::ColumnFamilyOptions{}},
+      {kCfDataPersistent, rocksdb::ColumnFamilyOptions{}},
+      {kCfDataTtl, rocksdb::ColumnFamilyOptions{}},
+      {kCfOutbox, rocksdb::ColumnFamilyOptions{}},
+      {kCfDeadLetter, rocksdb::ColumnFamilyOptions{}},
+      {kCfMeta, rocksdb::ColumnFamilyOptions{}},
+  };
+  std::vector<int32_t> ttls{3600, 0, 3600, 0, 0, 0};
+  std::vector<rocksdb::ColumnFamilyHandle*> handles;
+  rocksdb::DBWithTTL* raw_db = nullptr;
+  rocksdb::Status status = rocksdb::DBWithTTL::Open(
+      rocksdb::DBOptions{}, path, descriptors, &handles, &raw_db, ttls, true);
+  if (!status.ok()) {
+    return std::nullopt;
+  }
+  std::unique_ptr<rocksdb::DBWithTTL> db(raw_db);
+
+  rocksdb::ColumnFamilyHandle* target = nullptr;
+  for (auto* handle : handles) {
+    if (handle != nullptr && handle->GetName() == cf_name) {
+      target = handle;
+      break;
+    }
+  }
+  if (target == nullptr) {
+    DestroyHandles(db.get(), handles);
+    return std::nullopt;
+  }
+
+  std::string value;
+  status = db->Get(rocksdb::ReadOptions{}, target, key, &value);
+  DestroyHandles(db.get(), handles);
+  if (!status.ok()) {
+    return std::nullopt;
+  }
+  return value;
 }
 
 class RocksDBCacheP1Test : public ::testing::Test {
@@ -324,6 +423,35 @@ TEST_F(RocksDBCacheP1Test, DeadLetterAppendReplayAckRoundTrip) {
   ASSERT_TRUE(cache_->AckDeadLetter(dead_letter_id));
   ASSERT_TRUE(cache_->AckDeadLetter(dead_letter_id));  // idempotent ack
   EXPECT_EQ(cache_->DeadLetterDepth(), 0U);
+}
+
+TEST_F(RocksDBCacheP1Test, TombstoneGcAppendReplayAckRoundTrip) {
+  uint64_t id1 = 0;
+  uint64_t id2 = 0;
+  ASSERT_TRUE(cache_->AppendTombstoneGcEntry(
+      "tombstone:key:1", 101, 1000, &id1));
+  ASSERT_TRUE(cache_->AppendTombstoneGcEntry(
+      "tombstone:key:2", 202, 5000, &id2));
+  ASSERT_GT(id1, 0U);
+  ASSERT_EQ(id2, id1 + 1);
+  EXPECT_EQ(cache_->TombstoneGcDepth(), 2U);
+
+  std::vector<RocksDBCache::TombstoneGcEntry> replayed;
+  const size_t replayed_count = cache_->ReplayDueTombstoneGc(
+      100, 2000, [&replayed](const RocksDBCache::TombstoneGcEntry& entry) {
+        replayed.push_back(entry);
+        return true;
+      });
+  ASSERT_EQ(replayed_count, 1U);
+  ASSERT_EQ(replayed.size(), 1U);
+  EXPECT_EQ(replayed[0].tombstone_gc_id, id1);
+  EXPECT_EQ(replayed[0].key, "tombstone:key:1");
+  EXPECT_EQ(replayed[0].delete_version, 101U);
+  EXPECT_EQ(replayed[0].due_at_ms, 1000U);
+
+  ASSERT_TRUE(cache_->AckTombstoneGcEntry(id1));
+  ASSERT_TRUE(cache_->AckTombstoneGcEntry(id1));
+  EXPECT_EQ(cache_->TombstoneGcDepth(), 1U);
 }
 
 TEST_F(RocksDBCacheP1Test, DataTierIsolationRoutesDataToExpectedColumnFamily) {
@@ -635,6 +763,169 @@ TEST_F(RocksDBCacheP1Test,
   EXPECT_GE(isolated.hit_ratio, baseline.hit_ratio * 0.95)
       << "baseline_hit_ratio=" << baseline.hit_ratio
       << ", isolated_hit_ratio=" << isolated.hit_ratio;
+}
+
+TEST_F(RocksDBCacheP1Test, Phase2ReadFallbackCanReadLegacyV1PayloadWhenEnabled) {
+  const VersionedData legacy_v1 = MakeVersionedData(88, 9);
+  ASSERT_TRUE(cache_->Set("phase2:v1:fallback:on", legacy_v1,
+                          RocksDBCache::DataTier::kTtl));
+
+  cache_.reset();
+
+  config_.enable_v2_encode = true;
+  config_.enable_v2_read_fallback = true;
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  ASSERT_TRUE(cache_->Initialize());
+
+  auto hit = cache_->Get("phase2:v1:fallback:on", RocksDBCache::DataTier::kTtl);
+  ASSERT_TRUE(hit.has_value());
+  EXPECT_EQ(hit->version, legacy_v1.version);
+  EXPECT_EQ(hit->data, legacy_v1.data);
+}
+
+TEST_F(RocksDBCacheP1Test,
+       Phase2ReadFallbackRejectsLegacyV1PayloadWhenDisabled) {
+  const VersionedData legacy_v1 = MakeVersionedData(89, 10);
+  ASSERT_TRUE(cache_->Set("phase2:v1:fallback:off", legacy_v1,
+                          RocksDBCache::DataTier::kTtl));
+
+  cache_.reset();
+
+  config_.enable_v2_encode = true;
+  config_.enable_v2_read_fallback = false;
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  ASSERT_TRUE(cache_->Initialize());
+
+  auto hit = cache_->Get("phase2:v1:fallback:off", RocksDBCache::DataTier::kTtl);
+  EXPECT_FALSE(hit.has_value());
+}
+
+TEST_F(RocksDBCacheP1Test, Phase2WritePathDefaultsToLegacyV1Encoding) {
+  const VersionedData data = MakeVersionedData(90, 11);
+  ASSERT_TRUE(cache_->Set("phase2:encode:v1", data, RocksDBCache::DataTier::kTtl));
+
+  const auto raw = ReadRawDataValue(db_path_, "phase2:encode:v1", kCfDataTtl);
+  ASSERT_TRUE(raw.has_value());
+  ASSERT_GE(raw->size(), sizeof(uint64_t));
+
+  uint64_t encoded_version = 0;
+  std::memcpy(&encoded_version, raw->data(), sizeof(uint64_t));
+  EXPECT_EQ(encoded_version, data.version);
+}
+
+TEST_F(RocksDBCacheP1Test, Phase2WritePathUsesV2EncodingWhenFlagEnabled) {
+  cache_.reset();
+  config_.enable_v2_encode = true;
+  config_.enable_v2_read_fallback = true;
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  ASSERT_TRUE(cache_->Initialize());
+
+  const VersionedData data = MakeVersionedData(91, 12);
+  ASSERT_TRUE(cache_->Set("phase2:encode:v2", data, RocksDBCache::DataTier::kTtl));
+
+  const auto raw = ReadRawDataValue(db_path_, "phase2:encode:v2", kCfDataTtl);
+  ASSERT_TRUE(raw.has_value());
+  ASSERT_GE(raw->size(), 4U);
+  EXPECT_EQ(static_cast<uint8_t>((*raw)[0]), static_cast<uint8_t>('M'));
+  EXPECT_EQ(static_cast<uint8_t>((*raw)[1]), static_cast<uint8_t>('2'));
+  EXPECT_EQ(static_cast<uint8_t>((*raw)[2]), static_cast<uint8_t>('V'));
+  EXPECT_EQ(static_cast<uint8_t>((*raw)[3]), static_cast<uint8_t>('2'));
+}
+
+TEST_F(RocksDBCacheP1Test, Phase4EncryptionStoresCiphertextAndRoundTrips) {
+  cache_.reset();
+  config_.enable_v2_encode = true;
+  config_.enable_v2_read_fallback = true;
+  config_.enable_data_encryption = true;
+  config_.encryption_active_key_id = "k1";
+  config_.encryption_key_env = kEncryptionEnv;
+
+  ScopedEnvVar encryption_env(
+      kEncryptionEnv,
+      "k1=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  ASSERT_TRUE(cache_->Initialize());
+
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  const VersionedData data{
+      .version = 501,
+      .data = std::vector<uint8_t>{'s', 'e', 'c', 'r', 'e', 't', '-', 'v', '2'},
+      .timestamp_ms = now_ms};
+  ASSERT_TRUE(cache_->Set("phase4:enc:v2", data, RocksDBCache::DataTier::kTtl));
+
+  const auto raw = ReadRawDataValue(db_path_, "phase4:enc:v2", kCfDataTtl);
+  ASSERT_TRUE(raw.has_value());
+  EXPECT_FALSE(ContainsBytes(*raw, data.data));
+
+  const auto loaded = cache_->Get("phase4:enc:v2", RocksDBCache::DataTier::kTtl);
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_EQ(loaded->version, data.version);
+  EXPECT_EQ(loaded->data, data.data);
+}
+
+TEST_F(RocksDBCacheP1Test, Phase4EncryptionKeyRotationReadsOldAndNewPayloads) {
+  cache_.reset();
+  config_.enable_v2_encode = true;
+  config_.enable_v2_read_fallback = true;
+  config_.enable_data_encryption = true;
+  config_.encryption_active_key_id = "k1";
+  config_.encryption_key_env = kEncryptionEnv;
+
+  ScopedEnvVar initial_env(
+      kEncryptionEnv,
+      "k1=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  ASSERT_TRUE(cache_->Initialize());
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  ASSERT_TRUE(cache_->Set(
+      "phase4:key:old",
+      VersionedData{.version = 610,
+                    .data = std::vector<uint8_t>{1, 2, 3},
+                    .timestamp_ms = now_ms},
+      RocksDBCache::DataTier::kTtl));
+
+  SetEnvVar(
+      kEncryptionEnv,
+      "k1=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff,"
+      "k2=ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100");
+  ASSERT_TRUE(
+      cache_->ApplyRuntimeEncryptionConfig(true, "k2", kEncryptionEnv));
+
+  ASSERT_TRUE(cache_->Set(
+      "phase4:key:new",
+      VersionedData{.version = 611,
+                    .data = std::vector<uint8_t>{4, 5, 6},
+                    .timestamp_ms = now_ms + 1},
+      RocksDBCache::DataTier::kTtl));
+
+  auto old_loaded = cache_->Get("phase4:key:old", RocksDBCache::DataTier::kTtl);
+  ASSERT_TRUE(old_loaded.has_value());
+  EXPECT_EQ(old_loaded->data, (std::vector<uint8_t>{1, 2, 3}));
+
+  auto new_loaded = cache_->Get("phase4:key:new", RocksDBCache::DataTier::kTtl);
+  ASSERT_TRUE(new_loaded.has_value());
+  EXPECT_EQ(new_loaded->data, (std::vector<uint8_t>{4, 5, 6}));
+}
+
+TEST_F(RocksDBCacheP1Test, Phase4EncryptionInitFailsWithoutActiveKeyMaterial) {
+  cache_.reset();
+  config_.enable_v2_encode = true;
+  config_.enable_data_encryption = true;
+  config_.encryption_active_key_id = "missing";
+  config_.encryption_key_env = kEncryptionEnv;
+
+  UnsetEnvVar(kEncryptionEnv);
+
+  cache_ = std::make_unique<RocksDBCache>(config_);
+  EXPECT_FALSE(cache_->Initialize());
 }
 
 }  // namespace

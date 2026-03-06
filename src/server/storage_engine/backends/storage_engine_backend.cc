@@ -1,4 +1,5 @@
 #include "storage_engine/backends/storage_engine_backend.h"
+#include "storage_engine/backends/storage_engine_backend_sql.h"
 
 #include <chrono>
 #include <cstddef>
@@ -13,17 +14,6 @@ int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
   auto elapsed = std::chrono::steady_clock::now() - start;
   return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 }
-
-constexpr const char* kUpsertSQL =
-    "INSERT INTO kv_store (key, version, data, updated_at) "
-    "VALUES ($1, $2, $3, NOW()) "
-    "ON CONFLICT (key) DO UPDATE "
-    "SET version = EXCLUDED.version, data = EXCLUDED.data, updated_at = NOW() "
-    // Keep newest write only; callers must supply monotonic-increasing version.
-    "WHERE kv_store.version < EXCLUDED.version";
-
-constexpr const char* kDeleteSQL =
-    "DELETE FROM kv_store WHERE key = $1 AND version <= $2";
 }  // namespace
 
 StorageEngineBackend::StorageEngineBackend(const config::DatabaseConfig& db_config)
@@ -69,7 +59,7 @@ mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::Save(
     PgConnectionGuard guard(*pool_, conn);
     pqxx::work txn(*conn);
 
-    txn.exec(kUpsertSQL,
+    txn.exec(storage_engine_sql::kUpsertSql,
              pqxx::params{
                  key, static_cast<int64_t>(version), pqxx::binary_cast(data)});
     txn.commit();
@@ -106,7 +96,7 @@ mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::SaveB
     pqxx::work txn(*conn);
 
     for (const auto& [key, version, data] : items) {
-      txn.exec(kUpsertSQL,
+      txn.exec(storage_engine_sql::kUpsertSql,
                pqxx::params{
                    key, static_cast<int64_t>(version), pqxx::binary_cast(data)});
     }
@@ -136,10 +126,11 @@ mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::Delet
     PgConnectionGuard guard(*pool_, conn);
     pqxx::work txn(*conn);
     if (hard_delete) {
-      txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+      txn.exec(storage_engine_sql::kHardDeleteSql,
+               pqxx::params{key, static_cast<int64_t>(version)});
     } else {
-      // Stage1 keeps physical-delete behavior for compatibility.
-      txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+      txn.exec(storage_engine_sql::kSoftDeleteSql,
+               pqxx::params{key, static_cast<int64_t>(version)});
     }
     txn.commit();
     return StorageResult{true, "", ElapsedMs(start)};
@@ -176,10 +167,11 @@ mir2::storage_engine::IStorageBackend::StorageResult StorageEngineBackend::Delet
     pqxx::work txn(*conn);
     for (const auto& [key, version] : items) {
       if (hard_delete) {
-        txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+        txn.exec(storage_engine_sql::kHardDeleteSql,
+                 pqxx::params{key, static_cast<int64_t>(version)});
       } else {
-        // Stage1 keeps physical-delete behavior for compatibility.
-        txn.exec(kDeleteSQL, pqxx::params{key, static_cast<int64_t>(version)});
+        txn.exec(storage_engine_sql::kSoftDeleteSql,
+                 pqxx::params{key, static_cast<int64_t>(version)});
       }
     }
     txn.commit();
@@ -211,9 +203,8 @@ std::optional<std::pair<uint64_t, std::vector<uint8_t>>> StorageEngineBackend::L
 
     PgConnectionGuard guard(*pool_, conn);
     pqxx::work txn(*conn);
-    pqxx::result result = txn.exec(
-        "SELECT version, data FROM kv_store WHERE key = $1",
-        pqxx::params{key});
+    pqxx::result result =
+        txn.exec(storage_engine_sql::kLoadSql, pqxx::params{key});
 
     if (result.empty()) {
       return std::nullopt;
@@ -266,7 +257,7 @@ StorageEngineBackend::LoadAll() {
 
     PgConnectionGuard guard(*pool_, conn);
     pqxx::work txn(*conn);
-    pqxx::result result = txn.exec("SELECT key, version, data FROM kv_store");
+    pqxx::result result = txn.exec(storage_engine_sql::kLoadAllSql);
 
     std::map<std::string, std::pair<uint64_t, std::vector<uint8_t>>> all;
     for (const auto& row : result) {

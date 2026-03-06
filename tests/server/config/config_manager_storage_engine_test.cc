@@ -60,6 +60,19 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
       << "  enable_access_control: true\n"
       << "  require_auth_for_reads: true\n"
       << "  enable_new_write_path: false\n"
+      << "  enable_v2_encode: true\n"
+      << "  enable_v2_read_fallback: false\n"
+      << "  enable_data_encryption: true\n"
+      << "  encryption_active_key_id: \"k2026-03\"\n"
+      << "  encryption_key_env: \"MIR2_STORAGE_ENCRYPTION_KEYS\"\n"
+      << "  startup_fail_on_validation_error: false\n"
+      << "  checkpoint_enabled: false\n"
+      << "  checkpoint_interval_minutes: 5\n"
+      << "  checkpoint_retention: 12\n"
+      << "  tombstone_retention_seconds: 3600\n"
+      << "  tombstone_gc_interval_seconds: 120\n"
+      << "  l2_usage_soft_limit_ratio: 0.70\n"
+      << "  l2_usage_hard_limit_ratio: 0.90\n"
       << "  access_control_token: \"token-xyz\"\n"
       << "  critical_key_prefixes: [\"char:\", \"account:username:\", \"trade:\"]\n"
       << "  sync_write_key_prefixes: [\"char:\", \"trade:\"]\n";
@@ -96,6 +109,19 @@ TEST(ConfigManagerStorageEngineTest, LoadsStorageEngineConfigFromYaml) {
   EXPECT_TRUE(cfg.enable_access_control);
   EXPECT_TRUE(cfg.require_auth_for_reads);
   EXPECT_FALSE(cfg.enable_new_write_path);
+  EXPECT_TRUE(cfg.enable_v2_encode);
+  EXPECT_FALSE(cfg.enable_v2_read_fallback);
+  EXPECT_TRUE(cfg.enable_data_encryption);
+  EXPECT_EQ(cfg.encryption_active_key_id, "k2026-03");
+  EXPECT_EQ(cfg.encryption_key_env, "MIR2_STORAGE_ENCRYPTION_KEYS");
+  EXPECT_FALSE(cfg.startup_fail_on_validation_error);
+  EXPECT_FALSE(cfg.checkpoint_enabled);
+  EXPECT_EQ(cfg.checkpoint_interval_minutes, 5u);
+  EXPECT_EQ(cfg.checkpoint_retention, 12u);
+  EXPECT_EQ(cfg.tombstone_retention_seconds, 3600u);
+  EXPECT_EQ(cfg.tombstone_gc_interval_seconds, 120u);
+  EXPECT_DOUBLE_EQ(cfg.l2_usage_soft_limit_ratio, 0.70);
+  EXPECT_DOUBLE_EQ(cfg.l2_usage_hard_limit_ratio, 0.90);
   EXPECT_EQ(cfg.access_control_token, "token-xyz");
   ASSERT_EQ(cfg.critical_key_prefixes.size(), 3u);
   EXPECT_EQ(cfg.critical_key_prefixes[2], "trade:");
@@ -134,6 +160,19 @@ TEST(ConfigManagerStorageEngineTest, UsesLegacyL2MaxSizeAsBlockCacheFallback) {
   const auto& cfg = ConfigManager::Instance().GetStorageEngineConfig();
   EXPECT_EQ(cfg.l2_max_size_mb, 321u);
   EXPECT_EQ(cfg.l2_block_cache_mb, 321u);
+  EXPECT_FALSE(cfg.enable_v2_encode);
+  EXPECT_TRUE(cfg.enable_v2_read_fallback);
+  EXPECT_FALSE(cfg.enable_data_encryption);
+  EXPECT_TRUE(cfg.encryption_active_key_id.empty());
+  EXPECT_TRUE(cfg.encryption_key_env.empty());
+  EXPECT_TRUE(cfg.startup_fail_on_validation_error);
+  EXPECT_TRUE(cfg.checkpoint_enabled);
+  EXPECT_EQ(cfg.checkpoint_interval_minutes, 30u);
+  EXPECT_EQ(cfg.checkpoint_retention, 48u);
+  EXPECT_EQ(cfg.tombstone_retention_seconds, 604800u);
+  EXPECT_EQ(cfg.tombstone_gc_interval_seconds, 3600u);
+  EXPECT_DOUBLE_EQ(cfg.l2_usage_soft_limit_ratio, 0.85);
+  EXPECT_DOUBLE_EQ(cfg.l2_usage_hard_limit_ratio, 0.95);
 
   std::error_code ec;
   std::filesystem::remove(path, ec);

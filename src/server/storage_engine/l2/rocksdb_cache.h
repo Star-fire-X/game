@@ -2,12 +2,15 @@
 #define MIR2_STORAGE_ENGINE_L2_ROCKSDB_CACHE_H_
 
 #include <atomic>
+#include <array>
 #include <functional>
 #include <cstddef>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <storage_engine/storage_engine.h>
@@ -45,6 +48,11 @@ public:
         bool isolate_foreach_scan_reader = false;
         // Enable RocksDB ticker stats (used for block-cache hit/miss observability).
         bool enable_statistics = false;
+        bool enable_v2_encode = false;
+        bool enable_v2_read_fallback = true;
+        bool enable_data_encryption = false;
+        std::string encryption_active_key_id;
+        std::string encryption_key_env;
         uint64_t max_version_persist_step = 64;
     };
 
@@ -84,6 +92,7 @@ public:
     using IteratorCallback = std::function<bool(const std::string& key, const VersionedData& data)>;
     size_t ForEach(IteratorCallback cb);
     size_t ForEach(IteratorCallback cb, DataTier tier);
+    size_t CountCorruptedEntries(DataTier tier);
     size_t DeleteByPrefix(const std::string& prefix,
                           DataTier tier,
                           size_t batch_size = 1024);
@@ -94,10 +103,64 @@ public:
 
     bool IsOpen() const { return db_ != nullptr; }
 
+    bool ApplyRuntimeCodecConfig(
+        bool enable_v2_encode,
+        bool enable_v2_read_fallback,
+        std::optional<bool> enable_data_encryption = std::nullopt,
+        std::optional<std::string> encryption_active_key_id = std::nullopt,
+        std::optional<std::string> encryption_key_env = std::nullopt);
+    bool ApplyRuntimeEncryptionConfig(bool enable_data_encryption,
+                                      const std::string& encryption_active_key_id,
+                                      const std::string& encryption_key_env);
+
+    struct CodecRuntimeStats {
+        bool enable_v2_encode = false;
+        bool enable_v2_read_fallback = true;
+        bool enable_data_encryption = false;
+        uint64_t v2_decode_reads = 0;
+        uint64_t v1_fallback_reads = 0;
+        uint64_t v1_reject_reads = 0;
+        uint64_t decode_errors = 0;
+        uint64_t encrypted_decode_reads = 0;
+        uint64_t decrypt_failures = 0;
+    };
+    CodecRuntimeStats GetCodecRuntimeStats() const;
+
+    struct RuntimeConfigAuditStats {
+        uint64_t runtime_config_audit_total = 0;
+        uint64_t runtime_config_audit_failures = 0;
+        uint64_t runtime_config_audit_reason_updated_total = 0;
+        uint64_t runtime_config_audit_reason_l2_codec_apply_failed_total = 0;
+        uint64_t runtime_config_audit_key_enable_access_control_total = 0;
+        uint64_t runtime_config_audit_key_require_auth_for_reads_total = 0;
+        uint64_t runtime_config_audit_key_access_control_token_total = 0;
+        uint64_t runtime_config_audit_key_encryption_active_key_id_total = 0;
+        uint64_t runtime_config_audit_key_enable_data_encryption_total = 0;
+        uint64_t runtime_config_audit_key_encryption_key_env_total = 0;
+    };
+    bool PersistRuntimeConfigAuditStats(const RuntimeConfigAuditStats& stats);
+    RuntimeConfigAuditStats GetPersistedRuntimeConfigAuditStats() const;
+
+    struct CapacityGovernanceStats {
+        uint64_t l2_soft_limit_write_total = 0;
+        uint64_t l2_hard_limit_reject_total = 0;
+        uint64_t l2_hard_limit_bypass_total = 0;
+    };
+    bool PersistCapacityGovernanceStats(const CapacityGovernanceStats& stats);
+    CapacityGovernanceStats GetPersistedCapacityGovernanceStats() const;
+
+    struct TombstoneGcStats {
+        uint64_t tombstone_gc_reclaimed_total = 0;
+        uint64_t tombstone_gc_failed_total = 0;
+    };
+    bool PersistTombstoneGcStats(const TombstoneGcStats& stats);
+    TombstoneGcStats GetPersistedTombstoneGcStats() const;
+
     size_t GetApproximateSizeBytes() const;
 
     std::string GetDBStats();
     bool GetUInt64Property(const std::string& property, uint64_t* out) const;
+    bool CreateCheckpoint(const std::string& output_path);
 
     struct OutboxEntry {
         uint64_t outbox_id = 0;
@@ -139,6 +202,27 @@ public:
 
     size_t DeadLetterDepth() const;
 
+    struct TombstoneGcEntry {
+        uint64_t tombstone_gc_id = 0;
+        std::string key;
+        uint64_t delete_version = 0;
+        uint64_t due_at_ms = 0;
+    };
+
+    bool AppendTombstoneGcEntry(const std::string& key,
+                                uint64_t delete_version,
+                                uint64_t due_at_ms,
+                                uint64_t* tombstone_gc_id = nullptr);
+
+    bool AckTombstoneGcEntry(uint64_t tombstone_gc_id);
+
+    size_t ReplayDueTombstoneGc(
+        size_t limit,
+        uint64_t now_ms,
+        const std::function<bool(const TombstoneGcEntry&)>& cb);
+
+    size_t TombstoneGcDepth() const;
+
 private:
     static constexpr size_t kDefaultCFIndex = 0;
     static constexpr size_t kDataPersistentCFIndex = 1;
@@ -153,8 +237,11 @@ private:
     bool WriteSchemaVersionMarker();
     bool LoadOutboxNextId();
     bool LoadDeadLetterNextId();
+    bool LoadTombstoneGcNextId();
     bool PersistOutboxNextIdLocked(uint64_t next_id);
     bool PersistDeadLetterNextIdLocked(uint64_t next_id);
+    bool PersistTombstoneGcNextIdLocked(uint64_t next_id);
+    bool ReadMetaUint64(const std::string& key, uint64_t* out) const;
     rocksdb::ColumnFamilyHandle* ResolveDataColumnFamily(DataTier tier) const;
     rocksdb::ColumnFamilyHandle* ResolvePeerDataColumnFamily(DataTier tier) const;
     std::optional<VersionedData> GetFromColumnFamily(
@@ -172,6 +259,12 @@ private:
 
     bool DeserializeVersionedData(const rocksdb::Slice& data,
                                   VersionedData& result);
+    bool LoadEncryptionKeyringFromEnv(
+        const std::string& env_name,
+        std::unordered_map<std::string, std::array<uint8_t, 32>>* out) const;
+    bool DecodeEncryptionKeyMaterial(
+        const std::string& encoded,
+        std::array<uint8_t, 32>* out) const;
     std::string MakeOutboxStorageKey(uint64_t outbox_id) const;
     bool ParseOutboxStorageKey(const rocksdb::Slice& storage_key,
                                uint64_t* outbox_id) const;
@@ -187,6 +280,13 @@ private:
         const DeadLetterEntry& entry) const;
     bool DeserializeDeadLetterValue(const rocksdb::Slice& value,
                                     DeadLetterEntry* entry);
+    std::string MakeTombstoneGcStorageKey(uint64_t tombstone_gc_id) const;
+    bool ParseTombstoneGcStorageKey(const rocksdb::Slice& storage_key,
+                                    uint64_t* tombstone_gc_id) const;
+    std::vector<uint8_t> SerializeTombstoneGcValue(
+        const TombstoneGcEntry& entry) const;
+    bool DeserializeTombstoneGcValue(const rocksdb::Slice& value,
+                                     TombstoneGcEntry* entry);
     std::string EncodeUint64ToString(uint64_t value) const;
     bool DecodeUint64FromSlice(const rocksdb::Slice& value,
                                uint64_t* out) const;
@@ -224,11 +324,62 @@ private:
     static std::string GetDeadLetterNextIdKey() {
         return "__dead_letter_next_id__";
     }
+    static std::string GetTombstoneGcNextIdKey() {
+        return "__tombstone_gc_next_id__";
+    }
     static std::string GetOutboxStoragePrefix() {
         return "outbox:";
     }
     static std::string GetDeadLetterStoragePrefix() {
         return "dead_letter:";
+    }
+    static std::string GetTombstoneGcStoragePrefix() {
+        return "tombstone_gc:";
+    }
+    static std::string GetRuntimeConfigAuditTotalKey() {
+        return "__runtime_config_audit_total__";
+    }
+    static std::string GetRuntimeConfigAuditFailureKey() {
+        return "__runtime_config_audit_failure_total__";
+    }
+    static std::string GetRuntimeConfigAuditReasonUpdatedKey() {
+        return "__runtime_config_audit_reason_updated_total__";
+    }
+    static std::string GetRuntimeConfigAuditReasonL2CodecApplyFailedKey() {
+        return "__runtime_config_audit_reason_l2_codec_apply_failed_total__";
+    }
+    static std::string GetRuntimeConfigAuditKeyEnableAccessControlKey() {
+        return "__runtime_config_audit_key_enable_access_control_total__";
+    }
+    static std::string GetRuntimeConfigAuditKeyRequireAuthForReadsKey() {
+        return "__runtime_config_audit_key_require_auth_for_reads_total__";
+    }
+    static std::string GetRuntimeConfigAuditKeyAccessControlTokenKey() {
+        return "__runtime_config_audit_key_access_control_token_total__";
+    }
+    static std::string GetRuntimeConfigAuditKeyEncryptionActiveKeyIdKey() {
+        return "__runtime_config_audit_key_encryption_active_key_id_total__";
+    }
+    static std::string GetRuntimeConfigAuditKeyEnableDataEncryptionKey() {
+        return "__runtime_config_audit_key_enable_data_encryption_total__";
+    }
+    static std::string GetRuntimeConfigAuditKeyEncryptionKeyEnvKey() {
+        return "__runtime_config_audit_key_encryption_key_env_total__";
+    }
+    static std::string GetL2SoftLimitWriteTotalKey() {
+        return "__l2_soft_limit_write_total__";
+    }
+    static std::string GetL2HardLimitRejectTotalKey() {
+        return "__l2_hard_limit_reject_total__";
+    }
+    static std::string GetL2HardLimitBypassTotalKey() {
+        return "__l2_hard_limit_bypass_total__";
+    }
+    static std::string GetTombstoneGcReclaimedTotalKey() {
+        return "__tombstone_gc_reclaimed_total__";
+    }
+    static std::string GetTombstoneGcFailedTotalKey() {
+        return "__tombstone_gc_failed_total__";
     }
 
     Config config_;
@@ -246,6 +397,22 @@ private:
     uint64_t outbox_next_id_ = 1;
     mutable std::mutex dead_letter_mutex_;
     uint64_t dead_letter_next_id_ = 1;
+    mutable std::mutex tombstone_gc_mutex_;
+    uint64_t tombstone_gc_next_id_ = 1;
+    std::atomic<bool> runtime_enable_v2_encode_{false};
+    std::atomic<bool> runtime_enable_v2_read_fallback_{true};
+    std::atomic<bool> runtime_enable_data_encryption_{false};
+    mutable std::shared_mutex encryption_keyring_mutex_;
+    std::string runtime_encryption_active_key_id_;
+    std::string runtime_encryption_key_env_;
+    std::unordered_map<std::string, std::array<uint8_t, 32>>
+        runtime_encryption_keyring_;
+    std::atomic<uint64_t> codec_v2_decode_reads_{0};
+    std::atomic<uint64_t> codec_v1_fallback_reads_{0};
+    std::atomic<uint64_t> codec_v1_reject_reads_{0};
+    std::atomic<uint64_t> codec_decode_errors_{0};
+    std::atomic<uint64_t> codec_encrypted_decode_reads_{0};
+    std::atomic<uint64_t> codec_decrypt_failures_{0};
     std::atomic<uint64_t> max_version_{0};
     std::atomic<uint64_t> persisted_max_version_{0};
     mutable std::mutex max_version_persist_mutex_;

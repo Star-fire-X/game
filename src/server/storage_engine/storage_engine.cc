@@ -20,7 +20,9 @@
 #include <atomic>
 #include <cmath>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <shared_mutex>
 #include <string_view>
@@ -59,11 +61,49 @@ constexpr const char* kL1HitRatioMetric = "storage.l1_hit_ratio";
 constexpr const char* kStrictWriteFallbackMetric =
     "storage.strict_write_fallback_total";
 constexpr const char* kStrictWriteFailMetric = "storage.strict_write_fail_total";
+constexpr const char* kL2CapacitySoftLimitWriteMetric =
+    "storage.l2_capacity.soft_limit_write_total";
+constexpr const char* kL2CapacityHardRejectMetric =
+    "storage.l2_capacity.hard_limit_reject_total";
+constexpr const char* kL2CapacityHardBypassMetric =
+    "storage.l2_capacity.hard_limit_bypass_total";
+constexpr const char* kTombstoneGcReclaimedMetric =
+    "storage.tombstone_gc.reclaimed_total";
+constexpr const char* kTombstoneGcFailedMetric =
+    "storage.tombstone_gc.failed_total";
 constexpr const char* kRecoveryRecoveredMetric = "storage.recovery.recovered_total";
 constexpr const char* kRecoveryErrorMetric = "storage.recovery.error_total";
+constexpr const char* kCheckpointCreatedMetric =
+    "storage.checkpoint.created_total";
+constexpr const char* kCheckpointCreateErrorMetric =
+    "storage.checkpoint.create_error_total";
+constexpr const char* kCheckpointPrunedMetric =
+    "storage.checkpoint.pruned_total";
+constexpr const char* kCheckpointPruneErrorMetric =
+    "storage.checkpoint.prune_error_total";
 constexpr const char* kAccessAllowMetric = "storage.access.allow_total";
 constexpr const char* kAccessDenyMetric = "storage.access.deny_total";
 constexpr const char* kAuditLogMetric = "storage.audit.log_total";
+constexpr const char* kRuntimeConfigAuditMetric =
+    "storage.audit.runtime_config.total";
+constexpr const char* kRuntimeConfigAuditFailureMetric =
+    "storage.audit.runtime_config.failure_total";
+constexpr const char* kRuntimeConfigAuditReasonUpdatedMetric =
+    "storage.audit.runtime_config.reason.updated_total";
+constexpr const char* kRuntimeConfigAuditReasonL2CodecApplyFailedMetric =
+    "storage.audit.runtime_config.reason.l2_codec_apply_failed_total";
+constexpr const char* kRuntimeConfigAuditKeyEnableAccessControlMetric =
+    "storage.audit.runtime_config.key.enable_access_control_total";
+constexpr const char* kRuntimeConfigAuditKeyRequireAuthForReadsMetric =
+    "storage.audit.runtime_config.key.require_auth_for_reads_total";
+constexpr const char* kRuntimeConfigAuditKeyAccessControlTokenMetric =
+    "storage.audit.runtime_config.key.access_control_token_total";
+constexpr const char* kRuntimeConfigAuditKeyEncryptionActiveKeyIdMetric =
+    "storage.audit.runtime_config.key.encryption_active_key_id_total";
+constexpr const char* kRuntimeConfigAuditKeyEnableDataEncryptionMetric =
+    "storage.audit.runtime_config.key.enable_data_encryption_total";
+constexpr const char* kRuntimeConfigAuditKeyEncryptionKeyEnvMetric =
+    "storage.audit.runtime_config.key.encryption_key_env_total";
 constexpr const char* kInvalidationLocalMetric =
     "storage.invalidation.local_total";
 constexpr const char* kInvalidationBroadcastMetric =
@@ -83,12 +123,36 @@ constexpr uint64_t kL1MetricPublishRequestInterval = 256;
 constexpr size_t kUpdateLatencySampleWindow = 512;
 constexpr int kMaxConflictYieldRounds = 64;
 constexpr std::string_view kSensitiveAccountKeyPrefix = "account:username:";
+constexpr std::string_view kRedactedAuditKey = "<redacted>";
+constexpr std::string_view kRuntimeConfigAuditOperation = "runtime_config_update";
+constexpr std::string_view kRuntimeConfigAuditUpdatedReason = "updated";
+constexpr std::string_view kRuntimeConfigAuditL2CodecApplyFailedReason =
+    "l2_codec_apply_failed";
+constexpr std::string_view kRuntimeConfigKeyEnableAccessControl =
+    "config.enable_access_control";
+constexpr std::string_view kRuntimeConfigKeyRequireAuthForReads =
+    "config.require_auth_for_reads";
+constexpr std::string_view kRuntimeConfigKeyAccessControlToken =
+    "config.access_control_token";
+constexpr std::string_view kRuntimeConfigKeyEncryptionActiveKeyId =
+    "config.encryption_active_key_id";
+constexpr std::string_view kRuntimeConfigKeyEnableDataEncryption =
+    "config.enable_data_encryption";
+constexpr std::string_view kRuntimeConfigKeyEncryptionKeyEnv =
+    "config.encryption_key_env";
 
 bool IsValidStorageKey(const std::string& key) {
     if (key.empty() || key.size() > kMaxStorageKeyLength) {
         return false;
     }
     return key.find('\0') == std::string::npos;
+}
+
+double NormalizeUsageRatioLimit(double ratio) {
+    if (std::isnan(ratio) || std::isinf(ratio)) {
+        return 1.0;
+    }
+    return std::clamp(ratio, 0.0, 1.0);
 }
 
 bool IsSensitiveStorageKey(const std::string& key) {
@@ -112,6 +176,8 @@ const char* WriteRejectReasonToString(WriteRejectReason reason) {
         return "access_denied";
     case WriteRejectReason::kNotInitialized:
         return "not_initialized";
+    case WriteRejectReason::kL2HardCapacityLimit:
+        return "l2_hard_capacity_limit";
     }
     return "unknown";
 }
@@ -135,6 +201,11 @@ public:
         : backend_(std::move(backend))
         , config_(config)
         , shutdown_(false) {
+        config_.l2_usage_soft_limit_ratio =
+            NormalizeUsageRatioLimit(config_.l2_usage_soft_limit_ratio);
+        config_.l2_usage_hard_limit_ratio =
+            std::max(config_.l2_usage_soft_limit_ratio,
+                     NormalizeUsageRatioLimit(config_.l2_usage_hard_limit_ratio));
         auto logger = spdlog::get("mir2");
 
         l1::MemoryCache::Config l1_config;
@@ -172,12 +243,77 @@ public:
         l2_config.strict_ttl_reads = config_.l2_strict_ttl_reads;
         l2_config.scan_fill_cache = config_.l2_scan_fill_cache;
         l2_config.iter_pin_data = config_.l2_iter_pin_data;
+        l2_config.enable_v2_encode = config_.enable_v2_encode;
+        l2_config.enable_v2_read_fallback = config_.enable_v2_read_fallback;
+        l2_config.enable_data_encryption = config_.enable_data_encryption;
+        l2_config.encryption_active_key_id = config_.encryption_active_key_id;
+        l2_config.encryption_key_env = config_.encryption_key_env;
         l2_cache_ = std::make_unique<l2::RocksDBCache>(l2_config);
         if (!l2_cache_->Initialize()) {
             if (logger) {
                 logger->error("Failed to initialize L2 cache at {}", config_.l2_path);
             }
             l2_cache_.reset();
+        } else {
+            const auto persisted_runtime_audit_stats =
+                l2_cache_->GetPersistedRuntimeConfigAuditStats();
+            const auto persisted_capacity_stats =
+                l2_cache_->GetPersistedCapacityGovernanceStats();
+            const auto persisted_tombstone_gc_stats =
+                l2_cache_->GetPersistedTombstoneGcStats();
+            stats_.runtime_config_audit_total.store(
+                persisted_runtime_audit_stats.runtime_config_audit_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_failures.store(
+                persisted_runtime_audit_stats.runtime_config_audit_failures,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_reason_updated_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_reason_updated_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_reason_l2_codec_apply_failed_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_reason_l2_codec_apply_failed_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_key_enable_access_control_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_key_enable_access_control_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_key_require_auth_for_reads_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_key_require_auth_for_reads_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_key_access_control_token_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_key_access_control_token_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_key_encryption_active_key_id_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_key_encryption_active_key_id_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_key_enable_data_encryption_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_key_enable_data_encryption_total,
+                std::memory_order_relaxed);
+            stats_.runtime_config_audit_key_encryption_key_env_total.store(
+                persisted_runtime_audit_stats
+                    .runtime_config_audit_key_encryption_key_env_total,
+                std::memory_order_relaxed);
+            stats_.l2_soft_limit_write_total.store(
+                persisted_capacity_stats.l2_soft_limit_write_total,
+                std::memory_order_relaxed);
+            stats_.l2_hard_limit_reject_total.store(
+                persisted_capacity_stats.l2_hard_limit_reject_total,
+                std::memory_order_relaxed);
+            stats_.l2_hard_limit_bypass_total.store(
+                persisted_capacity_stats.l2_hard_limit_bypass_total,
+                std::memory_order_relaxed);
+            stats_.tombstone_gc_reclaimed_total.store(
+                persisted_tombstone_gc_stats.tombstone_gc_reclaimed_total,
+                std::memory_order_relaxed);
+            stats_.tombstone_gc_failed_total.store(
+                persisted_tombstone_gc_stats.tombstone_gc_failed_total,
+                std::memory_order_relaxed);
         }
         hlc_ = std::make_unique<utils::GlobalHybridClock>(l2_cache_.get());
         utils::CircuitBreaker::Config cb_config;
@@ -207,6 +343,10 @@ public:
             config_.enable_strict_write_guarantee, std::memory_order_release);
         enable_new_write_path_.store(
             config_.enable_new_write_path, std::memory_order_release);
+        l2_usage_soft_limit_ratio_.store(
+            config_.l2_usage_soft_limit_ratio, std::memory_order_release);
+        l2_usage_hard_limit_ratio_.store(
+            config_.l2_usage_hard_limit_ratio, std::memory_order_release);
         enable_access_control_.store(
             config_.enable_access_control, std::memory_order_release);
         require_auth_for_reads_.store(
@@ -215,6 +355,23 @@ public:
             std::unique_lock<std::shared_mutex> lock(access_control_mutex_);
             access_control_token_ = config_.access_control_token;
         }
+        checkpoint_enabled_.store(config_.checkpoint_enabled,
+                                  std::memory_order_release);
+        checkpoint_interval_seconds_.store(
+            std::max(config_.checkpoint_interval_seconds, 1u),
+            std::memory_order_release);
+        checkpoint_retention_.store(config_.checkpoint_retention,
+                                    std::memory_order_release);
+        tombstone_retention_seconds_.store(
+            config_.tombstone_retention_seconds, std::memory_order_release);
+        tombstone_gc_interval_seconds_.store(
+            config_.tombstone_gc_interval_seconds, std::memory_order_release);
+        checkpoint_root_dir_ = config_.checkpoint_dir.empty()
+                                   ? (std::filesystem::path(config_.l2_path) /
+                                      "checkpoints")
+                                   : std::filesystem::path(config_.checkpoint_dir);
+        StartCheckpointSchedulerIfNeeded();
+        StartTombstoneGcSchedulerIfNeeded();
         PublishCircuitBreakerStateGauges();
 
         if (logger) {
@@ -236,6 +393,9 @@ public:
         if (logger) {
             logger->info("StorageEngine shutting down...");
         }
+
+        StopCheckpointScheduler();
+        StopTombstoneGcScheduler();
 
         if (async_queue_) {
             async_queue_->Flush();
@@ -390,6 +550,138 @@ public:
             : l2::RocksDBCache::DataTier::kTtl;
     }
 
+    double GetL2UsageSoftLimitRatio() const {
+        return l2_usage_soft_limit_ratio_.load(std::memory_order_acquire);
+    }
+
+    double GetL2UsageHardLimitRatio() const {
+        return l2_usage_hard_limit_ratio_.load(std::memory_order_acquire);
+    }
+
+    double GetCurrentL2UsageRatio(size_t l2_size_bytes = 0) const {
+        if (config_.l2_max_size_mb == 0) {
+            return 0.0;
+        }
+        const size_t size_bytes = l2_size_bytes > 0
+            ? l2_size_bytes
+            : (l2_cache_ ? l2_cache_->GetApproximateSizeBytes() : 0);
+        if (size_bytes == 0) {
+            return 0.0;
+        }
+        const double max_bytes =
+            static_cast<double>(config_.l2_max_size_mb) * 1024.0 * 1024.0;
+        if (max_bytes <= 0.0) {
+            return 0.0;
+        }
+        return static_cast<double>(size_bytes) / max_bytes;
+    }
+
+    void ApplyL2UsageLimitRatios(double soft_limit_ratio,
+                                 double hard_limit_ratio) {
+        config_.l2_usage_soft_limit_ratio =
+            NormalizeUsageRatioLimit(soft_limit_ratio);
+        config_.l2_usage_hard_limit_ratio = std::max(
+            config_.l2_usage_soft_limit_ratio,
+            NormalizeUsageRatioLimit(hard_limit_ratio));
+        l2_usage_soft_limit_ratio_.store(config_.l2_usage_soft_limit_ratio,
+                                         std::memory_order_release);
+        l2_usage_hard_limit_ratio_.store(config_.l2_usage_hard_limit_ratio,
+                                         std::memory_order_release);
+    }
+
+    bool EvaluateL2CapacityPressure(bool* soft_limit_active,
+                                    bool* hard_limit_active,
+                                    double* usage_ratio = nullptr,
+                                    size_t l2_size_bytes = 0) const {
+        const double ratio = GetCurrentL2UsageRatio(l2_size_bytes);
+        if (usage_ratio != nullptr) {
+            *usage_ratio = ratio;
+        }
+        const bool soft_active = ratio >= GetL2UsageSoftLimitRatio();
+        const bool hard_active = ratio >= GetL2UsageHardLimitRatio();
+        if (soft_limit_active != nullptr) {
+            *soft_limit_active = soft_active;
+        }
+        if (hard_limit_active != nullptr) {
+            *hard_limit_active = hard_active;
+        }
+        return hard_active;
+    }
+
+    bool CheckAndRecordL2CapacityAdmission(const std::string& key,
+                                           Priority priority,
+                                           bool enforce_sync_prefix_semantics,
+                                           WriteRejectReason* reject_reason = nullptr) {
+        bool soft_limit_active = false;
+        bool hard_limit_active = false;
+        EvaluateL2CapacityPressure(
+            &soft_limit_active, &hard_limit_active, nullptr);
+        if (soft_limit_active) {
+            stats_.l2_soft_limit_write_total.fetch_add(
+                1, std::memory_order_relaxed);
+            IncrementStorageCounter(kL2CapacitySoftLimitWriteMetric);
+            PersistCapacityGovernanceStatsToL2();
+        }
+        const bool bypass_hard_limit =
+            priority == Priority::CRITICAL ||
+            (enforce_sync_prefix_semantics && IsSyncWriteCriticalKey(key));
+        if (hard_limit_active && bypass_hard_limit) {
+            stats_.l2_hard_limit_bypass_total.fetch_add(
+                1, std::memory_order_relaxed);
+            IncrementStorageCounter(kL2CapacityHardBypassMetric);
+            PersistCapacityGovernanceStatsToL2();
+        }
+        if (hard_limit_active && !bypass_hard_limit) {
+            stats_.l2_hard_limit_reject_total.fetch_add(
+                1, std::memory_order_relaxed);
+            IncrementStorageCounter(kL2CapacityHardRejectMetric);
+            PersistCapacityGovernanceStatsToL2();
+            if (reject_reason != nullptr) {
+                *reject_reason = WriteRejectReason::kL2HardCapacityLimit;
+            } else {
+                RecordWriteRejectReason(WriteRejectReason::kL2HardCapacityLimit);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool PutWithReasonLocked(const std::string& key,
+                             const VersionedData& data,
+                             const WriteOptions& options,
+                             WriteRejectReason* reject_reason) {
+        switch (options.durability) {
+        case WriteDurability::kSync:
+            return SetSyncInternal(key, data, options.priority);
+        case WriteDurability::kDurableAsync:
+            return SetInternal(
+                key,
+                data,
+                options.priority,
+                /*enforce_sync_prefix_semantics=*/false,
+                reject_reason);
+        case WriteDurability::kBestEffort:
+            if (options.bypass_sync_prefix_upgrade) {
+                return SetInternal(
+                    key,
+                    data,
+                    options.priority,
+                    /*enforce_sync_prefix_semantics=*/false,
+                    reject_reason);
+            }
+            if (IsSyncWriteCriticalKey(key)) {
+                return SetSyncInternal(key, data, Priority::CRITICAL);
+            }
+            return SetInternal(
+                key,
+                data,
+                options.priority,
+                /*enforce_sync_prefix_semantics=*/true,
+                reject_reason);
+        }
+        return false;
+    }
+
     bool PersistToBackendSync(const std::string& key,
                               const VersionedData& data) {
         auto logger = spdlog::get("mir2");
@@ -444,7 +736,8 @@ public:
     bool SetInternal(const std::string& key,
                      const VersionedData& data,
                      Priority priority,
-                     bool enforce_sync_prefix_semantics = true) {
+                     bool enforce_sync_prefix_semantics = true,
+                     WriteRejectReason* reject_reason = nullptr) {
         if (shutdown_.load(std::memory_order_acquire)) {
             return false;
         }
@@ -461,6 +754,17 @@ public:
 
             stats_.total_sets.fetch_add(1, std::memory_order_relaxed);
             return true;
+        }
+
+        if (!CheckAndRecordL2CapacityAdmission(
+                key, priority, enforce_sync_prefix_semantics, reject_reason)) {
+            auto logger = spdlog::get("mir2");
+            if (logger) {
+                logger->warn(
+                    "StorageEngine Set rejected: L2 hard capacity limit reached, key={}",
+                    key);
+            }
+            return false;
         }
 
         bool l2_persisted = false;
@@ -577,6 +881,22 @@ public:
             return true;
         }
 
+        bool soft_limit_active = false;
+        bool hard_limit_active = false;
+        EvaluateL2CapacityPressure(&soft_limit_active, &hard_limit_active, nullptr);
+        if (soft_limit_active) {
+            stats_.l2_soft_limit_write_total.fetch_add(
+                1, std::memory_order_relaxed);
+            IncrementStorageCounter(kL2CapacitySoftLimitWriteMetric);
+            PersistCapacityGovernanceStatsToL2();
+        }
+        if (hard_limit_active) {
+            stats_.l2_hard_limit_bypass_total.fetch_add(
+                1, std::memory_order_relaxed);
+            IncrementStorageCounter(kL2CapacityHardBypassMetric);
+            PersistCapacityGovernanceStatsToL2();
+        }
+
         bool l2_success = false;
         const auto data_tier = ResolveDataTier(key);
         if (l2_cache_ && (!circuit_breaker_ || !circuit_breaker_->IsOpen())) {
@@ -640,7 +960,11 @@ public:
             return false;
         }
 
-        const bool hard_delete = options.hard_delete || !options.write_tombstone;
+        const bool tombstone_retention_enabled =
+            tombstone_retention_seconds_.load(std::memory_order_acquire) > 0;
+        const bool hard_delete =
+            options.hard_delete || !options.write_tombstone ||
+            !tombstone_retention_enabled;
         if (async_queue_) {
             async_queue_->CancelPendingForKey(key, version);
         }
@@ -674,6 +998,23 @@ public:
             return false;
         }
 
+        if (backend_deleted && !hard_delete && l2_cache_) {
+            const uint64_t retention_seconds =
+                tombstone_retention_seconds_.load(std::memory_order_acquire);
+            const uint64_t due_at_ms =
+                detail::GetCurrentTimeMs() + retention_seconds * 1000ULL;
+            if (!l2_cache_->AppendTombstoneGcEntry(key, version, due_at_ms)) {
+                auto logger = spdlog::get("mir2");
+                if (logger) {
+                    logger->warn(
+                        "StorageEngine failed to append tombstone GC entry key={} version={}",
+                        key, version);
+                }
+            } else {
+                NotifyTombstoneGcScheduler();
+            }
+        }
+
         bool removed_in_cache = false;
         if (l1_cache_ && l1_cache_->Delete(key)) {
             removed_in_cache = true;
@@ -700,16 +1041,47 @@ public:
         report.summary = "ok";
         report.checked_keys = l1_cache_ ? l1_cache_->GetSize() : 0;
 
+        auto append_summary = [&report](const std::string& msg) {
+            if (msg.empty()) {
+                return;
+            }
+            if (report.summary.empty() || report.summary == "ok") {
+                report.summary = msg;
+                return;
+            }
+            report.summary += "; " + msg;
+        };
+
+        if (l2_cache_) {
+            const size_t ttl_corrupted = l2_cache_->CountCorruptedEntries(
+                l2::RocksDBCache::DataTier::kTtl);
+            const size_t persistent_corrupted = l2_cache_->CountCorruptedEntries(
+                l2::RocksDBCache::DataTier::kPersistent);
+            const size_t total_l2_corrupted =
+                ttl_corrupted + persistent_corrupted;
+            report.corrupted_keys += total_l2_corrupted;
+            if (total_l2_corrupted > 0) {
+                report.ok = false;
+                append_summary(
+                    "l2_corrupted_keys=" +
+                    std::to_string(total_l2_corrupted));
+            }
+        }
+
         if (!backend_) {
-            report.summary = "backend_unavailable";
+            if (report.summary == "ok") {
+                report.summary = "backend_unavailable";
+            }
             return report;
         }
 
         const auto validate_result = backend_->Validate();
         if (!validate_result.success) {
             report.ok = false;
-            report.corrupted_keys = 1;
-            report.summary = validate_result.error_message;
+            report.corrupted_keys += 1;
+            append_summary(validate_result.error_message);
+        } else if (report.ok) {
+            report.summary = "ok";
         }
         return report;
     }
@@ -924,6 +1296,127 @@ public:
     bool ApplyRuntimeConfigInternal(const StorageEngine::RuntimeTunableConfig& cfg) {
         persistence::AsyncPersistenceQueue::RuntimeConfig queue_runtime_config;
         bool has_queue_runtime_update = false;
+        bool has_l2_codec_runtime_update = false;
+        bool has_checkpoint_runtime_update = false;
+        bool has_tombstone_gc_runtime_update = false;
+        const bool has_runtime_v2_encode_update = cfg.enable_v2_encode.has_value();
+        const bool has_runtime_v2_fallback_update =
+            cfg.enable_v2_read_fallback.has_value();
+        const bool has_runtime_data_encryption_update =
+            cfg.enable_data_encryption.has_value();
+        const bool has_runtime_active_key_update =
+            cfg.encryption_active_key_id.has_value();
+        const bool has_runtime_key_env_update = cfg.encryption_key_env.has_value();
+        const bool prev_enable_v2_encode = config_.enable_v2_encode;
+        const bool prev_enable_v2_read_fallback = config_.enable_v2_read_fallback;
+        const bool prev_enable_data_encryption = config_.enable_data_encryption;
+        const std::string prev_encryption_active_key_id =
+            config_.encryption_active_key_id;
+        const std::string prev_encryption_key_env =
+            config_.encryption_key_env;
+        auto emit_runtime_config_audit =
+            [this](std::string_view key, bool success, std::string_view reason) {
+                RecordAudit(StorageEngine::AuditEntry{
+                    .timestamp_ms = detail::GetCurrentTimeMs(),
+                    .principal = "system",
+                    .operation = std::string(kRuntimeConfigAuditOperation),
+                    .key = std::string(key),
+                    .success = success,
+                    .reason = std::string(reason),
+                });
+                stats_.runtime_config_audit_total.fetch_add(
+                    1, std::memory_order_relaxed);
+                IncrementStorageCounter(kRuntimeConfigAuditMetric);
+                if (!success) {
+                    stats_.runtime_config_audit_failures.fetch_add(
+                        1, std::memory_order_relaxed);
+                    IncrementStorageCounter(kRuntimeConfigAuditFailureMetric);
+                }
+                if (reason == kRuntimeConfigAuditUpdatedReason) {
+                    stats_.runtime_config_audit_reason_updated_total.fetch_add(
+                        1, std::memory_order_relaxed);
+                    IncrementStorageCounter(kRuntimeConfigAuditReasonUpdatedMetric);
+                } else if (reason ==
+                           kRuntimeConfigAuditL2CodecApplyFailedReason) {
+                    stats_.runtime_config_audit_reason_l2_codec_apply_failed_total
+                        .fetch_add(1, std::memory_order_relaxed);
+                    IncrementStorageCounter(
+                        kRuntimeConfigAuditReasonL2CodecApplyFailedMetric);
+                }
+                if (key == kRuntimeConfigKeyEnableAccessControl) {
+                    stats_.runtime_config_audit_key_enable_access_control_total
+                        .fetch_add(1, std::memory_order_relaxed);
+                    IncrementStorageCounter(
+                        kRuntimeConfigAuditKeyEnableAccessControlMetric);
+                } else if (key == kRuntimeConfigKeyRequireAuthForReads) {
+                    stats_.runtime_config_audit_key_require_auth_for_reads_total
+                        .fetch_add(1, std::memory_order_relaxed);
+                    IncrementStorageCounter(
+                        kRuntimeConfigAuditKeyRequireAuthForReadsMetric);
+                } else if (key == kRuntimeConfigKeyAccessControlToken) {
+                    stats_.runtime_config_audit_key_access_control_token_total
+                        .fetch_add(1, std::memory_order_relaxed);
+                    IncrementStorageCounter(
+                        kRuntimeConfigAuditKeyAccessControlTokenMetric);
+                } else if (key == kRuntimeConfigKeyEncryptionActiveKeyId) {
+                    stats_.runtime_config_audit_key_encryption_active_key_id_total
+                        .fetch_add(1, std::memory_order_relaxed);
+                    IncrementStorageCounter(
+                        kRuntimeConfigAuditKeyEncryptionActiveKeyIdMetric);
+                } else if (key == kRuntimeConfigKeyEnableDataEncryption) {
+                    stats_.runtime_config_audit_key_enable_data_encryption_total
+                        .fetch_add(1, std::memory_order_relaxed);
+                    IncrementStorageCounter(
+                        kRuntimeConfigAuditKeyEnableDataEncryptionMetric);
+                } else if (key == kRuntimeConfigKeyEncryptionKeyEnv) {
+                    stats_.runtime_config_audit_key_encryption_key_env_total
+                        .fetch_add(1, std::memory_order_relaxed);
+                    IncrementStorageCounter(
+                        kRuntimeConfigAuditKeyEncryptionKeyEnvMetric);
+                }
+                if (l2_cache_) {
+                    const l2::RocksDBCache::RuntimeConfigAuditStats persisted_stats{
+                        .runtime_config_audit_total =
+                            stats_.runtime_config_audit_total.load(
+                                std::memory_order_relaxed),
+                        .runtime_config_audit_failures =
+                            stats_.runtime_config_audit_failures.load(
+                                std::memory_order_relaxed),
+                        .runtime_config_audit_reason_updated_total =
+                            stats_.runtime_config_audit_reason_updated_total.load(
+                                std::memory_order_relaxed),
+                        .runtime_config_audit_reason_l2_codec_apply_failed_total =
+                            stats_.runtime_config_audit_reason_l2_codec_apply_failed_total
+                                .load(std::memory_order_relaxed),
+                        .runtime_config_audit_key_enable_access_control_total =
+                            stats_.runtime_config_audit_key_enable_access_control_total
+                                .load(std::memory_order_relaxed),
+                        .runtime_config_audit_key_require_auth_for_reads_total =
+                            stats_.runtime_config_audit_key_require_auth_for_reads_total
+                                .load(std::memory_order_relaxed),
+                        .runtime_config_audit_key_access_control_token_total =
+                            stats_.runtime_config_audit_key_access_control_token_total
+                                .load(std::memory_order_relaxed),
+                        .runtime_config_audit_key_encryption_active_key_id_total =
+                            stats_.runtime_config_audit_key_encryption_active_key_id_total
+                                .load(std::memory_order_relaxed),
+                        .runtime_config_audit_key_enable_data_encryption_total =
+                            stats_.runtime_config_audit_key_enable_data_encryption_total
+                                .load(std::memory_order_relaxed),
+                        .runtime_config_audit_key_encryption_key_env_total =
+                            stats_.runtime_config_audit_key_encryption_key_env_total
+                                .load(std::memory_order_relaxed),
+                    };
+                    if (!l2_cache_->PersistRuntimeConfigAuditStats(
+                            persisted_stats)) {
+                        auto logger = spdlog::get("mir2");
+                        if (logger) {
+                            logger->warn(
+                                "StorageEngine failed to persist runtime audit stats to L2 meta");
+                        }
+                    }
+                }
+            };
         if (cfg.enable_metrics.has_value()) {
             config_.enable_metrics = *cfg.enable_metrics;
             enable_metrics_.store(*cfg.enable_metrics, std::memory_order_release);
@@ -940,20 +1433,49 @@ public:
             enable_new_write_path_.store(
                 *cfg.enable_new_write_path, std::memory_order_release);
         }
+        if (cfg.enable_v2_encode.has_value()) {
+            config_.enable_v2_encode = *cfg.enable_v2_encode;
+            has_l2_codec_runtime_update = true;
+        }
+        if (cfg.enable_v2_read_fallback.has_value()) {
+            config_.enable_v2_read_fallback = *cfg.enable_v2_read_fallback;
+            has_l2_codec_runtime_update = true;
+        }
+        if (cfg.enable_data_encryption.has_value()) {
+            config_.enable_data_encryption = *cfg.enable_data_encryption;
+            has_l2_codec_runtime_update = true;
+        }
+        if (cfg.encryption_active_key_id.has_value()) {
+            config_.encryption_active_key_id = *cfg.encryption_active_key_id;
+            has_l2_codec_runtime_update = true;
+        }
+        if (cfg.encryption_key_env.has_value()) {
+            config_.encryption_key_env = *cfg.encryption_key_env;
+            has_l2_codec_runtime_update = true;
+        }
         if (cfg.enable_access_control.has_value()) {
             config_.enable_access_control = *cfg.enable_access_control;
             enable_access_control_.store(
                 *cfg.enable_access_control, std::memory_order_release);
+            emit_runtime_config_audit(kRuntimeConfigKeyEnableAccessControl,
+                                      true,
+                                      kRuntimeConfigAuditUpdatedReason);
         }
         if (cfg.require_auth_for_reads.has_value()) {
             config_.require_auth_for_reads = *cfg.require_auth_for_reads;
             require_auth_for_reads_.store(
                 *cfg.require_auth_for_reads, std::memory_order_release);
+            emit_runtime_config_audit(kRuntimeConfigKeyRequireAuthForReads,
+                                      true,
+                                      kRuntimeConfigAuditUpdatedReason);
         }
         if (cfg.access_control_token.has_value()) {
             config_.access_control_token = *cfg.access_control_token;
             std::unique_lock<std::shared_mutex> lock(access_control_mutex_);
             access_control_token_ = *cfg.access_control_token;
+            emit_runtime_config_audit(kRuntimeConfigKeyAccessControlToken,
+                                      true,
+                                      kRuntimeConfigAuditUpdatedReason);
         }
 
         if (cfg.l1_ttl_seconds.has_value()) {
@@ -962,6 +1484,14 @@ public:
             l1_config.capacity = config_.l1_max_entries;
             l1_config.ttl_seconds = config_.l1_ttl_seconds;
             l1_cache_ = std::make_unique<l1::MemoryCache>(l1_config);
+        }
+        if (cfg.l2_usage_soft_limit_ratio.has_value() ||
+            cfg.l2_usage_hard_limit_ratio.has_value()) {
+            ApplyL2UsageLimitRatios(
+                cfg.l2_usage_soft_limit_ratio.value_or(
+                    config_.l2_usage_soft_limit_ratio),
+                cfg.l2_usage_hard_limit_ratio.value_or(
+                    config_.l2_usage_hard_limit_ratio));
         }
         if (cfg.auto_sync_interval_ms.has_value()) {
             config_.auto_sync_interval_ms = *cfg.auto_sync_interval_ms;
@@ -983,6 +1513,130 @@ public:
             queue_runtime_config.retry_delay_ms = *cfg.queue_retry_delay_ms;
             has_queue_runtime_update = true;
         }
+        if (cfg.tombstone_retention_seconds.has_value()) {
+            config_.tombstone_retention_seconds =
+                *cfg.tombstone_retention_seconds;
+            tombstone_retention_seconds_.store(
+                config_.tombstone_retention_seconds,
+                std::memory_order_release);
+            has_tombstone_gc_runtime_update = true;
+        }
+        if (cfg.tombstone_gc_interval_seconds.has_value()) {
+            config_.tombstone_gc_interval_seconds =
+                *cfg.tombstone_gc_interval_seconds;
+            tombstone_gc_interval_seconds_.store(
+                config_.tombstone_gc_interval_seconds,
+                std::memory_order_release);
+            has_tombstone_gc_runtime_update = true;
+        }
+        if (cfg.checkpoint_enabled.has_value()) {
+            config_.checkpoint_enabled = *cfg.checkpoint_enabled;
+            checkpoint_enabled_.store(*cfg.checkpoint_enabled,
+                                      std::memory_order_release);
+            has_checkpoint_runtime_update = true;
+        }
+        if (cfg.checkpoint_interval_seconds.has_value()) {
+            config_.checkpoint_interval_seconds =
+                std::max(*cfg.checkpoint_interval_seconds, 1u);
+            checkpoint_interval_seconds_.store(
+                config_.checkpoint_interval_seconds,
+                std::memory_order_release);
+            has_checkpoint_runtime_update = true;
+        }
+        if (cfg.checkpoint_retention.has_value()) {
+            config_.checkpoint_retention = *cfg.checkpoint_retention;
+            checkpoint_retention_.store(*cfg.checkpoint_retention,
+                                        std::memory_order_release);
+            has_checkpoint_runtime_update = true;
+        }
+        if (has_l2_codec_runtime_update) {
+            if (l2_cache_) {
+                if (!l2_cache_->ApplyRuntimeCodecConfig(
+                    config_.enable_v2_encode,
+                    config_.enable_v2_read_fallback,
+                    cfg.enable_data_encryption,
+                    cfg.encryption_active_key_id,
+                    cfg.encryption_key_env)) {
+                    if (has_runtime_v2_encode_update) {
+                        emit_runtime_config_audit(
+                            "config.enable_v2_encode",
+                            false,
+                            kRuntimeConfigAuditL2CodecApplyFailedReason);
+                    }
+                    if (has_runtime_v2_fallback_update) {
+                        emit_runtime_config_audit(
+                            "config.enable_v2_read_fallback",
+                            false,
+                            kRuntimeConfigAuditL2CodecApplyFailedReason);
+                    }
+                    if (has_runtime_data_encryption_update) {
+                        emit_runtime_config_audit(
+                            kRuntimeConfigKeyEnableDataEncryption,
+                            false,
+                            kRuntimeConfigAuditL2CodecApplyFailedReason);
+                    }
+                    if (has_runtime_active_key_update) {
+                        emit_runtime_config_audit(
+                            kRuntimeConfigKeyEncryptionActiveKeyId,
+                            false,
+                            kRuntimeConfigAuditL2CodecApplyFailedReason);
+                    }
+                    if (has_runtime_key_env_update) {
+                        emit_runtime_config_audit(
+                            kRuntimeConfigKeyEncryptionKeyEnv,
+                            false,
+                            kRuntimeConfigAuditL2CodecApplyFailedReason);
+                    }
+                    config_.enable_v2_encode = prev_enable_v2_encode;
+                    config_.enable_v2_read_fallback =
+                        prev_enable_v2_read_fallback;
+                    config_.enable_data_encryption =
+                        prev_enable_data_encryption;
+                    config_.encryption_active_key_id =
+                        prev_encryption_active_key_id;
+                    config_.encryption_key_env = prev_encryption_key_env;
+                    return false;
+                }
+            }
+            if (l1_cache_) {
+                // Drop stale decoded entries so codec policy changes take effect
+                // immediately on subsequent reads.
+                l1::MemoryCache::Config l1_config;
+                l1_config.capacity = config_.l1_max_entries;
+                l1_config.ttl_seconds = config_.l1_ttl_seconds;
+                l1_cache_ = std::make_unique<l1::MemoryCache>(l1_config);
+            }
+            if (has_runtime_v2_encode_update) {
+                emit_runtime_config_audit(
+                    "config.enable_v2_encode",
+                    true,
+                    kRuntimeConfigAuditUpdatedReason);
+            }
+            if (has_runtime_v2_fallback_update) {
+                emit_runtime_config_audit(
+                    "config.enable_v2_read_fallback",
+                    true,
+                    kRuntimeConfigAuditUpdatedReason);
+            }
+            if (has_runtime_data_encryption_update) {
+                emit_runtime_config_audit(
+                    kRuntimeConfigKeyEnableDataEncryption,
+                    true,
+                    kRuntimeConfigAuditUpdatedReason);
+            }
+            if (has_runtime_active_key_update) {
+                emit_runtime_config_audit(
+                    kRuntimeConfigKeyEncryptionActiveKeyId,
+                    true,
+                    kRuntimeConfigAuditUpdatedReason);
+            }
+            if (has_runtime_key_env_update) {
+                emit_runtime_config_audit(
+                    kRuntimeConfigKeyEncryptionKeyEnv,
+                    true,
+                    kRuntimeConfigAuditUpdatedReason);
+            }
+        }
         if (cfg.circuit_breaker_threshold.has_value()) {
             config_.circuit_breaker_threshold = *cfg.circuit_breaker_threshold;
         }
@@ -1000,6 +1654,23 @@ public:
         }
         if (has_queue_runtime_update && async_queue_) {
             async_queue_->ApplyRuntimeConfig(queue_runtime_config);
+        }
+        if (has_checkpoint_runtime_update) {
+            if (checkpoint_enabled_.load(std::memory_order_acquire) &&
+                l2_cache_ != nullptr) {
+                StartCheckpointSchedulerIfNeeded();
+                NotifyCheckpointScheduler();
+            } else {
+                StopCheckpointScheduler();
+            }
+        }
+        if (has_tombstone_gc_runtime_update) {
+            if (TombstoneGcSchedulerEnabled()) {
+                StartTombstoneGcSchedulerIfNeeded();
+                NotifyTombstoneGcScheduler();
+            } else {
+                StopTombstoneGcScheduler();
+            }
         }
 
         return true;
@@ -1073,7 +1744,21 @@ public:
         uint64_t l2_running_flushes = 0;
         uint64_t l2_block_cache_usage = 0;
         uint64_t l2_immutable_memtables = 0;
+        double l2_usage_ratio = 0.0;
+        const double l2_usage_soft_limit_ratio = GetL2UsageSoftLimitRatio();
+        const double l2_usage_hard_limit_ratio = GetL2UsageHardLimitRatio();
+        bool l2_soft_limit_active = false;
+        bool l2_hard_limit_active = false;
         bool l2_write_stopped = false;
+        bool enable_v2_encode = config_.enable_v2_encode;
+        bool enable_v2_read_fallback = config_.enable_v2_read_fallback;
+        bool enable_data_encryption = config_.enable_data_encryption;
+        uint64_t l2_v2_decode_reads = 0;
+        uint64_t l2_v1_fallback_reads = 0;
+        uint64_t l2_v1_reject_reads = 0;
+        uint64_t l2_decode_errors = 0;
+        uint64_t l2_encrypted_decode_reads = 0;
+        uint64_t l2_decrypt_failures = 0;
         if (l2_cache_) {
             (void)l2_cache_->GetUInt64Property(
                 "rocksdb.estimate-pending-compaction-bytes",
@@ -1091,6 +1776,20 @@ public:
                                              &write_stopped)) {
                 l2_write_stopped = write_stopped != 0;
             }
+            EvaluateL2CapacityPressure(&l2_soft_limit_active,
+                                       &l2_hard_limit_active,
+                                       &l2_usage_ratio,
+                                       l2_size);
+            const auto codec_stats = l2_cache_->GetCodecRuntimeStats();
+            enable_v2_encode = codec_stats.enable_v2_encode;
+            enable_v2_read_fallback = codec_stats.enable_v2_read_fallback;
+            enable_data_encryption = codec_stats.enable_data_encryption;
+            l2_v2_decode_reads = codec_stats.v2_decode_reads;
+            l2_v1_fallback_reads = codec_stats.v1_fallback_reads;
+            l2_v1_reject_reads = codec_stats.v1_reject_reads;
+            l2_decode_errors = codec_stats.decode_errors;
+            l2_encrypted_decode_reads = codec_stats.encrypted_decode_reads;
+            l2_decrypt_failures = codec_stats.decrypt_failures;
         }
 
         int64_t pending_syncs = async_queue_ ? async_queue_->PendingCount() : 0;
@@ -1113,12 +1812,16 @@ public:
         size_t normal_priority_queue_depth = 0;
         size_t outbox_depth = 0;
         size_t dead_letter_depth = 0;
+        size_t tombstone_gc_pending = 0;
         if (async_queue_) {
             const auto queue_stats = async_queue_->GetStats();
             high_priority_queue_depth = queue_stats.high_priority_queue_depth;
             normal_priority_queue_depth = queue_stats.normal_priority_queue_depth;
             outbox_depth = queue_stats.outbox_depth;
             dead_letter_depth = queue_stats.dead_letter_depth;
+        }
+        if (l2_cache_) {
+            tombstone_gc_pending = l2_cache_->TombstoneGcDepth();
         }
 
         double avg_update_latency_ms = 0.0;
@@ -1157,12 +1860,67 @@ public:
             .normal_priority_queue_depth = normal_priority_queue_depth,
             .outbox_depth = outbox_depth,
             .dead_letter_depth = dead_letter_depth,
+            .tombstone_gc_pending = tombstone_gc_pending,
             .l2_pending_compaction_bytes = l2_pending_compaction_bytes,
             .l2_running_compactions = l2_running_compactions,
             .l2_running_flushes = l2_running_flushes,
             .l2_block_cache_usage = l2_block_cache_usage,
             .l2_immutable_memtables = l2_immutable_memtables,
+            .l2_usage_ratio = l2_usage_ratio,
+            .l2_usage_soft_limit_ratio = l2_usage_soft_limit_ratio,
+            .l2_usage_hard_limit_ratio = l2_usage_hard_limit_ratio,
+            .l2_soft_limit_active = l2_soft_limit_active,
+            .l2_hard_limit_active = l2_hard_limit_active,
+            .l2_soft_limit_write_total =
+                stats_.l2_soft_limit_write_total.load(std::memory_order_relaxed),
+            .l2_hard_limit_reject_total =
+                stats_.l2_hard_limit_reject_total.load(std::memory_order_relaxed),
+            .l2_hard_limit_bypass_total =
+                stats_.l2_hard_limit_bypass_total.load(std::memory_order_relaxed),
             .l2_write_stopped = l2_write_stopped,
+            .enable_v2_encode = enable_v2_encode,
+            .enable_v2_read_fallback = enable_v2_read_fallback,
+            .enable_data_encryption = enable_data_encryption,
+            .l2_v2_decode_reads = l2_v2_decode_reads,
+            .l2_v1_fallback_reads = l2_v1_fallback_reads,
+            .l2_v1_reject_reads = l2_v1_reject_reads,
+            .l2_decode_errors = l2_decode_errors,
+            .l2_encrypted_decode_reads = l2_encrypted_decode_reads,
+            .l2_decrypt_failures = l2_decrypt_failures,
+            .tombstone_gc_reclaimed_total =
+                stats_.tombstone_gc_reclaimed_total.load(
+                    std::memory_order_relaxed),
+            .tombstone_gc_failed_total =
+                stats_.tombstone_gc_failed_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_total =
+                stats_.runtime_config_audit_total.load(std::memory_order_relaxed),
+            .runtime_config_audit_failures =
+                stats_.runtime_config_audit_failures.load(std::memory_order_relaxed),
+            .runtime_config_audit_reason_updated_total =
+                stats_.runtime_config_audit_reason_updated_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_reason_l2_codec_apply_failed_total =
+                stats_.runtime_config_audit_reason_l2_codec_apply_failed_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_key_enable_access_control_total =
+                stats_.runtime_config_audit_key_enable_access_control_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_key_require_auth_for_reads_total =
+                stats_.runtime_config_audit_key_require_auth_for_reads_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_key_access_control_token_total =
+                stats_.runtime_config_audit_key_access_control_token_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_key_encryption_active_key_id_total =
+                stats_.runtime_config_audit_key_encryption_active_key_id_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_key_enable_data_encryption_total =
+                stats_.runtime_config_audit_key_enable_data_encryption_total.load(
+                    std::memory_order_relaxed),
+            .runtime_config_audit_key_encryption_key_env_total =
+                stats_.runtime_config_audit_key_encryption_key_env_total.load(
+                    std::memory_order_relaxed),
             .total_updates = stats_.total_updates.load(std::memory_order_relaxed),
             .successful_updates = stats_.successful_updates.load(std::memory_order_relaxed),
             .update_conflicts = stats_.update_conflicts.load(std::memory_order_relaxed),
@@ -1226,9 +1984,23 @@ public:
         return true;
     }
 
-    void RecordAudit(const StorageEngine::AuditEntry& entry) {
-        if (!config_.enable_audit_log) {
+void RecordAudit(const StorageEngine::AuditEntry& entry) {
+        const bool sensitive_key = IsSensitiveStorageKey(entry.key);
+        const bool security_denied =
+            entry.reason == "invalid_token" ||
+            entry.reason == "access_denied" ||
+            entry.reason == "token_not_configured";
+        const bool runtime_config_change =
+            entry.operation == kRuntimeConfigAuditOperation;
+        const bool force_audit =
+            sensitive_key || security_denied || runtime_config_change;
+        if (!config_.enable_audit_log && !force_audit) {
             return;
+        }
+
+        StorageEngine::AuditEntry sanitized = entry;
+        if (sensitive_key) {
+            sanitized.key = std::string(kRedactedAuditKey);
         }
         {
             std::lock_guard<std::mutex> lock(audit_mutex_);
@@ -1236,7 +2008,7 @@ public:
                 audit_entries_.size() >= config_.audit_log_max_entries) {
                 audit_entries_.pop_front();
             }
-            audit_entries_.push_back(entry);
+            audit_entries_.push_back(sanitized);
         }
         IncrementStorageCounter(kAuditLogMetric);
 
@@ -1244,11 +2016,11 @@ public:
         if (logger) {
             logger->info(
                 "StorageEngine audit op={} key={} principal={} success={} reason={}",
-                entry.operation,
-                entry.key,
-                entry.principal.empty() ? "anonymous" : entry.principal,
-                entry.success,
-                entry.reason);
+                sanitized.operation,
+                sanitized.key,
+                sanitized.principal.empty() ? "anonymous" : sanitized.principal,
+                sanitized.success,
+                sanitized.reason);
         }
     }
 
@@ -1422,6 +2194,48 @@ public:
                         static_cast<double>(backend_state));
     }
 
+    void PersistCapacityGovernanceStatsToL2() const {
+        if (l2_cache_ == nullptr) {
+            return;
+        }
+        const l2::RocksDBCache::CapacityGovernanceStats persisted_stats{
+            .l2_soft_limit_write_total =
+                stats_.l2_soft_limit_write_total.load(std::memory_order_relaxed),
+            .l2_hard_limit_reject_total =
+                stats_.l2_hard_limit_reject_total.load(std::memory_order_relaxed),
+            .l2_hard_limit_bypass_total =
+                stats_.l2_hard_limit_bypass_total.load(std::memory_order_relaxed),
+        };
+        if (!l2_cache_->PersistCapacityGovernanceStats(persisted_stats)) {
+            auto logger = spdlog::get("mir2");
+            if (logger) {
+                logger->warn(
+                    "StorageEngine failed to persist capacity governance stats to L2 meta");
+                }
+        }
+    }
+
+    void PersistTombstoneGcStatsToL2() const {
+        if (l2_cache_ == nullptr) {
+            return;
+        }
+        const l2::RocksDBCache::TombstoneGcStats persisted_stats{
+            .tombstone_gc_reclaimed_total =
+                stats_.tombstone_gc_reclaimed_total.load(
+                    std::memory_order_relaxed),
+            .tombstone_gc_failed_total =
+                stats_.tombstone_gc_failed_total.load(
+                    std::memory_order_relaxed),
+        };
+        if (!l2_cache_->PersistTombstoneGcStats(persisted_stats)) {
+            auto logger = spdlog::get("mir2");
+            if (logger) {
+                logger->warn(
+                    "StorageEngine failed to persist tombstone GC stats to L2 meta");
+            }
+        }
+    }
+
     void RecordAccessDecision(bool allowed) {
         IncrementStorageCounter(allowed ? kAccessAllowMetric : kAccessDenyMetric);
     }
@@ -1447,7 +2261,296 @@ public:
             WriteRejectReasonToString(reason));
     }
 
+    void StartCheckpointSchedulerIfNeeded() {
+        if (checkpoint_scheduler_thread_.joinable()) {
+            return;
+        }
+        if (!checkpoint_enabled_.load(std::memory_order_acquire) ||
+            l2_cache_ == nullptr) {
+            return;
+        }
+        checkpoint_scheduler_stop_.store(false, std::memory_order_release);
+        checkpoint_scheduler_thread_ =
+            std::thread([this]() { RunCheckpointSchedulerLoop(); });
+    }
+
+    void StopCheckpointScheduler() {
+        checkpoint_scheduler_stop_.store(true, std::memory_order_release);
+        checkpoint_scheduler_cv_.notify_all();
+        if (checkpoint_scheduler_thread_.joinable()) {
+            checkpoint_scheduler_thread_.join();
+        }
+        checkpoint_scheduler_stop_.store(false, std::memory_order_release);
+    }
+
+    void NotifyCheckpointScheduler() {
+        checkpoint_scheduler_cv_.notify_all();
+    }
+
+    bool TombstoneGcSchedulerEnabled() const {
+        return backend_ != nullptr &&
+               l2_cache_ != nullptr &&
+               tombstone_retention_seconds_.load(std::memory_order_acquire) > 0 &&
+               tombstone_gc_interval_seconds_.load(std::memory_order_acquire) > 0;
+    }
+
+    bool ProcessDueTombstoneGcEntries() {
+        if (!TombstoneGcSchedulerEnabled()) {
+            return false;
+        }
+
+        constexpr size_t kReplayLimit = 256;
+        const uint64_t now_ms = detail::GetCurrentTimeMs();
+        size_t reclaimed = 0;
+        size_t failed = 0;
+
+        l2_cache_->ReplayDueTombstoneGc(
+            kReplayLimit, now_ms,
+            [this, &reclaimed, &failed](const l2::RocksDBCache::TombstoneGcEntry& entry) {
+                if (backend_circuit_breaker_ &&
+                    backend_circuit_breaker_->IsOpen()) {
+                    PublishCircuitBreakerStateGauges();
+                    ++failed;
+                    stats_.tombstone_gc_failed_total.fetch_add(
+                        1, std::memory_order_relaxed);
+                    IncrementStorageCounter(kTombstoneGcFailedMetric);
+                    PersistTombstoneGcStatsToL2();
+                    return true;
+                }
+                if (!backend_->IsHealthy()) {
+                    if (backend_circuit_breaker_) {
+                        backend_circuit_breaker_->OnFailure();
+                        PublishCircuitBreakerStateGauges();
+                    }
+                    ++failed;
+                    stats_.tombstone_gc_failed_total.fetch_add(
+                        1, std::memory_order_relaxed);
+                    IncrementStorageCounter(kTombstoneGcFailedMetric);
+                    PersistTombstoneGcStatsToL2();
+                    return true;
+                }
+
+                const auto result =
+                    backend_->Delete(entry.key, entry.delete_version, true);
+                if (!result.success) {
+                    if (backend_circuit_breaker_) {
+                        backend_circuit_breaker_->OnFailure();
+                        PublishCircuitBreakerStateGauges();
+                    }
+                    ++failed;
+                    stats_.tombstone_gc_failed_total.fetch_add(
+                        1, std::memory_order_relaxed);
+                    IncrementStorageCounter(kTombstoneGcFailedMetric);
+                    PersistTombstoneGcStatsToL2();
+                    return true;
+                }
+                if (backend_circuit_breaker_) {
+                    backend_circuit_breaker_->OnSuccess();
+                    PublishCircuitBreakerStateGauges();
+                }
+                if (!l2_cache_->AckTombstoneGcEntry(entry.tombstone_gc_id)) {
+                    ++failed;
+                    stats_.tombstone_gc_failed_total.fetch_add(
+                        1, std::memory_order_relaxed);
+                    IncrementStorageCounter(kTombstoneGcFailedMetric);
+                    PersistTombstoneGcStatsToL2();
+                    return true;
+                }
+
+                ++reclaimed;
+                stats_.tombstone_gc_reclaimed_total.fetch_add(
+                    1, std::memory_order_relaxed);
+                IncrementStorageCounter(kTombstoneGcReclaimedMetric);
+                PersistTombstoneGcStatsToL2();
+                return true;
+            });
+        return reclaimed > 0 || failed > 0;
+    }
+
+    void StartTombstoneGcSchedulerIfNeeded() {
+        if (tombstone_gc_scheduler_thread_.joinable()) {
+            return;
+        }
+        if (!TombstoneGcSchedulerEnabled()) {
+            return;
+        }
+        tombstone_gc_scheduler_stop_.store(false, std::memory_order_release);
+        tombstone_gc_scheduler_thread_ =
+            std::thread([this]() { RunTombstoneGcSchedulerLoop(); });
+    }
+
+    void StopTombstoneGcScheduler() {
+        tombstone_gc_scheduler_stop_.store(true, std::memory_order_release);
+        tombstone_gc_scheduler_cv_.notify_all();
+        if (tombstone_gc_scheduler_thread_.joinable()) {
+            tombstone_gc_scheduler_thread_.join();
+        }
+        tombstone_gc_scheduler_stop_.store(false, std::memory_order_release);
+    }
+
+    void NotifyTombstoneGcScheduler() {
+        tombstone_gc_scheduler_cv_.notify_all();
+    }
+
 private:
+    bool PruneCheckpointRetentionInternal() {
+        const uint32_t retention =
+            checkpoint_retention_.load(std::memory_order_acquire);
+        if (retention == 0) {
+            return true;  // Unlimited retention.
+        }
+        std::error_code ec;
+        if (!std::filesystem::exists(checkpoint_root_dir_, ec)) {
+            return true;
+        }
+
+        std::vector<std::filesystem::path> checkpoints;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(checkpoint_root_dir_, ec)) {
+            if (ec) {
+                IncrementStorageCounter(kCheckpointPruneErrorMetric);
+                return false;
+            }
+            if (!entry.is_directory()) {
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("cp-", 0) == 0) {
+                checkpoints.push_back(entry.path());
+            }
+        }
+
+        if (checkpoints.size() <= retention) {
+            return true;
+        }
+
+        std::sort(checkpoints.begin(), checkpoints.end(),
+                  [](const std::filesystem::path& lhs,
+                     const std::filesystem::path& rhs) {
+                      return lhs.filename().string() < rhs.filename().string();
+                  });
+
+        const size_t to_prune = checkpoints.size() - retention;
+        bool ok = true;
+        for (size_t i = 0; i < to_prune; ++i) {
+            std::error_code remove_error;
+            std::filesystem::remove_all(checkpoints[i], remove_error);
+            if (remove_error) {
+                ok = false;
+                IncrementStorageCounter(kCheckpointPruneErrorMetric);
+                auto logger = spdlog::get("mir2");
+                if (logger) {
+                    logger->warn("StorageEngine checkpoint prune failed path={} err={}",
+                                 checkpoints[i].string(),
+                                 remove_error.message());
+                }
+            } else {
+                IncrementStorageCounter(kCheckpointPrunedMetric);
+            }
+        }
+        return ok;
+    }
+
+    bool CreateScheduledCheckpointInternal() {
+        if (!checkpoint_enabled_.load(std::memory_order_acquire) ||
+            l2_cache_ == nullptr) {
+            return false;
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(checkpoint_root_dir_, ec);
+        if (ec) {
+            IncrementStorageCounter(kCheckpointCreateErrorMetric);
+            auto logger = spdlog::get("mir2");
+            if (logger) {
+                logger->warn(
+                    "StorageEngine checkpoint create dir failed path={} err={}",
+                    checkpoint_root_dir_.string(), ec.message());
+            }
+            return false;
+        }
+
+        const uint64_t now_ms = detail::GetCurrentTimeMs();
+        std::filesystem::path checkpoint_path =
+            checkpoint_root_dir_ / ("cp-" + std::to_string(now_ms));
+        uint32_t suffix = 0;
+        while (std::filesystem::exists(checkpoint_path, ec) && !ec) {
+            ++suffix;
+            checkpoint_path =
+                checkpoint_root_dir_ /
+                ("cp-" + std::to_string(now_ms) + "-" + std::to_string(suffix));
+        }
+
+        if (!l2_cache_->CreateCheckpoint(checkpoint_path.string())) {
+            IncrementStorageCounter(kCheckpointCreateErrorMetric);
+            return false;
+        }
+        IncrementStorageCounter(kCheckpointCreatedMetric);
+        (void)PruneCheckpointRetentionInternal();
+        return true;
+    }
+
+    void RunCheckpointSchedulerLoop() {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->info(
+                "StorageEngine checkpoint scheduler started enabled={} interval_s={} retention={}",
+                checkpoint_enabled_.load(std::memory_order_acquire),
+                checkpoint_interval_seconds_.load(std::memory_order_acquire),
+                checkpoint_retention_.load(std::memory_order_acquire));
+        }
+
+        while (!shutdown_.load(std::memory_order_acquire) &&
+               !checkpoint_scheduler_stop_.load(std::memory_order_acquire)) {
+            if (checkpoint_enabled_.load(std::memory_order_acquire)) {
+                (void)CreateScheduledCheckpointInternal();
+            }
+
+            const uint32_t interval_seconds = std::max(
+                checkpoint_interval_seconds_.load(std::memory_order_acquire), 1u);
+            std::unique_lock<std::mutex> lock(checkpoint_scheduler_mutex_);
+            checkpoint_scheduler_cv_.wait_for(
+                lock, std::chrono::seconds(interval_seconds),
+                [this]() {
+                    return shutdown_.load(std::memory_order_acquire) ||
+                           checkpoint_scheduler_stop_.load(std::memory_order_acquire);
+                });
+        }
+
+        if (logger) {
+            logger->info("StorageEngine checkpoint scheduler stopped");
+        }
+    }
+
+    void RunTombstoneGcSchedulerLoop() {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->info(
+                "StorageEngine tombstone GC scheduler started retention_s={} interval_s={}",
+                tombstone_retention_seconds_.load(std::memory_order_acquire),
+                tombstone_gc_interval_seconds_.load(std::memory_order_acquire));
+        }
+
+        while (!shutdown_.load(std::memory_order_acquire) &&
+               !tombstone_gc_scheduler_stop_.load(std::memory_order_acquire)) {
+            (void)ProcessDueTombstoneGcEntries();
+
+            const uint32_t interval_seconds = std::max(
+                tombstone_gc_interval_seconds_.load(std::memory_order_acquire), 1u);
+            std::unique_lock<std::mutex> lock(tombstone_gc_scheduler_mutex_);
+            tombstone_gc_scheduler_cv_.wait_for(
+                lock, std::chrono::seconds(interval_seconds),
+                [this]() {
+                    return shutdown_.load(std::memory_order_acquire) ||
+                           tombstone_gc_scheduler_stop_.load(std::memory_order_acquire);
+                });
+        }
+
+        if (logger) {
+            logger->info("StorageEngine tombstone GC scheduler stopped");
+        }
+    }
+
     void ApplyConflictBackoff(int attempt) const noexcept {
         // Exponential yielding with a small cap keeps fairness under contention
         // while avoiding blocking sleeps inside hot update retries.
@@ -1549,6 +2652,8 @@ private:
     std::atomic<bool> enable_metrics_{true};
     std::atomic<bool> enable_strict_write_guarantee_{true};
     std::atomic<bool> enable_new_write_path_{true};
+    std::atomic<double> l2_usage_soft_limit_ratio_{0.85};
+    std::atomic<double> l2_usage_hard_limit_ratio_{0.95};
     std::atomic<bool> enable_access_control_{false};
     std::atomic<bool> require_auth_for_reads_{false};
     mutable std::shared_mutex access_control_mutex_;
@@ -1577,6 +2682,20 @@ private:
         invalidation_subscribers_;
     mutable std::mutex invalidation_adapter_mutex_;
     std::shared_ptr<StorageEngine::IInvalidationAdapter> invalidation_adapter_;
+    std::filesystem::path checkpoint_root_dir_;
+    std::atomic<bool> checkpoint_enabled_{false};
+    std::atomic<uint32_t> checkpoint_interval_seconds_{1800};
+    std::atomic<uint32_t> checkpoint_retention_{48};
+    std::atomic<bool> checkpoint_scheduler_stop_{false};
+    mutable std::mutex checkpoint_scheduler_mutex_;
+    std::condition_variable checkpoint_scheduler_cv_;
+    std::thread checkpoint_scheduler_thread_;
+    std::atomic<uint32_t> tombstone_retention_seconds_{604800};
+    std::atomic<uint32_t> tombstone_gc_interval_seconds_{3600};
+    std::atomic<bool> tombstone_gc_scheduler_stop_{false};
+    mutable std::mutex tombstone_gc_scheduler_mutex_;
+    std::condition_variable tombstone_gc_scheduler_cv_;
+    std::thread tombstone_gc_scheduler_thread_;
 
     struct Statistics {
         std::atomic<uint64_t> l1_hits{0};
@@ -1590,6 +2709,21 @@ private:
         std::atomic<uint64_t> update_aborted{0};
         std::atomic<uint64_t> slow_update_fn_count{0};
         std::atomic<uint64_t> total_sets{0};
+        std::atomic<uint64_t> l2_soft_limit_write_total{0};
+        std::atomic<uint64_t> l2_hard_limit_reject_total{0};
+        std::atomic<uint64_t> l2_hard_limit_bypass_total{0};
+        std::atomic<uint64_t> tombstone_gc_reclaimed_total{0};
+        std::atomic<uint64_t> tombstone_gc_failed_total{0};
+        std::atomic<uint64_t> runtime_config_audit_total{0};
+        std::atomic<uint64_t> runtime_config_audit_failures{0};
+        std::atomic<uint64_t> runtime_config_audit_reason_updated_total{0};
+        std::atomic<uint64_t> runtime_config_audit_reason_l2_codec_apply_failed_total{0};
+        std::atomic<uint64_t> runtime_config_audit_key_enable_access_control_total{0};
+        std::atomic<uint64_t> runtime_config_audit_key_require_auth_for_reads_total{0};
+        std::atomic<uint64_t> runtime_config_audit_key_access_control_token_total{0};
+        std::atomic<uint64_t> runtime_config_audit_key_encryption_active_key_id_total{0};
+        std::atomic<uint64_t> runtime_config_audit_key_enable_data_encryption_total{0};
+        std::atomic<uint64_t> runtime_config_audit_key_encryption_key_env_total{0};
     };
     Statistics stats_;
 };
@@ -1617,6 +2751,24 @@ bool StorageEngine::Initialize(std::unique_ptr<IStorageBackend> backend,
     instance_ = std::unique_ptr<StorageEngine>(new StorageEngine());
     instance_->pimpl_ = std::make_unique<Impl>(std::move(backend), config);
     g_instance_ptr.store(instance_.get(), std::memory_order_release);
+
+    const auto validation_report = instance_->pimpl_->ValidateStorageInternal();
+    if (!validation_report.ok && config.startup_fail_on_validation_error) {
+        if (logger) {
+            logger->error(
+                "StorageEngine init validation gate failed: {}",
+                validation_report.summary);
+        }
+        g_instance_ptr.store(nullptr, std::memory_order_release);
+        instance_->pimpl_->Shutdown();
+        instance_.reset();
+        return false;
+    }
+    if (!validation_report.ok && logger) {
+        logger->warn(
+            "StorageEngine init validation warning (startup gate disabled): {}",
+            validation_report.summary);
+    }
 
     if (logger) {
         logger->info("StorageEngine initialized successfully");
@@ -1709,27 +2861,7 @@ bool StorageEngine::Put(const std::string& key,
         data,
         detail::GetCurrentTimeMs()
     };
-
-    switch (options.durability) {
-    case WriteDurability::kSync:
-        return pimpl_->SetSyncInternal(key, versioned, options.priority);
-    case WriteDurability::kDurableAsync:
-        return pimpl_->SetInternal(
-            key, versioned, options.priority, /*enforce_sync_prefix_semantics=*/false);
-    case WriteDurability::kBestEffort:
-        if (options.bypass_sync_prefix_upgrade) {
-            return pimpl_->SetInternal(
-                key, versioned, options.priority,
-                /*enforce_sync_prefix_semantics=*/false);
-        }
-        if (pimpl_->IsSyncWriteCriticalKey(key)) {
-            return pimpl_->SetSyncInternal(key, versioned, Priority::CRITICAL);
-        }
-        return pimpl_->SetInternal(
-            key, versioned, options.priority,
-            /*enforce_sync_prefix_semantics=*/true);
-    }
-    return false;
+    return pimpl_->PutWithReasonLocked(key, versioned, options, nullptr);
 }
 
 bool StorageEngine::Delete(const std::string& key,
@@ -1763,9 +2895,21 @@ BatchWriteResult StorageEngine::BatchWrite(
                 ok = false;
                 break;
             }
-            ok = Put(item.key, item.value, item.write_options);
+            {
+                size_t stripe = pimpl_->GetStripe(item.key);
+                std::unique_lock<std::shared_mutex> lock(pimpl_->locks_[stripe]);
+                VersionedData versioned{
+                    pimpl_->NextVersion(),
+                    item.value,
+                    detail::GetCurrentTimeMs()
+                };
+                ok = pimpl_->PutWithReasonLocked(
+                    item.key, versioned, item.write_options, &reason);
+            }
             if (!ok) {
-                reason = WriteRejectReason::kPutFailed;
+                reason = reason == WriteRejectReason::kNone
+                    ? WriteRejectReason::kPutFailed
+                    : reason;
             }
             break;
         case BatchWriteItem::Op::kDelete:
@@ -2131,10 +3275,14 @@ BatchWriteResult StorageEngine::BatchWriteWithAccess(
                 denied.failure_reasons.reserve(items.size());
                 denied.failure_reason_codes.reserve(items.size());
                 for (const auto& failed_item : items) {
+                    const WriteRejectReason item_reason =
+                        IsValidStorageKey(failed_item.key)
+                            ? reason
+                            : WriteRejectReason::kInvalidKey;
                     denied.failed_keys.push_back(failed_item.key);
                     denied.failure_reasons.push_back(
-                        WriteRejectReasonToString(reason));
-                    denied.failure_reason_codes.push_back(reason);
+                        WriteRejectReasonToString(item_reason));
+                    denied.failure_reason_codes.push_back(item_reason);
                 }
                 pimpl_->RecordWriteRejectReason(reason);
                 pimpl_->RecordAuditEntry(AuditEntry{

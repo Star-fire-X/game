@@ -58,6 +58,7 @@ enum class WriteRejectReason {
     kDeleteFailed = 4,
     kAccessDenied = 5,
     kNotInitialized = 6,
+    kL2HardCapacityLimit = 7,
 };
 
 struct WriteOptions {
@@ -67,10 +68,10 @@ struct WriteOptions {
 };
 
 struct DeleteOptions {
-    // Stage1 defaults to hard delete semantics; tombstone behavior is
-    // introduced in later stages.
-    bool hard_delete = true;
-    bool write_tombstone = false;
+    // Stage2 defaults to logical delete semantics; callers may still force
+    // hard delete for immediate physical removal.
+    bool hard_delete = false;
+    bool write_tombstone = true;
     Priority priority = Priority::NORMAL;
 };
 
@@ -125,6 +126,8 @@ public:
         uint32_t l2_max_background_flushes = 2;
         uint32_t l2_block_size = 4096;
         double l2_bloom_filter_bits_per_key = 10.0;
+        double l2_usage_soft_limit_ratio = 0.85;
+        double l2_usage_hard_limit_ratio = 0.95;
         std::string l2_path = "/var/lib/mir2/cache";
         uint32_t l2_ttl_seconds = 604800;  // 7 days — WAL entries must survive restarts
         uint32_t l2_ttl_periodic_compaction_seconds = 21600;
@@ -158,6 +161,18 @@ public:
         bool enable_audit_log = true;
         size_t audit_log_max_entries = 5000;
         bool enable_new_write_path = true;
+        bool enable_v2_encode = false;
+        bool enable_v2_read_fallback = true;
+        bool enable_data_encryption = false;
+        std::string encryption_active_key_id;
+        std::string encryption_key_env;
+        bool startup_fail_on_validation_error = true;
+        bool checkpoint_enabled = false;
+        uint32_t checkpoint_interval_seconds = 1800;
+        uint32_t checkpoint_retention = 48;
+        std::string checkpoint_dir;
+        uint32_t tombstone_retention_seconds = 604800;
+        uint32_t tombstone_gc_interval_seconds = 3600;
 
         // 存储接口鉴权
         bool enable_access_control = false;
@@ -167,12 +182,24 @@ public:
 
     struct RuntimeTunableConfig {
         std::optional<uint32_t> l1_ttl_seconds;
+        std::optional<double> l2_usage_soft_limit_ratio;
+        std::optional<double> l2_usage_hard_limit_ratio;
         std::optional<uint32_t> auto_sync_interval_ms;
         std::optional<uint32_t> batch_size;
         std::optional<uint32_t> queue_retry_count;
         std::optional<uint32_t> queue_retry_delay_ms;
+        std::optional<uint32_t> tombstone_retention_seconds;
+        std::optional<uint32_t> tombstone_gc_interval_seconds;
+        std::optional<bool> checkpoint_enabled;
+        std::optional<uint32_t> checkpoint_interval_seconds;
+        std::optional<uint32_t> checkpoint_retention;
         std::optional<uint32_t> circuit_breaker_threshold;
         std::optional<uint32_t> circuit_breaker_timeout_ms;
+        std::optional<bool> enable_v2_encode;
+        std::optional<bool> enable_v2_read_fallback;
+        std::optional<bool> enable_data_encryption;
+        std::optional<std::string> encryption_active_key_id;
+        std::optional<std::string> encryption_key_env;
         std::optional<bool> enable_metrics;
         std::optional<bool> enable_strict_write_guarantee;
         std::optional<bool> enable_new_write_path;
@@ -493,12 +520,42 @@ public:
         size_t normal_priority_queue_depth;
         size_t outbox_depth;
         size_t dead_letter_depth;
+        size_t tombstone_gc_pending;
         uint64_t l2_pending_compaction_bytes;
         uint64_t l2_running_compactions;
         uint64_t l2_running_flushes;
         uint64_t l2_block_cache_usage;
         uint64_t l2_immutable_memtables;
+        double l2_usage_ratio;
+        double l2_usage_soft_limit_ratio;
+        double l2_usage_hard_limit_ratio;
+        bool l2_soft_limit_active;
+        bool l2_hard_limit_active;
+        uint64_t l2_soft_limit_write_total;
+        uint64_t l2_hard_limit_reject_total;
+        uint64_t l2_hard_limit_bypass_total;
         bool l2_write_stopped;
+        bool enable_v2_encode;
+        bool enable_v2_read_fallback;
+        bool enable_data_encryption;
+        uint64_t l2_v2_decode_reads;
+        uint64_t l2_v1_fallback_reads;
+        uint64_t l2_v1_reject_reads;
+        uint64_t l2_decode_errors;
+        uint64_t l2_encrypted_decode_reads;
+        uint64_t l2_decrypt_failures;
+        uint64_t tombstone_gc_reclaimed_total;
+        uint64_t tombstone_gc_failed_total;
+        uint64_t runtime_config_audit_total;
+        uint64_t runtime_config_audit_failures;
+        uint64_t runtime_config_audit_reason_updated_total;
+        uint64_t runtime_config_audit_reason_l2_codec_apply_failed_total;
+        uint64_t runtime_config_audit_key_enable_access_control_total;
+        uint64_t runtime_config_audit_key_require_auth_for_reads_total;
+        uint64_t runtime_config_audit_key_access_control_token_total;
+        uint64_t runtime_config_audit_key_encryption_active_key_id_total;
+        uint64_t runtime_config_audit_key_enable_data_encryption_total;
+        uint64_t runtime_config_audit_key_encryption_key_env_total;
 
         // Update操作统计
         uint64_t total_updates;

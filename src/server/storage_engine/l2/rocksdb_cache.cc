@@ -1,24 +1,306 @@
 #include <storage_engine/l2/rocksdb_cache.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
+#include <span>
+#include <string_view>
 #include <thread>
 #include <utility>
 
 #include <spdlog/spdlog.h>
 
+#ifdef HAVE_OPENSSL
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#endif
+
 #include "rocksdb/filter_policy.h"
 #include "rocksdb/statistics.h"
 #include "rocksdb/table.h"
+#include "rocksdb/utilities/checkpoint.h"
 #include "rocksdb/utilities/db_ttl.h"
+#include "rocksdb/write_batch.h"
 
 namespace mir2::storage_engine::l2 {
 
-RocksDBCache::RocksDBCache(const Config& config) : config_(config) {}
+namespace {
+
+constexpr char kV2RecordMagic[] = {'M', '2', 'V', '2'};
+constexpr uint8_t kV2RecordVersion = 2;
+constexpr uint8_t kV2RecordFlags = 0;
+constexpr uint8_t kV2RecordFlagEncrypted = 1u << 0;
+constexpr uint16_t kV2RecordReserved = 0;
+constexpr size_t kV2HeaderSize = 4 + 1 + 1 + 2 + 8 + 8 + 4 + 4;
+constexpr size_t kAes256KeySize = 32;
+constexpr size_t kAesGcmNonceSize = 12;
+constexpr size_t kAesGcmTagSize = 16;
+
+struct ParsedV2Frame {
+    uint8_t flags = 0;
+    uint64_t version = 0;
+    uint64_t timestamp_ms = 0;
+    const uint8_t* payload = nullptr;
+    size_t payload_size = 0;
+};
+
+uint32_t ComputeCrc32(const uint8_t* data, size_t size) {
+    constexpr uint32_t kPolynomial = 0xEDB88320u;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= static_cast<uint32_t>(data[i]);
+        for (int bit = 0; bit < 8; ++bit) {
+            const bool lsb_set = (crc & 1u) != 0u;
+            crc >>= 1;
+            if (lsb_set) {
+                crc ^= kPolynomial;
+            }
+        }
+    }
+    return ~crc;
+}
+
+bool DeserializeVersionedDataV1(const rocksdb::Slice& data,
+                                VersionedData& result) {
+    constexpr size_t kV1HeaderSize = 8 + 8 + 4;
+    if (data.size() < kV1HeaderSize) {
+        return false;
+    }
+
+    const uint8_t* ptr = reinterpret_cast<const uint8_t*>(data.data());
+
+    std::memcpy(&result.version, ptr, sizeof(uint64_t));
+    ptr += sizeof(uint64_t);
+
+    std::memcpy(&result.timestamp_ms, ptr, sizeof(uint64_t));
+    ptr += sizeof(uint64_t);
+
+    uint32_t size_u32 = 0;
+    std::memcpy(&size_u32, ptr, sizeof(uint32_t));
+    ptr += sizeof(uint32_t);
+
+    const size_t data_size = static_cast<size_t>(size_u32);
+    if (kV1HeaderSize + data_size != data.size()) {
+        return false;
+    }
+
+    if (data_size > 0) {
+        result.data.assign(ptr, ptr + data_size);
+    } else {
+        result.data.clear();
+    }
+    return true;
+}
+
+bool ParseVersionedDataV2Frame(const rocksdb::Slice& data,
+                               ParsedV2Frame* frame) {
+    if (frame == nullptr) {
+        return false;
+    }
+    if (data.size() < kV2HeaderSize) {
+        return false;
+    }
+
+    const uint8_t* ptr = reinterpret_cast<const uint8_t*>(data.data());
+    if (std::memcmp(ptr, kV2RecordMagic, sizeof(kV2RecordMagic)) != 0) {
+        return false;
+    }
+    ptr += sizeof(kV2RecordMagic);
+
+    const uint8_t record_version = *ptr++;
+    if (record_version != kV2RecordVersion) {
+        return false;
+    }
+    const uint8_t flags = *ptr++;
+    ptr += sizeof(uint16_t);  // reserved
+
+    uint64_t version = 0;
+    std::memcpy(&version, ptr, sizeof(uint64_t));
+    ptr += sizeof(uint64_t);
+
+    uint64_t timestamp_ms = 0;
+    std::memcpy(&timestamp_ms, ptr, sizeof(uint64_t));
+    ptr += sizeof(uint64_t);
+
+    uint32_t payload_size = 0;
+    std::memcpy(&payload_size, ptr, sizeof(uint32_t));
+    ptr += sizeof(uint32_t);
+
+    uint32_t payload_crc32 = 0;
+    std::memcpy(&payload_crc32, ptr, sizeof(uint32_t));
+    ptr += sizeof(uint32_t);
+
+    if (kV2HeaderSize + static_cast<size_t>(payload_size) != data.size()) {
+        return false;
+    }
+
+    const uint32_t actual_crc32 =
+        ComputeCrc32(ptr, static_cast<size_t>(payload_size));
+    if (actual_crc32 != payload_crc32) {
+        return false;
+    }
+
+    frame->flags = flags;
+    frame->version = version;
+    frame->timestamp_ms = timestamp_ms;
+    frame->payload = ptr;
+    frame->payload_size = payload_size;
+    return true;
+}
+
+bool IsHexDigit(char c) {
+    return std::isdigit(static_cast<unsigned char>(c)) != 0 ||
+           (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+uint8_t HexNibble(char c) {
+    if (c >= '0' && c <= '9') {
+        return static_cast<uint8_t>(c - '0');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return static_cast<uint8_t>(10 + (c - 'a'));
+    }
+    return static_cast<uint8_t>(10 + (c - 'A'));
+}
+
+#ifdef HAVE_OPENSSL
+bool EncryptAes256Gcm(const std::array<uint8_t, kAes256KeySize>& key,
+                      const std::vector<uint8_t>& plaintext,
+                      std::array<uint8_t, kAesGcmNonceSize>* nonce,
+                      std::vector<uint8_t>* ciphertext,
+                      std::array<uint8_t, kAesGcmTagSize>* tag) {
+    if (nonce == nullptr || ciphertext == nullptr || tag == nullptr) {
+        return false;
+    }
+    if (RAND_bytes(nonce->data(), static_cast<int>(nonce->size())) != 1) {
+        return false;
+    }
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (ctx == nullptr) {
+        return false;
+    }
+
+    bool ok = false;
+    int out_len = 0;
+    ciphertext->assign(plaintext.size(), 0);
+
+    do {
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr,
+                               nullptr) != 1) {
+            break;
+        }
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                                static_cast<int>(nonce->size()),
+                                nullptr) != 1) {
+            break;
+        }
+        if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(),
+                               nonce->data()) != 1) {
+            break;
+        }
+        if (!plaintext.empty()) {
+            if (EVP_EncryptUpdate(ctx, ciphertext->data(), &out_len,
+                                  plaintext.data(),
+                                  static_cast<int>(plaintext.size())) != 1) {
+                break;
+            }
+        } else {
+            out_len = 0;
+        }
+        int final_len = 0;
+        if (EVP_EncryptFinal_ex(ctx, ciphertext->data() + out_len,
+                                &final_len) != 1) {
+            break;
+        }
+        ciphertext->resize(static_cast<size_t>(out_len + final_len));
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
+                                static_cast<int>(tag->size()),
+                                tag->data()) != 1) {
+            break;
+        }
+        ok = true;
+    } while (false);
+
+    EVP_CIPHER_CTX_free(ctx);
+    return ok;
+}
+
+bool DecryptAes256Gcm(const std::array<uint8_t, kAes256KeySize>& key,
+                      std::span<const uint8_t> nonce,
+                      std::span<const uint8_t> ciphertext,
+                      std::span<const uint8_t> tag,
+                      std::vector<uint8_t>* plaintext) {
+    if (plaintext == nullptr || nonce.size() != kAesGcmNonceSize ||
+        tag.size() != kAesGcmTagSize) {
+        return false;
+    }
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (ctx == nullptr) {
+        return false;
+    }
+
+    bool ok = false;
+    int out_len = 0;
+    plaintext->assign(ciphertext.size(), 0);
+    do {
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr,
+                               nullptr) != 1) {
+            break;
+        }
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                                static_cast<int>(nonce.size()),
+                                nullptr) != 1) {
+            break;
+        }
+        if (EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(),
+                               nonce.data()) != 1) {
+            break;
+        }
+        if (!ciphertext.empty()) {
+            if (EVP_DecryptUpdate(ctx, plaintext->data(), &out_len,
+                                  ciphertext.data(),
+                                  static_cast<int>(ciphertext.size())) != 1) {
+                break;
+            }
+        } else {
+            out_len = 0;
+        }
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
+                                static_cast<int>(tag.size()),
+                                const_cast<uint8_t*>(tag.data())) != 1) {
+            break;
+        }
+        int final_len = 0;
+        if (EVP_DecryptFinal_ex(ctx, plaintext->data() + out_len,
+                                &final_len) != 1) {
+            break;
+        }
+        plaintext->resize(static_cast<size_t>(out_len + final_len));
+        ok = true;
+    } while (false);
+
+    EVP_CIPHER_CTX_free(ctx);
+    return ok;
+}
+#endif
+
+}  // namespace
+
+RocksDBCache::RocksDBCache(const Config& config)
+    : config_(config),
+      runtime_enable_v2_encode_(config.enable_v2_encode),
+      runtime_enable_v2_read_fallback_(config.enable_v2_read_fallback),
+      runtime_enable_data_encryption_(config.enable_data_encryption),
+      runtime_encryption_active_key_id_(config.encryption_active_key_id),
+      runtime_encryption_key_env_(config.encryption_key_env) {}
 
 RocksDBCache::~RocksDBCache() {
     MaybePersistMaxVersion(max_version_.load(std::memory_order_acquire), true);
@@ -171,13 +453,22 @@ bool RocksDBCache::Initialize() {
             db_.reset();
             return false;
         }
+        if (!LoadTombstoneGcNextId()) {
+            if (logger) {
+                logger->error("Failed to load tombstone GC next id");
+            }
+            DestroyColumnFamilies();
+            db_.reset();
+            return false;
+        }
 
         if (logger) {
             logger->info(
                 "RocksDB initialized: path={}, ttl={}s, cf_count={}, "
                 "block_cache={}MB, strict_ttl_reads={}, scan_fill_cache={}, "
                 "iter_pin_data={}, isolate_foreach_scan_reader={}, "
-                "statistics_enabled={}",
+                "statistics_enabled={}, enable_v2_encode={}, "
+                "enable_v2_read_fallback={}, enable_data_encryption={}, encryption_active_key_id={}, encryption_key_env={}",
                 config_.db_path, config_.ttl_seconds,
                 cf_handles_.size(),
                 config_.block_cache_size / (1024 * 1024),
@@ -185,7 +476,12 @@ bool RocksDBCache::Initialize() {
                 config_.scan_fill_cache,
                 config_.iter_pin_data,
                 config_.isolate_foreach_scan_reader,
-                config_.enable_statistics);
+                config_.enable_statistics,
+                config_.enable_v2_encode,
+                config_.enable_v2_read_fallback,
+                config_.enable_data_encryption,
+                config_.encryption_active_key_id,
+                config_.encryption_key_env);
         }
 
         std::string max_version_str;
@@ -217,6 +513,20 @@ bool RocksDBCache::Initialize() {
                                          std::memory_order_relaxed);
         }
 
+        if (!ApplyRuntimeEncryptionConfig(
+                config_.enable_data_encryption,
+                config_.encryption_active_key_id,
+                config_.encryption_key_env)) {
+            if (logger) {
+                logger->error(
+                    "RocksDB encryption init failed: enabled={} active_key_id={} env={}",
+                    config_.enable_data_encryption,
+                    config_.encryption_active_key_id,
+                    config_.encryption_key_env);
+            }
+            return false;
+        }
+
         return true;
     } catch (const std::exception& e) {
         if (logger) {
@@ -225,6 +535,293 @@ bool RocksDBCache::Initialize() {
         }
         return false;
     }
+}
+
+bool RocksDBCache::ApplyRuntimeCodecConfig(
+    bool enable_v2_encode,
+    bool enable_v2_read_fallback,
+    std::optional<bool> enable_data_encryption,
+    std::optional<std::string> encryption_active_key_id,
+    std::optional<std::string> encryption_key_env) {
+    runtime_enable_v2_encode_.store(enable_v2_encode, std::memory_order_release);
+    runtime_enable_v2_read_fallback_.store(enable_v2_read_fallback,
+                                           std::memory_order_release);
+
+    if (!enable_data_encryption.has_value() &&
+        !encryption_active_key_id.has_value() &&
+        !encryption_key_env.has_value()) {
+        return true;
+    }
+
+    bool target_enable =
+        runtime_enable_data_encryption_.load(std::memory_order_acquire);
+    std::string target_active_key_id;
+    std::string target_key_env;
+    {
+        std::shared_lock<std::shared_mutex> read_lock(encryption_keyring_mutex_);
+        target_active_key_id = runtime_encryption_active_key_id_;
+        target_key_env = runtime_encryption_key_env_;
+    }
+
+    if (enable_data_encryption.has_value()) {
+        target_enable = *enable_data_encryption;
+    }
+    if (encryption_active_key_id.has_value()) {
+        target_active_key_id = *encryption_active_key_id;
+    }
+    if (encryption_key_env.has_value()) {
+        target_key_env = *encryption_key_env;
+    }
+
+    return ApplyRuntimeEncryptionConfig(
+        target_enable, target_active_key_id, target_key_env);
+}
+
+bool RocksDBCache::ApplyRuntimeEncryptionConfig(
+    bool enable_data_encryption,
+    const std::string& encryption_active_key_id,
+    const std::string& encryption_key_env) {
+    std::unordered_map<std::string, std::array<uint8_t, 32>> loaded_keyring;
+    if (!LoadEncryptionKeyringFromEnv(encryption_key_env, &loaded_keyring)) {
+        return false;
+    }
+
+    if (enable_data_encryption) {
+        if (encryption_active_key_id.empty()) {
+            return false;
+        }
+        if (loaded_keyring.find(encryption_active_key_id) == loaded_keyring.end()) {
+            return false;
+        }
+    }
+
+    {
+        std::unique_lock<std::shared_mutex> write_lock(encryption_keyring_mutex_);
+        runtime_encryption_active_key_id_ = encryption_active_key_id;
+        runtime_encryption_key_env_ = encryption_key_env;
+        runtime_encryption_keyring_ = std::move(loaded_keyring);
+    }
+    runtime_enable_data_encryption_.store(enable_data_encryption,
+                                          std::memory_order_release);
+    return true;
+}
+
+RocksDBCache::CodecRuntimeStats RocksDBCache::GetCodecRuntimeStats() const {
+    return CodecRuntimeStats{
+        .enable_v2_encode =
+            runtime_enable_v2_encode_.load(std::memory_order_acquire),
+        .enable_v2_read_fallback =
+            runtime_enable_v2_read_fallback_.load(std::memory_order_acquire),
+        .enable_data_encryption =
+            runtime_enable_data_encryption_.load(std::memory_order_acquire),
+        .v2_decode_reads = codec_v2_decode_reads_.load(std::memory_order_relaxed),
+        .v1_fallback_reads =
+            codec_v1_fallback_reads_.load(std::memory_order_relaxed),
+        .v1_reject_reads = codec_v1_reject_reads_.load(std::memory_order_relaxed),
+        .decode_errors = codec_decode_errors_.load(std::memory_order_relaxed),
+        .encrypted_decode_reads =
+            codec_encrypted_decode_reads_.load(std::memory_order_relaxed),
+        .decrypt_failures =
+            codec_decrypt_failures_.load(std::memory_order_relaxed),
+    };
+}
+
+bool RocksDBCache::PersistRuntimeConfigAuditStats(
+    const RuntimeConfigAuditStats& stats) {
+    if (!db_ || !meta_cf_) {
+        return false;
+    }
+
+    rocksdb::WriteBatch batch;
+    batch.Put(meta_cf_, GetRuntimeConfigAuditTotalKey(),
+              EncodeUint64ToString(stats.runtime_config_audit_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditFailureKey(),
+              EncodeUint64ToString(stats.runtime_config_audit_failures));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditReasonUpdatedKey(),
+              EncodeUint64ToString(stats.runtime_config_audit_reason_updated_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditReasonL2CodecApplyFailedKey(),
+              EncodeUint64ToString(
+                  stats.runtime_config_audit_reason_l2_codec_apply_failed_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditKeyEnableAccessControlKey(),
+              EncodeUint64ToString(
+                  stats.runtime_config_audit_key_enable_access_control_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditKeyRequireAuthForReadsKey(),
+              EncodeUint64ToString(
+                  stats.runtime_config_audit_key_require_auth_for_reads_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditKeyAccessControlTokenKey(),
+              EncodeUint64ToString(
+                  stats.runtime_config_audit_key_access_control_token_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditKeyEncryptionActiveKeyIdKey(),
+              EncodeUint64ToString(
+                  stats.runtime_config_audit_key_encryption_active_key_id_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditKeyEnableDataEncryptionKey(),
+              EncodeUint64ToString(
+                  stats.runtime_config_audit_key_enable_data_encryption_total));
+    batch.Put(meta_cf_, GetRuntimeConfigAuditKeyEncryptionKeyEnvKey(),
+              EncodeUint64ToString(
+                  stats.runtime_config_audit_key_encryption_key_env_total));
+
+    return db_->Write(rocksdb::WriteOptions(), &batch).ok();
+}
+
+RocksDBCache::RuntimeConfigAuditStats
+RocksDBCache::GetPersistedRuntimeConfigAuditStats() const {
+    RuntimeConfigAuditStats stats;
+    (void)ReadMetaUint64(GetRuntimeConfigAuditTotalKey(),
+                         &stats.runtime_config_audit_total);
+    (void)ReadMetaUint64(GetRuntimeConfigAuditFailureKey(),
+                         &stats.runtime_config_audit_failures);
+    (void)ReadMetaUint64(GetRuntimeConfigAuditReasonUpdatedKey(),
+                         &stats.runtime_config_audit_reason_updated_total);
+    (void)ReadMetaUint64(
+        GetRuntimeConfigAuditReasonL2CodecApplyFailedKey(),
+        &stats.runtime_config_audit_reason_l2_codec_apply_failed_total);
+    (void)ReadMetaUint64(
+        GetRuntimeConfigAuditKeyEnableAccessControlKey(),
+        &stats.runtime_config_audit_key_enable_access_control_total);
+    (void)ReadMetaUint64(
+        GetRuntimeConfigAuditKeyRequireAuthForReadsKey(),
+        &stats.runtime_config_audit_key_require_auth_for_reads_total);
+    (void)ReadMetaUint64(
+        GetRuntimeConfigAuditKeyAccessControlTokenKey(),
+        &stats.runtime_config_audit_key_access_control_token_total);
+    (void)ReadMetaUint64(
+        GetRuntimeConfigAuditKeyEncryptionActiveKeyIdKey(),
+        &stats.runtime_config_audit_key_encryption_active_key_id_total);
+    (void)ReadMetaUint64(
+        GetRuntimeConfigAuditKeyEnableDataEncryptionKey(),
+        &stats.runtime_config_audit_key_enable_data_encryption_total);
+    (void)ReadMetaUint64(
+        GetRuntimeConfigAuditKeyEncryptionKeyEnvKey(),
+        &stats.runtime_config_audit_key_encryption_key_env_total);
+    return stats;
+}
+
+bool RocksDBCache::PersistCapacityGovernanceStats(
+    const CapacityGovernanceStats& stats) {
+    if (!db_ || !meta_cf_) {
+        return false;
+    }
+
+    rocksdb::WriteBatch batch;
+    batch.Put(meta_cf_, GetL2SoftLimitWriteTotalKey(),
+              EncodeUint64ToString(stats.l2_soft_limit_write_total));
+    batch.Put(meta_cf_, GetL2HardLimitRejectTotalKey(),
+              EncodeUint64ToString(stats.l2_hard_limit_reject_total));
+    batch.Put(meta_cf_, GetL2HardLimitBypassTotalKey(),
+              EncodeUint64ToString(stats.l2_hard_limit_bypass_total));
+    return db_->Write(rocksdb::WriteOptions(), &batch).ok();
+}
+
+RocksDBCache::CapacityGovernanceStats
+RocksDBCache::GetPersistedCapacityGovernanceStats() const {
+    CapacityGovernanceStats stats;
+    (void)ReadMetaUint64(GetL2SoftLimitWriteTotalKey(),
+                         &stats.l2_soft_limit_write_total);
+    (void)ReadMetaUint64(GetL2HardLimitRejectTotalKey(),
+                         &stats.l2_hard_limit_reject_total);
+    (void)ReadMetaUint64(GetL2HardLimitBypassTotalKey(),
+                         &stats.l2_hard_limit_bypass_total);
+    return stats;
+}
+
+bool RocksDBCache::PersistTombstoneGcStats(
+    const TombstoneGcStats& stats) {
+    if (!db_ || !meta_cf_) {
+        return false;
+    }
+
+    rocksdb::WriteBatch batch;
+    batch.Put(meta_cf_, GetTombstoneGcReclaimedTotalKey(),
+              EncodeUint64ToString(stats.tombstone_gc_reclaimed_total));
+    batch.Put(meta_cf_, GetTombstoneGcFailedTotalKey(),
+              EncodeUint64ToString(stats.tombstone_gc_failed_total));
+    return db_->Write(rocksdb::WriteOptions(), &batch).ok();
+}
+
+RocksDBCache::TombstoneGcStats
+RocksDBCache::GetPersistedTombstoneGcStats() const {
+    TombstoneGcStats stats;
+    (void)ReadMetaUint64(GetTombstoneGcReclaimedTotalKey(),
+                         &stats.tombstone_gc_reclaimed_total);
+    (void)ReadMetaUint64(GetTombstoneGcFailedTotalKey(),
+                         &stats.tombstone_gc_failed_total);
+    return stats;
+}
+
+bool RocksDBCache::LoadEncryptionKeyringFromEnv(
+    const std::string& env_name,
+    std::unordered_map<std::string, std::array<uint8_t, 32>>* out) const {
+    if (out == nullptr) {
+        return false;
+    }
+    out->clear();
+    if (env_name.empty()) {
+        return true;
+    }
+
+    const char* raw = std::getenv(env_name.c_str());
+    if (raw == nullptr || raw[0] == '\0') {
+        return true;
+    }
+
+    std::string_view key_spec(raw);
+    size_t start = 0;
+    while (start < key_spec.size()) {
+        const size_t end = key_spec.find_first_of(",;", start);
+        const std::string_view token = key_spec.substr(
+            start, (end == std::string_view::npos ? key_spec.size() : end) - start);
+        start = (end == std::string_view::npos) ? key_spec.size() : end + 1;
+
+        if (token.empty()) {
+            continue;
+        }
+
+        const size_t split = token.find_first_of("=:");
+        if (split == std::string_view::npos) {
+            continue;
+        }
+
+        const std::string key_id(token.substr(0, split));
+        std::string material(token.substr(split + 1));
+        if (key_id.empty() || material.empty()) {
+            continue;
+        }
+
+        std::array<uint8_t, 32> decoded{};
+        if (!DecodeEncryptionKeyMaterial(material, &decoded)) {
+            return false;
+        }
+        (*out)[key_id] = decoded;
+    }
+    return true;
+}
+
+bool RocksDBCache::DecodeEncryptionKeyMaterial(
+    const std::string& encoded,
+    std::array<uint8_t, 32>* out) const {
+    if (out == nullptr) {
+        return false;
+    }
+    if (encoded.size() == kAes256KeySize) {
+        std::memcpy(out->data(), encoded.data(), kAes256KeySize);
+        return true;
+    }
+    if (encoded.size() != (kAes256KeySize * 2)) {
+        return false;
+    }
+
+    for (char c : encoded) {
+        if (!IsHexDigit(c)) {
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < kAes256KeySize; ++i) {
+        (*out)[i] = static_cast<uint8_t>(
+            (HexNibble(encoded[2 * i]) << 4) | HexNibble(encoded[2 * i + 1]));
+    }
+    return true;
 }
 
 bool RocksDBCache::AssignColumnFamilies(
@@ -369,6 +966,51 @@ bool RocksDBCache::LoadDeadLetterNextId() {
     return true;
 }
 
+bool RocksDBCache::LoadTombstoneGcNextId() {
+    if (!db_ || !meta_cf_) {
+        return false;
+    }
+
+    std::string raw_next_id;
+    rocksdb::Status status = db_->Get(
+        rocksdb::ReadOptions(), meta_cf_, GetTombstoneGcNextIdKey(), &raw_next_id);
+
+    uint64_t loaded_next_id = 1;
+    if (status.ok()) {
+        uint64_t parsed = 0;
+        if (!DecodeUint64FromSlice(rocksdb::Slice(raw_next_id), &parsed) ||
+            parsed == 0) {
+            return false;
+        }
+        loaded_next_id = parsed;
+    } else if (status.IsNotFound()) {
+        uint64_t max_seen_id = 0;
+        std::unique_ptr<rocksdb::Iterator> it(
+            db_->NewIterator(BuildScanReadOptions(), meta_cf_));
+        const std::string prefix = GetTombstoneGcStoragePrefix();
+        for (it->Seek(prefix); it->Valid(); it->Next()) {
+            if (!it->key().starts_with(prefix)) {
+                break;
+            }
+            uint64_t tombstone_gc_id = 0;
+            if (ParseTombstoneGcStorageKey(it->key(), &tombstone_gc_id) &&
+                tombstone_gc_id > max_seen_id) {
+                max_seen_id = tombstone_gc_id;
+            }
+        }
+        loaded_next_id = max_seen_id + 1;
+        if (!PersistTombstoneGcNextIdLocked(loaded_next_id)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(tombstone_gc_mutex_);
+    tombstone_gc_next_id_ = loaded_next_id;
+    return true;
+}
+
 bool RocksDBCache::PersistOutboxNextIdLocked(uint64_t next_id) {
     if (!db_ || !meta_cf_ || next_id == 0) {
         return false;
@@ -387,6 +1029,29 @@ bool RocksDBCache::PersistDeadLetterNextIdLocked(uint64_t next_id) {
         rocksdb::WriteOptions(), meta_cf_, GetDeadLetterNextIdKey(),
         EncodeUint64ToString(next_id));
     return status.ok();
+}
+
+bool RocksDBCache::PersistTombstoneGcNextIdLocked(uint64_t next_id) {
+    if (!db_ || !meta_cf_ || next_id == 0) {
+        return false;
+    }
+    rocksdb::Status status = db_->Put(
+        rocksdb::WriteOptions(), meta_cf_, GetTombstoneGcNextIdKey(),
+        EncodeUint64ToString(next_id));
+    return status.ok();
+}
+
+bool RocksDBCache::ReadMetaUint64(const std::string& key, uint64_t* out) const {
+    if (!db_ || !meta_cf_ || out == nullptr) {
+        return false;
+    }
+    std::string value;
+    const rocksdb::Status status = db_->Get(
+        rocksdb::ReadOptions(), meta_cf_, key, &value);
+    if (!status.ok()) {
+        return false;
+    }
+    return DecodeUint64FromSlice(rocksdb::Slice(value), out);
 }
 
 rocksdb::ColumnFamilyHandle* RocksDBCache::ResolveDataColumnFamily(
@@ -440,6 +1105,9 @@ bool RocksDBCache::PutToDataColumnFamily(const std::string& key,
     }
 
     const auto serialized = SerializeVersionedData(data);
+    if (serialized.empty()) {
+        return false;
+    }
     rocksdb::WriteBatch write_batch;
     write_batch.Put(target_cf, key,
                     rocksdb::Slice(
@@ -546,6 +1214,15 @@ std::string RocksDBCache::MakeDeadLetterStorageKey(
     return std::string(buffer);
 }
 
+std::string RocksDBCache::MakeTombstoneGcStorageKey(
+    uint64_t tombstone_gc_id) const {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%s%020llu",
+                  GetTombstoneGcStoragePrefix().c_str(),
+                  static_cast<unsigned long long>(tombstone_gc_id));
+    return std::string(buffer);
+}
+
 bool RocksDBCache::ParseOutboxStorageKey(const rocksdb::Slice& storage_key,
                                          uint64_t* outbox_id) const {
     if (outbox_id == nullptr) {
@@ -591,11 +1268,37 @@ bool RocksDBCache::ParseDeadLetterStorageKey(
     }
 }
 
+bool RocksDBCache::ParseTombstoneGcStorageKey(
+    const rocksdb::Slice& storage_key,
+    uint64_t* tombstone_gc_id) const {
+    if (tombstone_gc_id == nullptr) {
+        return false;
+    }
+    const std::string prefix = GetTombstoneGcStoragePrefix();
+    if (storage_key.size() <= prefix.size()) {
+        return false;
+    }
+    if (std::memcmp(storage_key.data(), prefix.data(), prefix.size()) != 0) {
+        return false;
+    }
+    const std::string id_str(storage_key.data() + prefix.size(),
+                             storage_key.size() - prefix.size());
+    try {
+        *tombstone_gc_id = std::stoull(id_str);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 std::vector<uint8_t> RocksDBCache::SerializeOutboxValue(
     const std::string& key,
     const VersionedData& data,
     Priority priority) const {
     const auto payload = SerializeVersionedData(data);
+    if (payload.empty()) {
+        return {};
+    }
     const uint32_t key_size = static_cast<uint32_t>(key.size());
     const uint32_t payload_size = static_cast<uint32_t>(payload.size());
     const size_t total_size =
@@ -619,6 +1322,9 @@ std::vector<uint8_t> RocksDBCache::SerializeOutboxValue(
 std::vector<uint8_t> RocksDBCache::SerializeDeadLetterValue(
     const DeadLetterEntry& entry) const {
     const auto payload = SerializeVersionedData(entry.data);
+    if (payload.empty()) {
+        return {};
+    }
     const uint32_t key_size = static_cast<uint32_t>(entry.key.size());
     const uint32_t error_size =
         static_cast<uint32_t>(entry.error_message.size());
@@ -663,6 +1369,29 @@ std::vector<uint8_t> RocksDBCache::SerializeDeadLetterValue(
                reinterpret_cast<const uint8_t*>(&payload_size) +
                    sizeof(uint32_t));
     out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+std::vector<uint8_t> RocksDBCache::SerializeTombstoneGcValue(
+    const TombstoneGcEntry& entry) const {
+    const uint32_t key_size = static_cast<uint32_t>(entry.key.size());
+    const size_t total_size =
+        sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t) + key_size;
+    std::vector<uint8_t> out;
+    out.reserve(total_size);
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&entry.delete_version),
+               reinterpret_cast<const uint8_t*>(&entry.delete_version) +
+                   sizeof(uint64_t));
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&entry.due_at_ms),
+               reinterpret_cast<const uint8_t*>(&entry.due_at_ms) +
+                   sizeof(uint64_t));
+    out.insert(out.end(),
+               reinterpret_cast<const uint8_t*>(&key_size),
+               reinterpret_cast<const uint8_t*>(&key_size) +
+                   sizeof(uint32_t));
+    out.insert(out.end(), entry.key.begin(), entry.key.end());
     return out;
 }
 
@@ -794,6 +1523,35 @@ bool RocksDBCache::DeserializeDeadLetterValue(const rocksdb::Slice& value,
     return true;
 }
 
+bool RocksDBCache::DeserializeTombstoneGcValue(
+    const rocksdb::Slice& value,
+    TombstoneGcEntry* entry) {
+    if (entry == nullptr) {
+        return false;
+    }
+    if (value.size() <
+        sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t)) {
+        return false;
+    }
+
+    const uint8_t* cursor = reinterpret_cast<const uint8_t*>(value.data());
+    const uint8_t* end = cursor + value.size();
+    std::memcpy(&entry->delete_version, cursor, sizeof(uint64_t));
+    cursor += sizeof(uint64_t);
+    std::memcpy(&entry->due_at_ms, cursor, sizeof(uint64_t));
+    cursor += sizeof(uint64_t);
+
+    uint32_t key_size = 0;
+    std::memcpy(&key_size, cursor, sizeof(uint32_t));
+    cursor += sizeof(uint32_t);
+    if (key_size > static_cast<uint32_t>(end - cursor)) {
+        return false;
+    }
+    entry->key.assign(reinterpret_cast<const char*>(cursor), key_size);
+    cursor += key_size;
+    return cursor == end;
+}
+
 bool RocksDBCache::AppendOutbox(const std::string& key,
                                 const VersionedData& data,
                                 Priority priority,
@@ -807,6 +1565,9 @@ bool RocksDBCache::AppendOutbox(const std::string& key,
     }
 
     const auto serialized = SerializeOutboxValue(key, data, priority);
+    if (serialized.empty()) {
+        return false;
+    }
     std::lock_guard<std::mutex> lock(outbox_mutex_);
     const uint64_t assigned_id = outbox_next_id_;
     const uint64_t next_id = assigned_id + 1;
@@ -911,6 +1672,9 @@ bool RocksDBCache::AppendDeadLetter(const DeadLetterEntry& entry,
     }
 
     const auto serialized = SerializeDeadLetterValue(entry);
+    if (serialized.empty()) {
+        return false;
+    }
     std::lock_guard<std::mutex> lock(dead_letter_mutex_);
     const uint64_t assigned_id = dead_letter_next_id_;
     const uint64_t next_id = assigned_id + 1;
@@ -1000,6 +1764,130 @@ size_t RocksDBCache::DeadLetterDepth() const {
     return depth;
 }
 
+bool RocksDBCache::AppendTombstoneGcEntry(const std::string& key,
+                                          uint64_t delete_version,
+                                          uint64_t due_at_ms,
+                                          uint64_t* tombstone_gc_id) {
+    if (!db_ || !meta_cf_ || key.empty() || delete_version == 0 || due_at_ms == 0) {
+        return false;
+    }
+    if (key.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        return false;
+    }
+
+    TombstoneGcEntry entry{
+        .tombstone_gc_id = 0,
+        .key = key,
+        .delete_version = delete_version,
+        .due_at_ms = due_at_ms,
+    };
+    const auto serialized = SerializeTombstoneGcValue(entry);
+    if (serialized.empty()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(tombstone_gc_mutex_);
+    const uint64_t assigned_id = tombstone_gc_next_id_;
+    const uint64_t next_id = assigned_id + 1;
+
+    rocksdb::WriteBatch batch;
+    batch.Put(meta_cf_, MakeTombstoneGcStorageKey(assigned_id),
+              rocksdb::Slice(reinterpret_cast<const char*>(serialized.data()),
+                             serialized.size()));
+    batch.Put(meta_cf_, GetTombstoneGcNextIdKey(),
+              EncodeUint64ToString(next_id));
+
+    rocksdb::Status status = db_->Write(rocksdb::WriteOptions(), &batch);
+    if (!status.ok()) {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->warn("AppendTombstoneGcEntry failed for key {}: {}",
+                         key, status.ToString());
+        }
+        return false;
+    }
+
+    tombstone_gc_next_id_ = next_id;
+    if (tombstone_gc_id != nullptr) {
+        *tombstone_gc_id = assigned_id;
+    }
+    return true;
+}
+
+bool RocksDBCache::AckTombstoneGcEntry(uint64_t tombstone_gc_id) {
+    if (!db_ || !meta_cf_ || tombstone_gc_id == 0) {
+        return false;
+    }
+    rocksdb::Status status = db_->Delete(
+        rocksdb::WriteOptions(), meta_cf_,
+        MakeTombstoneGcStorageKey(tombstone_gc_id));
+    if (!status.ok()) {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->warn("AckTombstoneGcEntry failed id={}: {}",
+                         tombstone_gc_id, status.ToString());
+        }
+    }
+    return status.ok();
+}
+
+size_t RocksDBCache::ReplayDueTombstoneGc(
+    size_t limit,
+    uint64_t now_ms,
+    const std::function<bool(const TombstoneGcEntry&)>& cb) {
+    if (!db_ || !meta_cf_ || !cb) {
+        return 0;
+    }
+
+    size_t replayed = 0;
+    const std::string prefix = GetTombstoneGcStoragePrefix();
+    std::unique_ptr<rocksdb::Iterator> it(
+        db_->NewIterator(BuildScanReadOptions(), meta_cf_));
+    for (it->Seek(prefix); it->Valid(); it->Next()) {
+        if (!it->key().starts_with(prefix)) {
+            break;
+        }
+        if (limit > 0 && replayed >= limit) {
+            break;
+        }
+
+        TombstoneGcEntry entry;
+        if (!ParseTombstoneGcStorageKey(it->key(), &entry.tombstone_gc_id)) {
+            continue;
+        }
+        if (!DeserializeTombstoneGcValue(it->value(), &entry)) {
+            continue;
+        }
+        if (entry.due_at_ms > now_ms) {
+            continue;
+        }
+
+        ++replayed;
+        if (!cb(entry)) {
+            break;
+        }
+    }
+    return replayed;
+}
+
+size_t RocksDBCache::TombstoneGcDepth() const {
+    if (!db_ || !meta_cf_) {
+        return 0;
+    }
+
+    size_t depth = 0;
+    const std::string prefix = GetTombstoneGcStoragePrefix();
+    std::unique_ptr<rocksdb::Iterator> it(
+        db_->NewIterator(BuildScanReadOptions(), meta_cf_));
+    for (it->Seek(prefix); it->Valid(); it->Next()) {
+        if (!it->key().starts_with(prefix)) {
+            break;
+        }
+        ++depth;
+    }
+    return depth;
+}
+
 std::optional<VersionedData> RocksDBCache::Get(const std::string& key) {
     return Get(key, DataTier::kTtl);
 }
@@ -1077,6 +1965,9 @@ bool RocksDBCache::BatchSet(
 
         for (const auto& [key, data] : batch) {
             auto serialized = SerializeVersionedData(data);
+            if (serialized.empty()) {
+                return false;
+            }
             write_batch.Put(target_cf, key,
                             rocksdb::Slice(
                                 reinterpret_cast<const char*>(serialized.data()),
@@ -1331,6 +2222,32 @@ size_t RocksDBCache::ForEach(IteratorCallback cb, DataTier tier) {
     return count;
 }
 
+size_t RocksDBCache::CountCorruptedEntries(DataTier tier) {
+    auto* target_cf = ResolveDataColumnFamily(tier);
+    if (!db_ || target_cf == nullptr) {
+        return 0;
+    }
+
+    size_t corrupted = 0;
+    try {
+        std::unique_ptr<rocksdb::Iterator> it(
+            db_->NewIterator(BuildScanReadOptions(), target_cf));
+        for (it->SeekToFirst(); it->Valid(); it->Next()) {
+            VersionedData decoded;
+            if (!DeserializeVersionedData(it->value(), decoded)) {
+                ++corrupted;
+            }
+        }
+    } catch (const std::exception& e) {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->error("Exception in RocksDB CountCorruptedEntries: {}",
+                          e.what());
+        }
+    }
+    return corrupted;
+}
+
 size_t RocksDBCache::DeleteByPrefix(const std::string& prefix,
                                     DataTier tier,
                                     size_t batch_size) {
@@ -1508,6 +2425,35 @@ std::string RocksDBCache::GetDBStats() {
     return stats;
 }
 
+bool RocksDBCache::CreateCheckpoint(const std::string& output_path) {
+    if (!db_ || output_path.empty()) {
+        return false;
+    }
+
+    rocksdb::Checkpoint* raw_checkpoint = nullptr;
+    rocksdb::Status status = rocksdb::Checkpoint::Create(db_.get(), &raw_checkpoint);
+    std::unique_ptr<rocksdb::Checkpoint> checkpoint(raw_checkpoint);
+    if (!status.ok()) {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->warn("RocksDBCache create checkpoint handle failed: {}",
+                         status.ToString());
+        }
+        return false;
+    }
+
+    status = checkpoint->CreateCheckpoint(output_path);
+    if (!status.ok()) {
+        auto logger = spdlog::get("mir2");
+        if (logger) {
+            logger->warn("RocksDBCache create checkpoint failed path={} err={}",
+                         output_path, status.ToString());
+        }
+        return false;
+    }
+    return true;
+}
+
 bool RocksDBCache::GetUInt64Property(const std::string& property,
                                      uint64_t* out) const {
     if (!db_ || out == nullptr) {
@@ -1561,68 +2507,220 @@ bool RocksDBCache::GetUInt64Property(const std::string& property,
 std::vector<uint8_t> RocksDBCache::SerializeVersionedData(
     const VersionedData& data) const {
     std::vector<uint8_t> result;
+    const size_t data_size = data.data.size();
 
-    constexpr size_t header_size = 8 + 8 + 4;
-    size_t data_size = data.data.size();
-    size_t total_size = header_size + data_size;
+    if (!runtime_enable_v2_encode_.load(std::memory_order_acquire)) {
+        constexpr size_t kV1HeaderSize = 8 + 8 + 4;
+        const size_t total_size = kV1HeaderSize + data_size;
 
+        result.reserve(total_size);
+
+        const uint64_t version = data.version;
+        result.insert(result.end(), reinterpret_cast<const uint8_t*>(&version),
+                      reinterpret_cast<const uint8_t*>(&version) +
+                          sizeof(uint64_t));
+
+        const uint64_t timestamp = data.timestamp_ms;
+        result.insert(result.end(),
+                      reinterpret_cast<const uint8_t*>(&timestamp),
+                      reinterpret_cast<const uint8_t*>(&timestamp) +
+                          sizeof(uint64_t));
+
+        const uint32_t size_u32 = static_cast<uint32_t>(data_size);
+        result.insert(result.end(),
+                      reinterpret_cast<const uint8_t*>(&size_u32),
+                      reinterpret_cast<const uint8_t*>(&size_u32) +
+                          sizeof(uint32_t));
+
+        if (!data.data.empty()) {
+            result.insert(result.end(), data.data.begin(), data.data.end());
+        }
+        return result;
+    }
+
+    uint8_t record_flags = kV2RecordFlags;
+    std::vector<uint8_t> payload = data.data;
+    if (runtime_enable_data_encryption_.load(std::memory_order_acquire)) {
+        std::string active_key_id;
+        std::array<uint8_t, 32> active_key{};
+        {
+            std::shared_lock<std::shared_mutex> lock(encryption_keyring_mutex_);
+            active_key_id = runtime_encryption_active_key_id_;
+            if (active_key_id.empty() || active_key_id.size() > 255) {
+                return {};
+            }
+            auto it = runtime_encryption_keyring_.find(active_key_id);
+            if (it == runtime_encryption_keyring_.end()) {
+                return {};
+            }
+            active_key = it->second;
+        }
+
+#ifdef HAVE_OPENSSL
+        std::array<uint8_t, kAesGcmNonceSize> nonce{};
+        std::array<uint8_t, kAesGcmTagSize> tag{};
+        std::vector<uint8_t> ciphertext;
+        if (!EncryptAes256Gcm(active_key, data.data, &nonce, &ciphertext, &tag)) {
+            return {};
+        }
+
+        payload.clear();
+        payload.reserve(1 + active_key_id.size() + nonce.size() + tag.size() +
+                        ciphertext.size());
+        payload.push_back(static_cast<uint8_t>(active_key_id.size()));
+        payload.insert(payload.end(), active_key_id.begin(), active_key_id.end());
+        payload.insert(payload.end(), nonce.begin(), nonce.end());
+        payload.insert(payload.end(), tag.begin(), tag.end());
+        payload.insert(payload.end(), ciphertext.begin(), ciphertext.end());
+        record_flags |= kV2RecordFlagEncrypted;
+#else
+        return {};
+#endif
+    }
+
+    const size_t total_size = kV2HeaderSize + payload.size();
     result.reserve(total_size);
 
-    uint64_t version = data.version;
+    result.insert(result.end(), kV2RecordMagic,
+                  kV2RecordMagic + sizeof(kV2RecordMagic));
+    result.push_back(kV2RecordVersion);
+    result.push_back(record_flags);
+    result.insert(result.end(),
+                  reinterpret_cast<const uint8_t*>(&kV2RecordReserved),
+                  reinterpret_cast<const uint8_t*>(&kV2RecordReserved) +
+                      sizeof(uint16_t));
+
+    const uint64_t version = data.version;
     result.insert(result.end(), reinterpret_cast<const uint8_t*>(&version),
                   reinterpret_cast<const uint8_t*>(&version) +
                       sizeof(uint64_t));
 
-    uint64_t timestamp = data.timestamp_ms;
+    const uint64_t timestamp = data.timestamp_ms;
     result.insert(result.end(),
                   reinterpret_cast<const uint8_t*>(&timestamp),
                   reinterpret_cast<const uint8_t*>(&timestamp) +
                       sizeof(uint64_t));
 
-    uint32_t size_u32 = static_cast<uint32_t>(data_size);
+    const uint32_t payload_size = static_cast<uint32_t>(payload.size());
     result.insert(result.end(),
-                  reinterpret_cast<const uint8_t*>(&size_u32),
-                  reinterpret_cast<const uint8_t*>(&size_u32) +
+                  reinterpret_cast<const uint8_t*>(&payload_size),
+                  reinterpret_cast<const uint8_t*>(&payload_size) +
                       sizeof(uint32_t));
 
-    if (!data.data.empty()) {
-        result.insert(result.end(), data.data.begin(), data.data.end());
-    }
+    const uint32_t payload_crc32 =
+        ComputeCrc32(payload.data(), payload.size());
+    result.insert(result.end(),
+                  reinterpret_cast<const uint8_t*>(&payload_crc32),
+                  reinterpret_cast<const uint8_t*>(&payload_crc32) +
+                      sizeof(uint32_t));
 
+    if (!payload.empty()) {
+        result.insert(result.end(), payload.begin(), payload.end());
+    }
     return result;
 }
 
 bool RocksDBCache::DeserializeVersionedData(const rocksdb::Slice& data,
                                             VersionedData& result) {
-    constexpr size_t header_size = 8 + 8 + 4;
-    if (data.size() < header_size) {
+    if (data.size() == 0) {
+        codec_decode_errors_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
-    const uint8_t* ptr = reinterpret_cast<const uint8_t*>(data.data());
+    const bool has_v2_magic =
+        data.size() >= sizeof(kV2RecordMagic) &&
+        std::memcmp(data.data(), kV2RecordMagic, sizeof(kV2RecordMagic)) == 0;
+    if (has_v2_magic) {
+        ParsedV2Frame frame;
+        const bool parsed = ParseVersionedDataV2Frame(data, &frame);
+        if (!parsed) {
+            codec_decode_errors_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
 
-    std::memcpy(&result.version, ptr, sizeof(uint64_t));
-    ptr += sizeof(uint64_t);
+        result.version = frame.version;
+        result.timestamp_ms = frame.timestamp_ms;
 
-    std::memcpy(&result.timestamp_ms, ptr, sizeof(uint64_t));
-    ptr += sizeof(uint64_t);
+        bool ok = true;
+        if ((frame.flags & kV2RecordFlagEncrypted) != 0) {
+#ifdef HAVE_OPENSSL
+            if (frame.payload_size <
+                (1 + kAesGcmNonceSize + kAesGcmTagSize)) {
+                ok = false;
+            } else {
+                const uint8_t key_id_len = frame.payload[0];
+                const size_t prefix_size =
+                    1 + static_cast<size_t>(key_id_len) + kAesGcmNonceSize +
+                    kAesGcmTagSize;
+                if (key_id_len == 0 || frame.payload_size < prefix_size) {
+                    ok = false;
+                } else {
+                    const std::string key_id(
+                        reinterpret_cast<const char*>(frame.payload + 1),
+                        key_id_len);
+                    std::array<uint8_t, 32> key{};
+                    {
+                        std::shared_lock<std::shared_mutex> lock(
+                            encryption_keyring_mutex_);
+                        auto it = runtime_encryption_keyring_.find(key_id);
+                        if (it == runtime_encryption_keyring_.end()) {
+                            ok = false;
+                        } else {
+                            key = it->second;
+                        }
+                    }
+                    if (ok) {
+                        const uint8_t* nonce_ptr =
+                            frame.payload + 1 + key_id_len;
+                        const uint8_t* tag_ptr = nonce_ptr + kAesGcmNonceSize;
+                        const uint8_t* ciphertext_ptr = tag_ptr + kAesGcmTagSize;
+                        const size_t ciphertext_size =
+                            frame.payload_size - prefix_size;
+                        ok = DecryptAes256Gcm(
+                            key,
+                            std::span<const uint8_t>(nonce_ptr, kAesGcmNonceSize),
+                            std::span<const uint8_t>(ciphertext_ptr,
+                                                     ciphertext_size),
+                            std::span<const uint8_t>(tag_ptr, kAesGcmTagSize),
+                            &result.data);
+                    }
+                }
+            }
+#else
+            ok = false;
+#endif
+        } else {
+            result.data.assign(frame.payload, frame.payload + frame.payload_size);
+        }
 
-    uint32_t size_u32 = 0;
-    std::memcpy(&size_u32, ptr, sizeof(uint32_t));
-    ptr += sizeof(uint32_t);
-
-    size_t data_size = static_cast<size_t>(size_u32);
-    if (header_size + data_size != data.size()) {
-        return false;
+        if (ok) {
+            codec_v2_decode_reads_.fetch_add(1, std::memory_order_relaxed);
+            if ((frame.flags & kV2RecordFlagEncrypted) != 0) {
+                codec_encrypted_decode_reads_.fetch_add(1,
+                                                        std::memory_order_relaxed);
+            }
+        } else {
+            codec_decode_errors_.fetch_add(1, std::memory_order_relaxed);
+            if ((frame.flags & kV2RecordFlagEncrypted) != 0) {
+                codec_decrypt_failures_.fetch_add(1,
+                                                  std::memory_order_relaxed);
+            }
+        }
+        return ok;
     }
 
-    if (data_size > 0) {
-        result.data.assign(ptr, ptr + data_size);
+    if (runtime_enable_v2_encode_.load(std::memory_order_acquire) &&
+        !runtime_enable_v2_read_fallback_.load(std::memory_order_acquire)) {
+        codec_v1_reject_reads_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    const bool ok = DeserializeVersionedDataV1(data, result);
+    if (ok) {
+        codec_v1_fallback_reads_.fetch_add(1, std::memory_order_relaxed);
     } else {
-        result.data.clear();
+        codec_decode_errors_.fetch_add(1, std::memory_order_relaxed);
     }
-
-    return true;
+    return ok;
 }
 
 }  // namespace mir2::storage_engine::l2

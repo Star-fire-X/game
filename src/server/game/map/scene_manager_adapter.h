@@ -21,9 +21,17 @@ class SceneManagerAdapter final : public ports::IWorldMapPort {
                       entt::entity entity,
                       int32_t x,
                       int32_t y) override;
-  bool UpdateEntityPosition(entt::entity entity,
+  bool UpdateEntityPosition(int32_t map_id,
+                            entt::entity entity,
                             int32_t new_x,
                             int32_t new_y) override;
+  bool RemoveEntityFromMap(int32_t map_id,
+                           entt::entity entity) override;
+  bool MoveEntityToMap(int32_t from_map_id,
+                       int32_t to_map_id,
+                       entt::entity entity,
+                       int32_t x,
+                       int32_t y) override;
 
  private:
   SceneManager& scene_manager_;

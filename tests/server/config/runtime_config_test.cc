@@ -942,6 +942,40 @@ TEST_F(RuntimeConfigTest, LoadRuntimeDirFailsWhenGatesContainDuplicateSourceCoor
   EXPECT_NE(error.find("duplicate gate source coordinate"), std::string::npos);
 }
 
+TEST_F(RuntimeConfigTest, LoadRuntimeDirFailsWhenGatesContainNumericEquivalentSourceMaps) {
+  const auto gates = json{
+      {"gates",
+       json::array({
+           {{"gate_id", 10},
+            {"source_map", "4"},
+            {"source_x", 10},
+            {"source_y", 20},
+            {"target_map", "2"},
+            {"target_x", 30},
+            {"target_y", 40},
+            {"require_item", false},
+            {"required_item_id", 0}},
+           {{"gate_id", 11},
+            {"source_map", "004"},
+            {"source_x", 10},
+            {"source_y", 20},
+            {"target_map", "3"},
+            {"target_x", 50},
+            {"target_y", 60},
+            {"require_item", false},
+            {"required_item_id", 0}},
+       })}}
+                           .dump(2) +
+                       "\n";
+  WriteCompleteRuntimeBundle({{"gates", ArtifactSpec{"gates.json", gates}}});
+
+  std::string error;
+  auto data = ConfigBundleLoader::LoadFromRuntimeDir(runtime_dir_, &error);
+
+  EXPECT_FALSE(data.has_value());
+  EXPECT_NE(error.find("duplicate gate source coordinate"), std::string::npos) << error;
+}
+
 TEST_F(RuntimeConfigTest, LoadRuntimeDirFailsWhenDropsContainInvalidDropRate) {
   WriteCompleteRuntimeBundle(
       {{"drops", ArtifactSpec{"drops.json", BuildDropsContent(false, true)}}});

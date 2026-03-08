@@ -64,6 +64,7 @@ void GateManager::ReplaceAllGates(const std::vector<GateInfo>& gates) {
   numeric_coord_index_.clear();
 
   std::unordered_set<uint32_t> seen_gate_ids;
+  std::unordered_set<NumericCoordKey, NumericCoordKeyHash> seen_numeric_coords;
   for (const auto& gate : gates) {
     if (gate.gate_id == 0 || gate.source_map.empty() || gate.target_map.empty()) {
       SYSLOG_WARN("Skip invalid gate during ReplaceAllGates gate_id={}", gate.gate_id);
@@ -80,6 +81,19 @@ void GateManager::ReplaceAllGates(const std::vector<GateInfo>& gates) {
                   gate.source_x,
                   gate.source_y);
       continue;
+    }
+    if (const auto numeric_map_id = TryParseMapId(gate.source_map);
+        numeric_map_id.has_value()) {
+      const auto numeric_key =
+          MakeNumericCoordKey(*numeric_map_id, gate.source_x, gate.source_y);
+      if (!seen_numeric_coords.insert(numeric_key).second) {
+        SYSLOG_WARN(
+            "Skip duplicate normalized gate source during ReplaceAllGates source_map={} x={} y={}",
+            gate.source_map,
+            gate.source_x,
+            gate.source_y);
+        continue;
+      }
     }
     AddGate(gate);
   }

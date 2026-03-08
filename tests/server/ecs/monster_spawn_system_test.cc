@@ -8,6 +8,7 @@
 
 #include "ecs/components/monster_component.h"
 #include "ecs/components/transform_component.h"
+#include "game/ports/i_world_map_port.h"
 #include "game/entity/monster_spawn_config.h"
 
 #define private public
@@ -16,6 +17,50 @@
 
 namespace mir2::ecs {
 namespace {
+
+class FakeWorldMapPort final : public game::ports::IWorldMapPort {
+ public:
+  bool map_exists = true;
+  bool add_result = true;
+  int32_t last_map_id = 0;
+  entt::entity last_entity = entt::null;
+  int32_t last_x = 0;
+  int32_t last_y = 0;
+
+  bool MapExists(int32_t map_id) const override {
+    return map_exists && map_id > 0;
+  }
+
+  bool AddEntityToMap(int32_t map_id,
+                      entt::entity entity,
+                      int32_t x,
+                      int32_t y) override {
+    last_map_id = map_id;
+    last_entity = entity;
+    last_x = x;
+    last_y = y;
+    return add_result;
+  }
+
+  bool UpdateEntityPosition(int32_t /*map_id*/,
+                            entt::entity /*entity*/,
+                            int32_t /*new_x*/,
+                            int32_t /*new_y*/) override {
+    return true;
+  }
+
+  bool RemoveEntityFromMap(int32_t /*map_id*/, entt::entity /*entity*/) override {
+    return true;
+  }
+
+  bool MoveEntityToMap(int32_t /*from_map_id*/,
+                       int32_t /*to_map_id*/,
+                       entt::entity /*entity*/,
+                       int32_t /*x*/,
+                       int32_t /*y*/) override {
+    return true;
+  }
+};
 
 class MonsterSpawnSystemTest : public ::testing::Test {
 protected:
@@ -219,6 +264,33 @@ TEST_F(MonsterSpawnSystemTest, ReplaceAllSpawnPointsKeepsUpdatePathWorking) {
 
     auto view = registry_.view<MonsterIdentityComponent, TransformComponent>();
     EXPECT_EQ(view.size_hint(), 1u);
+}
+
+TEST_F(MonsterSpawnSystemTest, SpawnSystem_RollsBackWhenSceneRegistrationFails) {
+    MonsterSpawnSystem system;
+    FakeWorldMapPort world_map_port;
+    world_map_port.add_result = false;
+    system.BindWorldMapPort(&world_map_port, /*map_id=*/3);
+
+    game::entity::MonsterSpawnPoint spawn;
+    spawn.spawn_id = 42;
+    spawn.map_id = 3;
+    spawn.center_x = 7;
+    spawn.center_y = 9;
+    spawn.spawn_radius = 0;
+    spawn.monster_template_id = 123;
+    spawn.aggro_range = 10;
+    spawn.attack_range = 3;
+    spawn.max_count = 1;
+
+    system.SpawnMonsterAtPoint(registry_, spawn);
+
+    EXPECT_EQ(world_map_port.last_map_id, 3);
+    EXPECT_EQ(world_map_port.last_x, 7);
+    EXPECT_EQ(world_map_port.last_y, 9);
+    EXPECT_EQ(spawn.current_count, 0);
+    EXPECT_TRUE(registry_.view<MonsterIdentityComponent>().empty());
+    EXPECT_TRUE(registry_.view<TransformComponent>().empty());
 }
 
 }  // namespace

@@ -301,14 +301,11 @@ Task<void> MovementHandler::HandleMove(HandlerContext ctx,
           result = mir2::common::ErrorCode::kInvalidAction;
         }
         if (result == mir2::common::ErrorCode::kOk && entity != entt::null) {
-          const auto current_map_id = scene_manager_.TryGetEntityMapId(entity);
-          bool scene_ok = false;
-          if (!current_map_id.has_value() ||
-              *current_map_id != static_cast<int32_t>(map_id)) {
+          bool scene_ok = scene_manager_.UpdateEntityPosition(
+              static_cast<int32_t>(map_id), entity, x, y);
+          if (!scene_ok) {
             scene_ok =
                 scene_manager_.AddEntityToMap(static_cast<int32_t>(map_id), entity, x, y);
-          } else {
-            scene_ok = scene_manager_.UpdateEntityPosition(entity, x, y);
           }
           if (!scene_ok) {
             SYSLOG_WARN("MovementHandler scene update failed entity_id={} map_id={} pos=({}, {})",

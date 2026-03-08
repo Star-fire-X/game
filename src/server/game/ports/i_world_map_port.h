@@ -21,9 +21,17 @@ class IWorldMapPort {
                               entt::entity entity,
                               int32_t x,
                               int32_t y) = 0;
-  virtual bool UpdateEntityPosition(entt::entity entity,
+  virtual bool UpdateEntityPosition(int32_t map_id,
+                                    entt::entity entity,
                                     int32_t new_x,
                                     int32_t new_y) = 0;
+  virtual bool RemoveEntityFromMap(int32_t map_id,
+                                   entt::entity entity) = 0;
+  virtual bool MoveEntityToMap(int32_t from_map_id,
+                               int32_t to_map_id,
+                               entt::entity entity,
+                               int32_t x,
+                               int32_t y) = 0;
 };
 
 }  // namespace mir2::game::ports

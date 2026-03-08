@@ -10,6 +10,7 @@
 #include "common/time_utils.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/effect_component.h"
+#include "ecs/components/monster_component.h"
 #include "ecs/components/npc_component.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/combat_events.h"
@@ -74,6 +75,27 @@ class WorldSyncBroadcastServiceTest : public ::testing::Test {
     attrs.mp = 0;
     attrs.max_mp = 0;
     registry_.emplace<mir2::ecs::NpcStateComponent>(entity);
+    return entity;
+  }
+
+  entt::entity AddMonsterEntity(uint32_t monster_template_id,
+                                uint32_t spawn_point_id,
+                                uint32_t map_id,
+                                int32_t x,
+                                int32_t y) {
+    const auto entity = registry_.create();
+    auto& identity = registry_.emplace<mir2::ecs::MonsterIdentityComponent>(entity);
+    identity.monster_template_id = monster_template_id;
+    identity.spawn_point_id = spawn_point_id;
+    auto& state = registry_.emplace<mir2::ecs::CharacterStateComponent>(entity);
+    state.map_id = map_id;
+    state.position = {x, y};
+    auto& attrs = registry_.emplace<mir2::ecs::CharacterAttributesComponent>(entity);
+    attrs.level = 1;
+    attrs.hp = 30;
+    attrs.max_hp = 30;
+    attrs.mp = 0;
+    attrs.max_mp = 0;
     return entity;
   }
 
@@ -323,6 +345,36 @@ TEST_F(WorldSyncBroadcastServiceTest, StateSyncUsesNpcBusinessIdForNpcEntities) 
   EXPECT_EQ(payload->entities()->Get(0)->entity_id(), 7001u);
 }
 
+TEST_F(WorldSyncBroadcastServiceTest, StateSyncIncludesMonsterEntities) {
+  WorldSyncBroadcastService service(response_sender_, event_bus_, role_store_, &scene_manager_);
+  const auto player = AddPlayerEntity(/*role_id=*/3010);
+  const auto monster =
+      AddMonsterEntity(/*monster_template_id=*/9001, /*spawn_point_id=*/10, /*map_id=*/1, 101, 100);
+  role_store_.BindClientRole(/*client_id=*/9310, /*player_id=*/3010);
+  AddEntityToMap(player, /*map_id=*/1, /*x=*/100, /*y=*/100);
+  AddEntityToMap(monster, /*map_id=*/1, /*x=*/101, /*y=*/100);
+
+  ASSERT_TRUE(service.RequestImmediateStateSyncForRole(/*role_id=*/3010));
+
+  const auto responses = response_sender_.GetCapturedResponses();
+  const auto it = std::find_if(
+      responses.begin(), responses.end(), [](const CapturedResponse& response) {
+        return response.msg_id ==
+               static_cast<uint16_t>(mir2::common::MsgId::kStateSync);
+      });
+  ASSERT_NE(it, responses.end());
+
+  flatbuffers::Verifier verifier(it->payload.data(), it->payload.size());
+  ASSERT_TRUE(verifier.VerifyBuffer<mir2::proto::StateSync>(nullptr));
+  const auto* payload = flatbuffers::GetRoot<mir2::proto::StateSync>(it->payload.data());
+  ASSERT_NE(payload, nullptr);
+  ASSERT_NE(payload->entities(), nullptr);
+  ASSERT_EQ(payload->entities()->size(), 1u);
+  EXPECT_EQ(payload->entities()->Get(0)->entity_type(), mir2::proto::EntityType::MONSTER);
+  EXPECT_EQ(payload->entities()->Get(0)->entity_id(),
+            static_cast<uint64_t>(entt::to_integral(monster)));
+}
+
 TEST_F(WorldSyncBroadcastServiceTest, AoiEnterSendsEntityEnterForNpc) {
   WorldSyncBroadcastService service(response_sender_, event_bus_, role_store_, &scene_manager_);
   const auto player = AddPlayerEntity(/*role_id=*/3002);
@@ -337,6 +389,25 @@ TEST_F(WorldSyncBroadcastServiceTest, AoiEnterSendsEntityEnterForNpc) {
   const auto responses = response_sender_.GetCapturedResponses();
   ASSERT_EQ(responses.size(), 1u);
   EXPECT_EQ(responses[0].client_id, 9302u);
+  EXPECT_EQ(responses[0].msg_id,
+            static_cast<uint16_t>(mir2::common::MsgId::kEntityEnter));
+}
+
+TEST_F(WorldSyncBroadcastServiceTest, AoiEnterSendsEntityEnterForMonster) {
+  WorldSyncBroadcastService service(response_sender_, event_bus_, role_store_, &scene_manager_);
+  const auto player = AddPlayerEntity(/*role_id=*/3011);
+  const auto monster =
+      AddMonsterEntity(/*monster_template_id=*/9002, /*spawn_point_id=*/11, /*map_id=*/1, 140, 100);
+  role_store_.BindClientRole(/*client_id=*/9311, /*player_id=*/3011);
+  AddEntityToMap(player, /*map_id=*/1, /*x=*/100, /*y=*/100);
+  AddEntityToMap(monster, /*map_id=*/1, /*x=*/140, /*y=*/100);
+  response_sender_.Clear();
+
+  service.HandleAoiEvent(player, monster, mir2::game::map::AOIEventType::kEnter, 120, 100);
+
+  const auto responses = response_sender_.GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 1u);
+  EXPECT_EQ(responses[0].client_id, 9311u);
   EXPECT_EQ(responses[0].msg_id,
             static_cast<uint16_t>(mir2::common::MsgId::kEntityEnter));
 }

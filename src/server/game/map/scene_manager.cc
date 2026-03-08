@@ -343,40 +343,48 @@ const MapInstance* SceneManager::GetMap(int32_t map_id) const {
 
 MapInstance* SceneManager::GetMapByEntity(entt::entity entity) {
   std::shared_lock<std::shared_mutex> lock(mutex_);
-  auto entity_it = entity_to_map_.find(entity);
-  if (entity_it == entity_to_map_.end()) {
-    return nullptr;
+  MapInstance* result = nullptr;
+  for (const auto& [map_id, map] : maps_) {
+    if (!map || !map->HasEntity(entity)) {
+      continue;
+    }
+    if (result != nullptr) {
+      return nullptr;
+    }
+    result = map.get();
   }
-  auto map_it = maps_.find(entity_it->second);
-  if (map_it == maps_.end()) {
-    return nullptr;
-  }
-  return map_it->second.get();
+  return result;
 }
 
 const MapInstance* SceneManager::GetMapByEntity(entt::entity entity) const {
   std::shared_lock<std::shared_mutex> lock(mutex_);
-  auto entity_it = entity_to_map_.find(entity);
-  if (entity_it == entity_to_map_.end()) {
-    return nullptr;
+  const MapInstance* result = nullptr;
+  for (const auto& [map_id, map] : maps_) {
+    (void)map_id;
+    if (!map || !map->HasEntity(entity)) {
+      continue;
+    }
+    if (result != nullptr) {
+      return nullptr;
+    }
+    result = map.get();
   }
-  auto map_it = maps_.find(entity_it->second);
-  if (map_it == maps_.end()) {
-    return nullptr;
-  }
-  return map_it->second.get();
+  return result;
 }
 
 std::optional<int32_t> SceneManager::TryGetEntityMapId(entt::entity entity) const {
   std::shared_lock<std::shared_mutex> lock(mutex_);
-  auto entity_it = entity_to_map_.find(entity);
-  if (entity_it == entity_to_map_.end()) {
-    return std::nullopt;
+  std::optional<int32_t> result;
+  for (const auto& [map_id, map] : maps_) {
+    if (!map || !map->HasEntity(entity)) {
+      continue;
+    }
+    if (result.has_value()) {
+      return std::nullopt;
+    }
+    result = map_id;
   }
-  if (maps_.find(entity_it->second) == maps_.end()) {
-    return std::nullopt;
-  }
-  return entity_it->second;
+  return result;
 }
 
 std::mutex& SceneManager::GetEntityOpsMutex(entt::entity entity) const {
@@ -392,7 +400,6 @@ bool SceneManager::AddEntityToMap(int32_t map_id,
   std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   std::shared_ptr<MapInstance> target_map;
-  std::shared_ptr<MapInstance> old_map;
   {
     std::shared_lock<std::shared_mutex> lock(mutex_);
 
@@ -401,22 +408,10 @@ bool SceneManager::AddEntityToMap(int32_t map_id,
       return false;
     }
     target_map = map_it->second;
-
-    auto entity_it = entity_to_map_.find(entity);
-    if (entity_it != entity_to_map_.end()) {
-      auto old_map_it = maps_.find(entity_it->second);
-      if (old_map_it != maps_.end()) {
-        old_map = old_map_it->second;
-      }
-    }
   }
 
   if (!target_map->AddEntity(entity, x, y)) {
     return false;
-  }
-
-  if (old_map && old_map.get() != target_map.get()) {
-    (void)old_map->RemoveEntity(entity);
   }
 
   {
@@ -433,26 +428,15 @@ bool SceneManager::AddEntityToMap(int32_t map_id,
   return true;
 }
 
-bool SceneManager::RemoveEntityFromMap(entt::entity entity) {
+bool SceneManager::RemoveEntityFromMap(int32_t map_id, entt::entity entity) {
   std::shared_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
   std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
   std::shared_ptr<MapInstance> map;
-  int32_t map_id = 0;
   {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-
-    auto entity_it = entity_to_map_.find(entity);
-    if (entity_it == entity_to_map_.end()) {
-      return false;
-    }
-    map_id = entity_it->second;
-
     auto map_it = maps_.find(map_id);
     if (map_it == maps_.end()) {
-      lock.unlock();
-      std::unique_lock<std::shared_mutex> write_lock(mutex_);
-      UnindexEntity(entity);
       return false;
     }
 
@@ -464,14 +448,20 @@ bool SceneManager::RemoveEntityFromMap(entt::entity entity) {
   }
 
   std::unique_lock<std::shared_mutex> lock(mutex_);
-  auto entity_it = entity_to_map_.find(entity);
-  if (entity_it != entity_to_map_.end() && entity_it->second == map_id) {
-    UnindexEntity(entity);
-  }
+  UnindexEntity(entity, map_id);
   return true;
 }
 
-bool SceneManager::UpdateEntityPosition(entt::entity entity,
+bool SceneManager::RemoveEntityFromMap(entt::entity entity) {
+  const auto map_id = TryGetEntityMapId(entity);
+  if (!map_id.has_value()) {
+    return false;
+  }
+  return RemoveEntityFromMap(*map_id, entity);
+}
+
+bool SceneManager::UpdateEntityPosition(int32_t map_id,
+                                        entt::entity entity,
                                         int32_t new_x,
                                         int32_t new_y) {
   std::shared_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
@@ -480,30 +470,31 @@ bool SceneManager::UpdateEntityPosition(entt::entity entity,
   std::shared_ptr<MapInstance> map;
   {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-
-    auto entity_it = entity_to_map_.find(entity);
-    if (entity_it == entity_to_map_.end()) {
-      return false;
-    }
-
-    auto map_it = maps_.find(entity_it->second);
+    auto map_it = maps_.find(map_id);
     if (map_it == maps_.end()) {
-      lock.unlock();
-      std::unique_lock<std::shared_mutex> write_lock(mutex_);
-      UnindexEntity(entity);
       return false;
     }
-
     map = map_it->second;
   }
 
   return map->UpdateEntityPosition(entity, new_x, new_y);
 }
 
-bool SceneManager::TeleportEntity(entt::entity entity,
-                                  int32_t target_map_id,
-                                  int32_t target_x,
-                                  int32_t target_y) {
+bool SceneManager::UpdateEntityPosition(entt::entity entity,
+                                        int32_t new_x,
+                                        int32_t new_y) {
+  const auto map_id = TryGetEntityMapId(entity);
+  if (!map_id.has_value()) {
+    return false;
+  }
+  return UpdateEntityPosition(*map_id, entity, new_x, new_y);
+}
+
+bool SceneManager::MoveEntityToMap(int32_t from_map_id,
+                                   int32_t target_map_id,
+                                   entt::entity entity,
+                                   int32_t target_x,
+                                   int32_t target_y) {
   std::shared_lock<std::shared_mutex> map_ops_lock(map_entity_ops_mutex_);
   std::lock_guard<std::mutex> entity_ops_lock(GetEntityOpsMutex(entity));
 
@@ -518,40 +509,30 @@ bool SceneManager::TeleportEntity(entt::entity entity,
     }
     target_map = target_it->second;
 
-    auto entity_it = entity_to_map_.find(entity);
-    if (entity_it != entity_to_map_.end()) {
-      auto current_it = maps_.find(entity_it->second);
-      if (current_it != maps_.end()) {
-        current_map = current_it->second;
-      }
+    auto current_it = maps_.find(from_map_id);
+    if (current_it != maps_.end()) {
+      current_map = current_it->second;
     }
   }
 
-  if (current_map && current_map.get() == target_map.get()) {
-    return target_map->UpdateEntityPosition(entity, target_x, target_y);
+  if (from_map_id == target_map_id) {
+    return UpdateEntityPosition(target_map_id, entity, target_x, target_y);
   }
 
-  if (!target_map->IsValidPosition(target_x, target_y)) {
+  if (!current_map || !target_map || !target_map->IsValidPosition(target_x, target_y)) {
     return false;
   }
 
   int32_t source_x = 0;
   int32_t source_y = 0;
-  const bool has_source = current_map && current_map.get() != target_map.get();
-
-  if (has_source) {
-    if (!current_map->GetEntityPosition(entity, source_x, source_y)) {
-      return false;
-    }
-    if (!current_map->RemoveEntity(entity)) {
-      return false;
-    }
+  if (!current_map->GetEntityPosition(entity, source_x, source_y)) {
+    return false;
+  }
+  if (!current_map->RemoveEntity(entity)) {
+    return false;
   }
 
   auto rollback_to_source = [&]() -> bool {
-    if (!has_source) {
-      return true;
-    }
     if (current_map->AddEntity(entity, source_x, source_y)) {
       return true;
     }
@@ -565,7 +546,7 @@ bool SceneManager::TeleportEntity(entt::entity entity,
                  target_x,
                  target_y);
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    UnindexEntity(entity);
+    UnindexEntity(entity, from_map_id);
     return false;
   };
 
@@ -581,10 +562,22 @@ bool SceneManager::TeleportEntity(entt::entity entity,
       (void)target_map->RemoveEntity(entity);
       return rollback_to_source();
     }
+    UnindexEntity(entity, from_map_id);
     IndexEntity(entity, target_map_id);
   }
 
   return true;
+}
+
+bool SceneManager::TeleportEntity(entt::entity entity,
+                                  int32_t target_map_id,
+                                  int32_t target_x,
+                                  int32_t target_y) {
+  const auto from_map_id = TryGetEntityMapId(entity);
+  if (!from_map_id.has_value()) {
+    return false;
+  }
+  return MoveEntityToMap(*from_map_id, target_map_id, entity, target_x, target_y);
 }
 
 bool SceneManager::DestroyMap(int32_t map_id) {
@@ -769,11 +762,24 @@ size_t SceneManager::DispatchPendingAOIEvents(size_t max_events_per_map) {
 }
 
 void SceneManager::IndexEntity(entt::entity entity, int32_t map_id) {
-  entity_to_map_[entity] = map_id;
+  const auto [first, last] = entity_to_map_.equal_range(entity);
+  for (auto it = first; it != last; ++it) {
+    if (it->second == map_id) {
+      return;
+    }
+  }
+  entity_to_map_.emplace(entity, map_id);
 }
 
-void SceneManager::UnindexEntity(entt::entity entity) {
-  entity_to_map_.erase(entity);
+void SceneManager::UnindexEntity(entt::entity entity, int32_t map_id) {
+  const auto [first, last] = entity_to_map_.equal_range(entity);
+  for (auto it = first; it != last; ) {
+    if (it->second == map_id) {
+      it = entity_to_map_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 }  // namespace mir2::game::map

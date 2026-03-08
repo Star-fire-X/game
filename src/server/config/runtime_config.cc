@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <unordered_set>
@@ -56,6 +57,30 @@ std::string Sha256Hex(const std::string& content) {
     result.push_back(kHex[byte & 0x0F]);
   }
   return result;
+}
+
+std::optional<int32_t> TryParseNumericMapId(std::string_view value) {
+  if (value.empty()) {
+    return std::nullopt;
+  }
+
+  constexpr int32_t kMaxDigits = 10;
+  if (value.size() > static_cast<size_t>(kMaxDigits)) {
+    return std::nullopt;
+  }
+
+  int32_t parsed = 0;
+  for (char ch : value) {
+    if (ch < '0' || ch > '9') {
+      return std::nullopt;
+    }
+    const int32_t digit = ch - '0';
+    if (parsed > (std::numeric_limits<int32_t>::max() - digit) / 10) {
+      return std::nullopt;
+    }
+    parsed = parsed * 10 + digit;
+  }
+  return parsed;
 }
 
 constexpr std::array<std::string_view, 8> kRequiredArtifactNames = {
@@ -953,6 +978,7 @@ bool LoadGates(const std::string& content,
   gates_out->clear();
   std::unordered_map<uint32_t, std::string> gate_ids;
   std::unordered_map<std::string, uint32_t> source_coords;
+  std::unordered_map<std::string, uint32_t> normalized_source_coords;
   for (const auto& gate_json : root["gates"]) {
     if (!gate_json.is_object()) {
       SetError(error_out, "gates entry must be an object");
@@ -1007,6 +1033,16 @@ bool LoadGates(const std::string& content,
     if (!source_coords.emplace(coord_key, gate.gate_id).second) {
       SetError(error_out, "duplicate gate source coordinate " + coord_key);
       return false;
+    }
+    if (const auto numeric_map_id = TryParseNumericMapId(gate.source_map);
+        numeric_map_id.has_value()) {
+      const std::string normalized_key = std::to_string(*numeric_map_id) + ":" +
+                                         std::to_string(gate.source_x) + ":" +
+                                         std::to_string(gate.source_y);
+      if (!normalized_source_coords.emplace(normalized_key, gate.gate_id).second) {
+        SetError(error_out, "duplicate gate source coordinate " + normalized_key);
+        return false;
+      }
     }
     gates_out->push_back(std::move(gate));
   }

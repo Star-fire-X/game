@@ -201,7 +201,7 @@ TEST_F(SceneManagerTest, EntityCrossMapMovement) {
   EXPECT_EQ(scene_manager_->GetMapByEntity(entity)->GetMapId(), 1);
 
   // 移动到地图2（自动从地图1移除）
-  scene_manager_->AddEntityToMap(2, entity, 50, 60);
+  scene_manager_->MoveEntityToMap(1, 2, entity, 50, 60);
   EXPECT_EQ(scene_manager_->GetMapByEntity(entity)->GetMapId(), 2);
 
   auto* map1 = scene_manager_->GetMap(1);

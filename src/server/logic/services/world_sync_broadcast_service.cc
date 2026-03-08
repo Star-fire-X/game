@@ -607,28 +607,47 @@ void WorldSyncBroadcastService::HandleAoiEvent(
   }
 
   const auto entity_type = ResolveEntityType(registry, target);
-  if (entity_type != mir2::proto::EntityType::NPC) {
+  if (entity_type != mir2::proto::EntityType::NPC &&
+      entity_type != mir2::proto::EntityType::MONSTER) {
     return;
   }
 
-  const auto* npc_identity =
-      registry.try_get<mir2::ecs::NpcIdentityComponent>(target);
   const auto* state =
       registry.try_get<mir2::ecs::CharacterStateComponent>(target);
-  if (!npc_identity || !state || npc_identity->npc_id == 0) {
+  if (!state) {
     return;
+  }
+
+  uint64_t network_entity_id = 0;
+  uint32_t template_id = 0;
+  if (entity_type == mir2::proto::EntityType::NPC) {
+    const auto* npc_identity =
+        registry.try_get<mir2::ecs::NpcIdentityComponent>(target);
+    if (!npc_identity || npc_identity->npc_id == 0) {
+      return;
+    }
+    network_entity_id = npc_identity->npc_id;
+    template_id = npc_identity->template_id;
+  } else {
+    const auto* monster_identity =
+        registry.try_get<mir2::ecs::MonsterIdentityComponent>(target);
+    if (!monster_identity || monster_identity->monster_template_id == 0) {
+      return;
+    }
+    network_entity_id = static_cast<uint64_t>(entt::to_integral(target));
+    template_id = monster_identity->monster_template_id;
   }
 
   if (event_type == mir2::game::map::AOIEventType::kEnter) {
     const auto* attrs =
         registry.try_get<mir2::ecs::CharacterAttributesComponent>(target);
     const auto payload = BuildEntityEnterPayload(
-        npc_identity->npc_id,
+        network_entity_id,
         entity_type,
         x,
         y,
         static_cast<uint8_t>(state->direction),
-        npc_identity->template_id,
+        template_id,
         "",
         attrs ? attrs->hp : 0,
         attrs ? attrs->max_hp : 0,
@@ -641,7 +660,7 @@ void WorldSyncBroadcastService::HandleAoiEvent(
   }
 
   if (event_type == mir2::game::map::AOIEventType::kLeave) {
-    const auto payload = BuildEntityLeavePayload(npc_identity->npc_id, entity_type);
+    const auto payload = BuildEntityLeavePayload(network_entity_id, entity_type);
     response_sender_.Send(
         *client_id_opt,
         static_cast<uint16_t>(mir2::common::MsgId::kEntityLeave),
@@ -688,14 +707,15 @@ void WorldSyncBroadcastService::ProcessPendingRespawns(int64_t now_ms) {
     if (scene_manager_) {
       bool moved = false;
       if (map_changed) {
-        moved = scene_manager_->AddEntityToMap(
+        moved = scene_manager_->MoveEntityToMap(
+            static_cast<int32_t>(old_map_id),
             static_cast<int32_t>(target_map_id),
             entity,
             respawn_pos.x,
             respawn_pos.y);
       } else {
         moved = scene_manager_->UpdateEntityPosition(
-            entity, respawn_pos.x, respawn_pos.y);
+            static_cast<int32_t>(target_map_id), entity, respawn_pos.x, respawn_pos.y);
       }
       if (!moved) {
         SYSLOG_WARN(

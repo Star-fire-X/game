@@ -654,9 +654,8 @@ bool LogicServer::BootstrapNpcRuntime(uint32_t default_map_id) {
     }
   });
   for (const auto& [map_id, entity] : existing_npcs) {
-    (void)map_id;
     if (scene_manager_) {
-      (void)scene_manager_->RemoveEntityFromMap(entity);
+      (void)scene_manager_->RemoveEntityFromMap(static_cast<int32_t>(map_id), entity);
     }
   }
   registry_manager_->ForEachWorld([](uint32_t /*map_id*/, ecs::World& world) {
@@ -3824,6 +3823,10 @@ WorldSystemBundle& LogicServer::EnsureWorldSystems(uint32_t map_id,
   if (!bundle->monster_spawn_system) {
     bundle->monster_spawn_system =
         std::make_unique<ecs::MonsterSpawnSystem>(world.Registry(), world.GetEventBus());
+    if (world_map_port_) {
+      bundle->monster_spawn_system->BindWorldMapPort(world_map_port_.get(),
+                                                     static_cast<int32_t>(map_id));
+    }
     std::shared_ptr<const config::ConfigData> snapshot;
     if (runtime_config_store_) {
       snapshot = runtime_config_store_->GetSnapshot();
@@ -3831,8 +3834,13 @@ WorldSystemBundle& LogicServer::EnsureWorldSystems(uint32_t map_id,
     if (!snapshot) {
       SYSLOG_ERROR("LogicServer world system init failed: runtime snapshot missing");
     } else {
-      bundle->monster_spawn_system->ReplaceAllSpawnPoints(
-          snapshot->monster_spawn_points);
+      std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> map_spawn_points;
+      for (const auto& [spawn_id, spawn] : snapshot->monster_spawn_points) {
+        if (spawn.map_id == map_id) {
+          map_spawn_points.emplace(spawn_id, spawn);
+        }
+      }
+      bundle->monster_spawn_system->ReplaceAllSpawnPoints(std::move(map_spawn_points));
     }
   }
 

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <entt/entt.hpp>
 
+#include "ecs/components/character_components.h"
 #include "ecs/components/monster_component.h"
 #include "ecs/components/transform_component.h"
 #include "game/ports/i_world_map_port.h"
@@ -152,6 +153,37 @@ TEST_F(MonsterSpawnSystemTest, SpawnSystem_SpawnAtPoint) {
     const auto& aggro = view.get<MonsterAggroComponent>(spawned);
     EXPECT_EQ(aggro.aggro_range, spawn.aggro_range);
     EXPECT_EQ(aggro.attack_range, spawn.attack_range);
+}
+
+TEST_F(MonsterSpawnSystemTest, SpawnSystem_SpawnAtPointCreatesFullMonsterEntity) {
+    MonsterSpawnSystem system;
+    game::entity::MonsterSpawnPoint spawn;
+    spawn.spawn_id = 15;
+    spawn.map_id = 4;
+    spawn.center_x = 30;
+    spawn.center_y = 40;
+    spawn.spawn_radius = 0;
+    spawn.monster_template_id = 7001;
+    spawn.aggro_range = 9;
+    spawn.attack_range = 2;
+    spawn.max_count = 1;
+
+    system.SpawnMonsterAtPoint(registry_, spawn);
+
+    auto view = registry_.view<MonsterIdentityComponent,
+                               CharacterStateComponent,
+                               CharacterAttributesComponent>();
+    ASSERT_EQ(view.size_hint(), 1u);
+
+    const entt::entity spawned = *view.begin();
+    const auto& state = view.get<CharacterStateComponent>(spawned);
+    EXPECT_EQ(state.map_id, spawn.map_id);
+    EXPECT_EQ(state.position.x, spawn.center_x);
+    EXPECT_EQ(state.position.y, spawn.center_y);
+
+    const auto& attrs = view.get<CharacterAttributesComponent>(spawned);
+    EXPECT_GT(attrs.hp, 0);
+    EXPECT_EQ(attrs.hp, attrs.max_hp);
 }
 
 TEST_F(MonsterSpawnSystemTest, SpawnSystem_RespawnTimer) {

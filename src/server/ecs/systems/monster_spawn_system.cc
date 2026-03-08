@@ -10,10 +10,31 @@
 #include "ecs/event_bus.h"
 #include "ecs/events/combat_events.h"
 #include "ecs/events/monster_events.h"
+#include "game/entity/monster.h"
 
 #include <random>
 
 namespace mir2::ecs {
+
+namespace {
+
+CharacterAttributesComponent BuildDefaultMonsterAttributes() {
+    CharacterAttributesComponent attrs;
+    const game::entity::MonsterStats stats;
+    attrs.level = 1;
+    attrs.hp = stats.hp;
+    attrs.max_hp = stats.max_hp;
+    attrs.mp = 0;
+    attrs.max_mp = 0;
+    attrs.attack = stats.attack;
+    attrs.defense = stats.defense;
+    attrs.magic_attack = stats.magic_attack;
+    attrs.magic_defense = stats.magic_defense;
+    attrs.speed = static_cast<int>(stats.move_speed);
+    return attrs;
+}
+
+}  // namespace
 
 MonsterSpawnSystem::MonsterSpawnSystem() = default;
 
@@ -101,6 +122,10 @@ void MonsterSpawnSystem::SpawnMonsterAtPoint(entt::registry& registry,
     auto& state = registry.get_or_emplace<CharacterStateComponent>(entity);
     state.map_id = spawn.map_id;
     state.position = {x, y};
+    state.direction = mir2::common::Direction::DOWN;
+
+    auto& attrs = registry.get_or_emplace<CharacterAttributesComponent>(entity);
+    attrs = BuildDefaultMonsterAttributes();
     
     // 添加AI组件
     auto& ai = registry.emplace<MonsterAIComponent>(entity);

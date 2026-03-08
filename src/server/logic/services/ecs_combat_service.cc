@@ -8,6 +8,7 @@
 #include "config/config_manager.h"
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/monster_component.h"
 #include "ecs/registry_manager.h"
 #include "ecs/systems/combat_system.h"
 #include "ecs/world.h"
@@ -26,6 +27,52 @@ mir2::ecs::EventBus* ResolveEventBus(mir2::ecs::RegistryManager& registry_manage
   }
   auto* world = registry_manager.GetWorld(*map_id);
   return world ? &world->GetEventBus() : nullptr;
+}
+
+std::optional<entt::entity> ResolveCombatTarget(
+    mir2::ecs::CharacterEntityManager& character_manager,
+    uint64_t target_id,
+    mir2::proto::EntityType target_type,
+    entt::registry* attacker_registry) {
+  if (target_type == mir2::proto::EntityType::MONSTER) {
+    if (attacker_registry == nullptr) {
+      return std::nullopt;
+    }
+
+    const entt::entity target = static_cast<entt::entity>(target_id);
+    if (!attacker_registry->valid(target) ||
+        !attacker_registry->all_of<mir2::ecs::MonsterIdentityComponent>(target)) {
+      return std::nullopt;
+    }
+    return target;
+  }
+
+  auto target_opt = character_manager.TryGet(static_cast<uint32_t>(target_id));
+  if (!target_opt.has_value()) {
+    return std::nullopt;
+  }
+  return *target_opt;
+}
+
+std::optional<entt::entity> ResolvePlayerTarget(
+    mir2::ecs::CharacterEntityManager& character_manager,
+    uint64_t target_id) {
+  auto target_opt = character_manager.TryGet(static_cast<uint32_t>(target_id));
+  if (!target_opt.has_value()) {
+    return std::nullopt;
+  }
+  return *target_opt;
+}
+
+entt::registry* ResolveTargetRegistry(
+    mir2::ecs::CharacterEntityManager& character_manager,
+    uint64_t target_id,
+    mir2::proto::EntityType target_type,
+    entt::registry* attacker_registry) {
+  if (target_type == mir2::proto::EntityType::MONSTER) {
+    return attacker_registry;
+  }
+  return character_manager.TryGetRegistry(static_cast<uint32_t>(target_id));
 }
 
 }  // namespace
@@ -65,7 +112,15 @@ CombatResult EcsCombatService::Attack(uint64_t attacker_id,
   }
   entt::entity attacker = *attacker_opt;
 
-  auto target_opt = character_manager.TryGet(static_cast<uint32_t>(target_id));
+  entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(attacker_id));
+  if (!registry) {
+    SYSLOG_WARN("EcsCombatService::Attack attacker registry missing (attacker={})",
+                attacker_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  auto target_opt = ResolveCombatTarget(character_manager, target_id, target_type, registry);
   if (!target_opt.has_value()) {
     SYSLOG_WARN("EcsCombatService::Attack target not found (attacker={}, target={})",
                 attacker_id, target_id);
@@ -74,8 +129,8 @@ CombatResult EcsCombatService::Attack(uint64_t attacker_id,
   }
   entt::entity target = *target_opt;
 
-  entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(attacker_id));
-  entt::registry* target_registry = character_manager.TryGetRegistry(static_cast<uint32_t>(target_id));
+  entt::registry* target_registry =
+      ResolveTargetRegistry(character_manager, target_id, target_type, registry);
   if (!registry || !target_registry || registry != target_registry) {
     SYSLOG_WARN("EcsCombatService::Attack registry mismatch (attacker={}, target={})",
                 attacker_id, target_id);
@@ -148,7 +203,19 @@ CombatResult EcsCombatService::UseSkill(uint64_t caster_id,
   }
   entt::entity caster = *caster_opt;
 
-  auto target_opt = character_manager.TryGet(static_cast<uint32_t>(target_id));
+  entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(caster_id));
+  if (!registry) {
+    SYSLOG_WARN("EcsCombatService::UseSkill caster registry missing (caster={})",
+                caster_id);
+    result.code = mir2::common::ErrorCode::kInvalidAction;
+    return result;
+  }
+
+  auto target_opt = ResolvePlayerTarget(character_manager, target_id);
+  if (!target_opt.has_value()) {
+    target_opt = ResolveCombatTarget(
+        character_manager, target_id, mir2::proto::EntityType::MONSTER, registry);
+  }
   if (!target_opt.has_value()) {
     SYSLOG_WARN("EcsCombatService::UseSkill target not found (caster={}, target={})",
                 caster_id, target_id);
@@ -157,8 +224,14 @@ CombatResult EcsCombatService::UseSkill(uint64_t caster_id,
   }
   entt::entity target = *target_opt;
 
-  entt::registry* registry = character_manager.TryGetRegistry(static_cast<uint32_t>(caster_id));
-  entt::registry* target_registry = character_manager.TryGetRegistry(static_cast<uint32_t>(target_id));
+  entt::registry* target_registry = nullptr;
+  if (registry->valid(target) &&
+      registry->all_of<mir2::ecs::MonsterIdentityComponent>(target)) {
+    target_registry = registry;
+  } else {
+    target_registry = ResolveTargetRegistry(
+        character_manager, target_id, mir2::proto::EntityType::PLAYER, registry);
+  }
   if (!registry || !target_registry || registry != target_registry) {
     SYSLOG_WARN("EcsCombatService::UseSkill registry mismatch (caster={}, target={})",
                 caster_id, target_id);

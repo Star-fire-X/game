@@ -1,14 +1,16 @@
-#ifndef LEGEND2_SERVER_ECS_EFFECT_SYSTEM_H
-#define LEGEND2_SERVER_ECS_EFFECT_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_EFFECT_SYSTEM_H_
+#define MIR2_SERVER_ECS_EFFECT_SYSTEM_H_
 
 #include "ecs/components/effect_component.h"
 #include <entt/entt.hpp>
 
 namespace mir2::ecs {
 
+class EventBus;
+
 class EffectSystem {
 public:
-    explicit EffectSystem(entt::registry& registry);
+    explicit EffectSystem(entt::registry& registry, EventBus* event_bus = nullptr);
 
     // Apply effect to target
     void apply_effect(entt::entity target, const ActiveEffect& effect);
@@ -38,6 +40,7 @@ public:
 
 private:
     entt::registry& registry_;
+    EventBus* event_bus_ = nullptr;
     int64_t current_time_ms_ = 0;
 
     void process_dot_effects(int64_t now_ms);
@@ -45,6 +48,11 @@ private:
     void process_frenzy_effects();
     void process_expired_effects(int64_t now_ms);
     void apply_stat_modifiers(entt::entity entity);
+    void publish_buff_added(entt::entity target, const ActiveEffect& effect);
+    void publish_buff_removed(entt::entity target,
+                              EffectCategory category,
+                              uint32_t skill_id,
+                              bool expired);
 };
 
 } // namespace mir2::ecs

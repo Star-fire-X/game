@@ -1,0 +1,211 @@
+聊天系统开发计划
+
+ 概述
+
+ 基于 docs/聊天系统_用户故事文档.md 的需求，实现完整的聊天系统功能。
+
+ 需求范围: 6个Epic、20个用户故事
+ 现有实现: chat_handler.cc 仅支持 PRIVATE/GUILD/WORLD 三种频道，功能不完整
+
+ ---
+ Sprint 1: P0 核心功能
+
+ 任务 1.1: 扩展协议定义
+
+ 文件: schemas/chat.fbs
+ - ChatChannel 枚举增加 TEAM=4, AREA=5
+ - ChatMessage 增加 color: uint 字段
+
+ 文件: schemas/common.fbs
+ - MsgId 增加 kTeamChat=5030, kAreaChat=5040, kSystemMsg=5050
+
+ 任务 1.2: 重构 ChatHandler
+
+ 文件: src/server/handlers/chat/chat_handler.h, chat_handler.cc
+ - 提取频道路由逻辑到独立方法
+ - 增加 HandleWorldChat(), HandleTeamChat(), HandleAreaChat()
+ - 注入 PlayerManager& 和 AOIManager& 依赖
+
+ 任务 1.3: 普通聊天 (US-CHAT-001)
+
+ - 使用 AOIManager::GetEntitiesInViewOf() 获取周围玩家
+ - 消息格式: 玩家名: 消息内容
+ - 颜色: (0, 255) 黑色
+
+ 任务 1.4: 私聊基础 (US-CHAT-003)
+
+ - 通过 PlayerManager::GetPlayer(name) 查找目标
+ - 目标不在线返回 kTargetNotFound
+ - 消息格式: 发送者=> 消息内容
+ - 颜色: (252, 255) 紫色
+
+ 任务 1.5: 组队聊天 (US-CHAT-010)
+
+ - 查询发送者的 PartyMemberComponent
+ - 获取 PartyComponent::members 列表
+ - 遍历发送，跳过离线成员
+ - 颜色: (196, 255) 绿色
+
+ 任务 1.6: 区域喊话 (US-CHAT-008)
+
+ - 使用 PlayerManager::GetPlayersOnMap(map_id) 获取同地图玩家
+ - 消息格式: (!)玩家名: 消息内容
+ - 颜色: (0, 151) 黄色
+
+ 任务 1.7: 系统消息 (US-CHAT-014)
+
+ - 新增 ChatService::SendSystemMessage(player_id, content, mode)
+ - mode=0 普通黄色, mode=2 蓝色
+
+ ---
+ Sprint 2: P0 行会 + P1 功能
+
+ 任务 2.1: 行会组件
+
+ 新文件: src/server/ecs/components/guild_component.h
+
+ struct GuildComponent {
+     uint32_t guild_id;
+     std::string guild_name;
+     entt::entity leader;
+     std::vector<entt::entity> members;
+ };
+ struct GuildMemberComponent {
+     uint32_t guild_id;
+     uint8_t rank; // 0=会长, 1=副会长, 2=成员
+ };
+
+ 任务 2.2: 行会聊天 (US-CHAT-012)
+
+ - 查询发送者 GuildMemberComponent
+ - 获取行会成员列表
+ - 检查 BoHearGuildMsg 开关
+ - 颜色: (212, 255) 紫色
+
+ 任务 2.3: 私聊不在线提示 (US-CHAT-004)
+
+ - 返回错误码 kTargetNotFound
+ - 客户端显示 玩家名 不在线
+
+ 任务 2.4: 私聊开关 (US-CHAT-006)
+
+ - Player 增加 bool hear_whisper_ = true
+ - 检查目标 hear_whisper_ 状态
+ - 返回 kTargetRefused 错误码
+
+ 任务 2.5: 组队条件检查 (US-CHAT-011)
+
+ - 检查发送者是否有 PartyMemberComponent
+ - 无队伍返回 kNoParty 错误码
+
+ 任务 2.6: 全服广播 (US-CHAT-015)
+
+ - ChatService::BroadcastSystemMessage(content)
+ - 使用 PlayerManager::ForEach() 遍历
+ - 跳过死亡玩家
+
+ 任务 2.7: GM喊话 (US-CHAT-016)
+
+ - 检查发送者 GM 权限
+ - 调用 BroadcastSystemMessage()
+
+ ---
+ Sprint 3: P2 高级功能
+
+ 任务 3.1: 屏蔽列表 (US-CHAT-007)
+
+ - Player 增加 std::unordered_set<uint64_t> whisper_block_list_
+ - 最大 10 人限制
+ - 命令: @block 玩家名
+
+ 任务 3.2: 喊话开关 (US-CHAT-009)
+
+ - Player 增加 bool hear_cry_ = true
+ - 区域喊话时检查接收者开关
+
+ 任务 3.3: 行会消息开关 (US-CHAT-013)
+
+ - Player 增加 bool hear_guild_msg_ = true
+ - 行会聊天时检查接收者开关
+
+ 任务 3.4: 延迟消息 (US-CHAT-019)
+
+ - 新增 DelayedMessageQueue 类
+ - 支持定时发送和取消
+
+ ---
+ Sprint 4: 跨服通信 (可选)
+
+ 任务 4.1: 跨服协议
+
+ 新文件: schemas/inter_server.fbs
+ - 定义 ISM_WHISPER 消息结构
+
+ 任务 4.2: 跨服私聊 (US-CHAT-005)
+
+ - 本服找不到时查询其他服务器
+ - 通过 InterServerMessage 转发
+
+ ---
+ 文件修改清单
+ ┌──────┬─────────────────────────────────────────────┐
+ │ 操作 │                  文件路径                   │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 修改 │ schemas/chat.fbs                            │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 修改 │ schemas/common.fbs                          │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 修改 │ src/server/handlers/chat/chat_handler.h     │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 修改 │ src/server/handlers/chat/chat_handler.cc    │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 新增 │ src/server/game/chat/chat_service.h         │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 新增 │ src/server/game/chat/chat_service.cc        │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 新增 │ src/server/ecs/components/guild_component.h │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 修改 │ src/server/game/entity/player.h             │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 修改 │ src/common/enums.h                          │
+ ├──────┼─────────────────────────────────────────────┤
+ │ 新增 │ tests/server/chat_handler_test.cc           │
+ └──────┴─────────────────────────────────────────────┘
+ ---
+ 依赖关系
+
+ 任务 1.1 协议扩展
+     └──> 任务 1.2 Handler重构
+             ├──> 任务 1.3 普通聊天
+             ├──> 任务 1.4 私聊 ──> 任务 2.3/2.4/3.1
+             ├──> 任务 1.5 组队 ──> 任务 2.5
+             ├──> 任务 1.6 喊话 ──> 任务 3.2
+             └──> 任务 1.7 系统消息 ──> 任务 2.6/2.7
+
+ 任务 2.1 行会组件 ──> 任务 2.2 行会聊天 ──> 任务 3.3
+
+ ---
+ 风险点
+ ┌──────────────────┬────────────────────────────────┐
+ │       风险       │            缓解措施            │
+ ├──────────────────┼────────────────────────────────┤
+ │ 行会系统尚未实现 │ 先实现 GuildComponent 基础结构 │
+ ├──────────────────┼────────────────────────────────┤
+ │ AOI 性能瓶颈     │ 九宫格算法已优化，监控耗时     │
+ ├──────────────────┼────────────────────────────────┤
+ │ 跨服架构缺失     │ 先实现单服功能，跨服独立迭代   │
+ └──────────────────┴────────────────────────────────┘
+ ---
+ 验证方式
+
+ 1. 单元测试: tests/server/chat_handler_test.cc
+   - 各频道消息路由正确性
+   - 错误码返回正确性
+   - 边界条件处理
+ 2. 集成测试: 启动 game_server
+   - 客户端发送各类聊天消息
+   - 验证消息广播范围正确
+   - 验证开关/屏蔽功能生效
+ 3. 构建验证:
+ cmake --build build --target mir2_game
+ ctest --test-dir build -R chat

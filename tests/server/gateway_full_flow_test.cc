@@ -10,7 +10,7 @@
 #include "network/packet_codec.h"
 #include "network/tcp_connection.h"
 #include "network/tcp_session.h"
-#include "tests/mocks/mock_socket.h"
+#include "mocks/mock_socket.h"
 
 #define private public
 #include "gateway/gateway_server.h"
@@ -76,16 +76,13 @@ void RegisterSession(network::NetworkManager* manager,
 
 }  // namespace
 
-// End-to-end forwarding: client -> service -> client response.
-TEST(GatewayFullFlowTest, ClientConnect_Login_RouteToDb_ReceiveResponse) {
+TEST(GatewayFullFlowTest, ClientConnect_Login_RouteToLogic_ReceiveResponse) {
   asio::io_context io_context;
   GatewayServer server;
   server.network_ = std::make_unique<network::NetworkManager>(io_context);
 
-  auto db_client = CreateMockClient(io_context);
-  server.db_client_ = std::move(db_client.client);
-  server.message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kLoginReq),
-                                       common::ServiceType::kDb, false);
+  auto logic_client = CreateMockClient(io_context);
+  server.logic_client_ = std::move(logic_client.client);
   server.RegisterHandlers();
 
   auto session_bundle = CreateSession(io_context, 1001);
@@ -97,7 +94,7 @@ TEST(GatewayFullFlowTest, ClientConnect_Login_RouteToDb_ReceiveResponse) {
                                         login_payload);
   DrainIoContext(io_context);
 
-  const auto& service_writes = db_client.socket->GetWrites();
+  const auto& service_writes = logic_client.socket->GetWrites();
   ASSERT_EQ(service_writes.size(), 1u);
   network::Packet routed_packet{};
   ASSERT_TRUE(DecodeSinglePacket(service_writes.front(), &routed_packet));
@@ -115,7 +112,7 @@ TEST(GatewayFullFlowTest, ClientConnect_Login_RouteToDb_ReceiveResponse) {
   network::Packet service_packet{
       static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), response_payload};
 
-  server.OnServicePacket(common::ServiceType::kDb, service_packet);
+  server.OnLogicPacket(service_packet);
   DrainIoContext(io_context);
 
   const auto& client_writes = session_bundle.socket->GetWrites();
@@ -126,15 +123,13 @@ TEST(GatewayFullFlowTest, ClientConnect_Login_RouteToDb_ReceiveResponse) {
   EXPECT_EQ(client_packet.payload, login_rsp_payload);
 }
 
-TEST(GatewayFullFlowTest, AuthenticatedClient_MoveRequest_ForwardsToGame) {
+TEST(GatewayFullFlowTest, AuthenticatedClient_MoveRequest_ForwardsToLogic) {
   asio::io_context io_context;
   GatewayServer server;
   server.network_ = std::make_unique<network::NetworkManager>(io_context);
 
-  auto game_client = CreateMockClient(io_context);
-  server.game_client_ = std::move(game_client.client);
-  server.message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kMoveReq),
-                                       common::ServiceType::kGame, true);
+  auto logic_client = CreateMockClient(io_context);
+  server.logic_client_ = std::move(logic_client.client);
   server.RegisterHandlers();
 
   auto session = CreateSession(io_context, 2001).session;
@@ -145,7 +140,7 @@ TEST(GatewayFullFlowTest, AuthenticatedClient_MoveRequest_ForwardsToGame) {
                                         std::vector<uint8_t>{4, 5});
   DrainIoContext(io_context);
 
-  EXPECT_EQ(game_client.socket->GetWrites().size(), 1u);
+  EXPECT_EQ(logic_client.socket->GetWrites().size(), 1u);
 }
 
 TEST(GatewayFullFlowTest, UnauthenticatedClient_MoveRequest_Rejected) {
@@ -153,10 +148,8 @@ TEST(GatewayFullFlowTest, UnauthenticatedClient_MoveRequest_Rejected) {
   GatewayServer server;
   server.network_ = std::make_unique<network::NetworkManager>(io_context);
 
-  auto game_client = CreateMockClient(io_context);
-  server.game_client_ = std::move(game_client.client);
-  server.message_router_.RegisterRoute(static_cast<uint16_t>(common::MsgId::kMoveReq),
-                                       common::ServiceType::kGame, true);
+  auto logic_client = CreateMockClient(io_context);
+  server.logic_client_ = std::move(logic_client.client);
   server.RegisterHandlers();
 
   auto session = CreateSession(io_context, 2002).session;
@@ -167,17 +160,16 @@ TEST(GatewayFullFlowTest, UnauthenticatedClient_MoveRequest_Rejected) {
                                         std::vector<uint8_t>{4, 5});
   DrainIoContext(io_context);
 
-  EXPECT_TRUE(game_client.socket->GetWrites().empty());
+  EXPECT_TRUE(logic_client.socket->GetWrites().empty());
 }
 
-// Verify routed responses target the correct client session.
 TEST(GatewayFullFlowTest, MultipleClients_IndependentRouting) {
   asio::io_context io_context;
   GatewayServer server;
   server.network_ = std::make_unique<network::NetworkManager>(io_context);
 
-  auto world_client = CreateMockClient(io_context);
-  server.world_client_ = std::move(world_client.client);
+  auto logic_client = CreateMockClient(io_context);
+  server.logic_client_ = std::move(logic_client.client);
 
   auto session_a = CreateSession(io_context, 3001);
   auto session_b = CreateSession(io_context, 3002);
@@ -193,14 +185,10 @@ TEST(GatewayFullFlowTest, MultipleClients_IndependentRouting) {
       common::BuildRoutedMessage(3002u, static_cast<uint16_t>(common::MsgId::kChatRsp),
                                  payload_b);
 
-  server.OnServicePacket(common::ServiceType::kWorld,
-                         network::Packet{
-                             static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage),
-                             response_a});
-  server.OnServicePacket(common::ServiceType::kWorld,
-                         network::Packet{
-                             static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage),
-                             response_b});
+  server.OnLogicPacket(network::Packet{
+      static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), response_a});
+  server.OnLogicPacket(network::Packet{
+      static_cast<uint16_t>(common::InternalMsgId::kRoutedMessage), response_b});
   DrainIoContext(io_context);
 
   ASSERT_EQ(session_a.socket->GetWrites().size(), 1u);

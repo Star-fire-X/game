@@ -27,8 +27,10 @@
 #include "render/renderer.h"
 #include "ui/ui_renderer.h"
 #include "ui/ui_layout_loader.h"
+#include "ui/ui_layout_constants.h"
 #include "ui/input_validation.h"
 #include "ui/states/login_screen_state.h"
+#include "ui/states/login_state_context.h"
 #include "core/event_dispatcher.h"
 #include "scene/scene_manager.h"
 #include "common/types.h"
@@ -59,7 +61,6 @@ using mir2::client::ResourceManager;           // 来自 client/resource/resourc
 using mir2::scene::SceneStateMachine;     // 来自 scene/scene_manager.h
 
 class ILoginState;
-struct LoginStateContext;
 
 // =============================================================================
 // 文本输入框组�?(Text Input Field)
@@ -155,15 +156,8 @@ struct CharacterSlot {
 ///          - 角色选择界面（显示已有�?色）
 ///          - 角色创建界面（创建新角色�?
 ///          - 连接�?��错�?提示界面
-class LoginScreen : public IEventListener {
+class LoginScreen : public IEventListener, public ILoginStateContext {
 public:
-    /// 动画帧数�?��包含纹理和偏移量�?
-    struct AnimationFrame {
-        std::shared_ptr<Texture> texture;
-        int offset_x = 0;
-        int offset_y = 0;
-    };
-
     /// @brief 鏋勯€犲嚱鏁?
     /// @param renderer SDL渲染器引�?��用于基�?渲染
     /// @param ui_renderer UI渲染器引�?��用于UI元素渲染
@@ -171,7 +165,7 @@ public:
     LoginScreen(SDLRenderer& renderer, UIRenderer& ui_renderer, ResourceManager& resource_manager);
     
     /// @brief 析构函数（使用默认实现）
-    ~LoginScreen() = default;
+    ~LoginScreen();
     
     /// @brief 设置屏幕尺�?
     /// @param width 屏幕宽度（像素）
@@ -204,7 +198,7 @@ public:
     /// @brief 设置错�?信息
     /// @param error 要显示的错�?信息文本
     /// @details 设置后会�?��切换到错�?��示状�?
-    void set_error(const std::string& error);
+    void set_error(const std::string& error) override;
 
     /// @brief 设置状�?�文�?
     /// @param status 状�?�文�?��用于连接�?��面显示）
@@ -212,7 +206,7 @@ public:
     
     /// @brief 娓呴櫎閿欒淇℃伅
     /// @details 清除当前显示的错�?���?
-    void clear_error();
+    void clear_error() override;
     
     /// @brief 当前�?��接受事件
     bool is_active() const override;
@@ -278,11 +272,7 @@ public:
     /// @brief 设置登录动画�?
     /// @param frames 动画帧纹理列�?
     void set_login_animation_frames(std::vector<AnimationFrame> frames);
-    
-    /// @brief �?查登录动画是否�?在播�?
-    /// @return 正在�?��返回true
-    bool is_login_animation_playing() const { return login_animation_playing_; }
-    
+
     // =========================================================================
     // 角色创建界面资源设置 (Character Create Screen Resources)
     // =========================================================================
@@ -368,19 +358,102 @@ public:
     
     /// @brief 获取选中的�?色索�?
     /// @return 选中角色的索引，-1表示�??�中
-    int get_selected_character_index() const { return selected_character_index_; }
+    int get_selected_character_index() const override { return selected_character_index_; }
     
     /// @brief 获取创建角色时�?�择的职�?
     /// @return 选择的�?色职业枚举�??
-    CharacterClass get_create_class() const { return create_class_; }
+    CharacterClass get_create_class() const override { return create_class_; }
     
     /// @brief 获取创建角色时�?�择的�?�别
     /// @return 选择的�?色�?�别枚举�?
-    Gender get_create_gender() const { return create_gender_; }
+    Gender get_create_gender() const override { return create_gender_; }
     
     /// @brief 获取创建角色时输入的名称
     /// @return 角色名称字�?串的常量引用
     const std::string& get_create_name() const { return create_name_field_.text; }
+
+    // =========================================================================
+    // ILoginStateContext implementation
+    // =========================================================================
+    SDLRenderer& get_renderer() const override;
+    UIRenderer& get_ui_renderer() const override;
+    UILayoutLoader& get_layout_loader() const override;
+    int get_screen_width() const override;
+    int get_screen_height() const override;
+    LoginStateEnterReason get_enter_reason() const override;
+
+    const std::string& get_status_text() const override;
+    const std::string& get_error_message() const override;
+
+    TextInputField& get_username_field() override;
+    TextInputField& get_password_field() override;
+    Rect& get_login_confirm_bounds() override;
+    Button& get_offline_button() override;
+
+    std::vector<CharacterSlot>& get_character_slots() override;
+    void set_selected_character_index(int index) override;
+
+    TextInputField& get_create_name_field() override;
+    void set_create_class(CharacterClass c) override;
+    void set_create_gender(Gender g) override;
+    Button& get_confirm_create_button() override;
+    Button& get_cancel_create_button() override;
+    int get_selected_class_index() const override;
+    void set_selected_class_index(int idx) override;
+    int get_selected_gender_index() const override;
+    void set_selected_gender_index(int idx) override;
+    bool is_class_panel_visible() const override;
+    void set_class_panel_visible(bool visible) override;
+    float get_class_panel_visibility() const override;
+    void set_class_panel_visibility(float v) override;
+    Rect& get_create_button_bounds() override;
+    Rect& get_class_panel_bounds() override;
+    Rect& get_class_select_bounds(int index) override;
+    Rect& get_preview_area_bounds() override;
+    Rect& get_start_game_bounds() override;
+    Rect& get_created_name_bounds() override;
+    Rect& get_created_level_bounds() override;
+    Rect& get_created_class_bounds() override;
+    const std::string& get_created_character_name() const override;
+    CharacterClass get_created_character_class() const override;
+    Gender get_created_character_gender() const override;
+    int get_created_character_level() const override;
+    bool has_created_character() const override;
+
+    bool is_cursor_visible() const override;
+    bool is_login_animation_playing() const override;
+    void set_login_animation_playing(bool playing) override;
+    void start_login_animation(const std::string& username, const std::string& password) override;
+    int get_login_animation_frame() const override;
+    void set_login_animation_frame(int frame) override;
+    float get_login_animation_timer() const override;
+    void set_login_animation_timer(float timer) override;
+    float get_login_animation_frame_time() const override;
+    const std::string& get_pending_username() const override;
+    const std::string& get_pending_password() const override;
+    void clear_pending_credentials() override;
+    int get_preview_animation_frame() const override;
+    void set_preview_animation_frame(int frame) override;
+    float get_preview_animation_timer() const override;
+    void set_preview_animation_timer(float timer) override;
+    float get_preview_animation_frame_time() const override;
+
+    ResourceManager& get_resource_manager() override;
+    std::shared_ptr<Texture> get_background_texture() const override;
+    std::shared_ptr<Texture> get_create_background_texture() const override;
+    std::shared_ptr<Texture> get_class_panel_texture() const override;
+    const std::vector<std::shared_ptr<Texture>>& get_class_select_textures() const override;
+    const std::vector<std::shared_ptr<Texture>>& get_class_highlight_textures() const override;
+    const std::vector<AnimationFrame>& get_login_animation_frames() const override;
+    std::vector<AnimationFrame>& get_character_preview_frames(int index) override;
+    const std::vector<AnimationFrame>& get_character_preview_frames(int index) const override;
+
+    void transition_to(LoginScreenState state) override;
+    void invoke_login(const std::string& username, const std::string& password) override;
+    void invoke_character_select(uint32_t character_id) override;
+    void invoke_character_create(const std::string& name, CharacterClass c, Gender g) override;
+    void invoke_start_game() override;
+    void invoke_offline_play() override;
     
 private:
     // =========================================================================
@@ -389,21 +462,21 @@ private:
     SDLRenderer& renderer_;         ///< SDL渲染器引�?
     UIRenderer& ui_renderer_;       ///< UI渲染器引�?
     ResourceManager& resource_manager_; ///< 资源管理器引�?
-    UILayoutLoader layout_loader_;  ///< JSON驱动的UI布局加载�?
+    mutable UILayoutLoader layout_loader_;  ///< JSON驱动的UI布局加载�?
     
     // =========================================================================
     // 灞忓箷灏哄 (Screen Dimensions)
     // =========================================================================
-    int width_ = 800;               ///< 屏幕宽度（默�?00像素�?
-    int height_ = 600;              ///< 屏幕高度（默�?00像素�?
+    int width_ = layout::DEFAULT_SCREEN_WIDTH;    ///< 屏幕宽度（默�?00像素�?
+    int height_ = layout::DEFAULT_SCREEN_HEIGHT;  ///< 屏幕高度（默�?00像素�?
     
     // =========================================================================
     // 界面状�??(Screen State)
     // =========================================================================
     LoginScreenState state_ = LoginScreenState::LOGIN;  ///< 当前界面状�??
     const SceneStateMachine* state_machine_ = nullptr;  ///< 状�?�机指针（用于事件激活判�?��
-    std::unique_ptr<LoginStateContext> state_context_;  ///< 状态共享上下文
     std::unique_ptr<ILoginState> current_state_;        ///< 当前状态对象
+    LoginStateEnterReason enter_reason_ = LoginStateEnterReason::Transition;
     std::string error_message_;     ///< 错�?信息文本
     float error_timer_ = 0.0f;      ///< 错�?显示计时�?��用于�?��隐藏�?
     std::string status_text_;       ///< 状�?�文�?��连接�?��面显示）
@@ -462,7 +535,7 @@ private:
     /// 索引: [职业 * 2 + 性别] = frames
     /// 职业: 0=战士, 1=法师, 2=道士
     /// 性别: 0=�? 1=�?
-    std::vector<AnimationFrame> character_preview_frames_[6];
+    std::vector<AnimationFrame> character_preview_frames_[layout::MAX_CHARACTER_PREVIEW_SLOTS];
     
     // 角色预�?动画状�??
     int preview_animation_frame_ = 0;          ///< 当前预�?动画�?
@@ -484,6 +557,8 @@ private:
     Rect created_name_bounds_;                 ///< 创建后�?名显示区�?
     Rect created_level_bounds_;                ///< 创建后等级显示区�?
     Rect created_class_bounds_;                ///< 创建后职业显示区�?
+    Rect invalid_bounds_{};                    ///< 非法索引时返回的安全边界
+    std::vector<AnimationFrame> invalid_preview_frames_;  ///< 非法索引时返回的安全动画帧容器
     
     // =========================================================================
     // 回调函数 (Callbacks)
@@ -503,98 +578,6 @@ private:
     
     std::unique_ptr<ILoginState> build_state(LoginScreenState state);
     void refresh_layout();
-};
-
-/// @brief Enter reason for state initialization.
-enum class LoginStateEnterReason {
-    Transition,
-    LayoutRefresh
-};
-
-/// @brief Shared context passed to login UI states.
-struct LoginStateContext {
-    SDLRenderer& renderer;
-    UIRenderer& ui_renderer;
-    ResourceManager& resource_manager;
-    UILayoutLoader& layout_loader;
-    int& screen_width;
-    int& screen_height;
-    LoginStateEnterReason enter_reason = LoginStateEnterReason::Transition;
-
-    // Login input data
-    TextInputField& username_field;
-    TextInputField& password_field;
-    Rect& login_confirm_bounds;
-    Button& offline_button;
-
-    // Character select data
-    std::vector<CharacterSlot>& character_slots;
-    int& selected_character_index;
-
-    // Character create data
-    TextInputField& create_name_field;
-    CharacterClass& create_class;
-    Gender& create_gender;
-    Button& confirm_create_button;
-    Button& cancel_create_button;
-    int& selected_create_class_index;
-    int& selected_create_gender_index;
-    bool& class_panel_visible;
-    float& class_panel_visibility;
-
-    Rect& create_button_bounds;
-    Rect& class_panel_bounds;
-    Rect (&class_select_bounds)[5];
-    Rect& preview_area_bounds;
-    Rect& start_game_bounds;
-    Rect& created_name_bounds;
-    Rect& created_level_bounds;
-    Rect& created_class_bounds;
-
-    // Animation state
-    float& cursor_blink_timer;
-    bool& cursor_visible;
-    bool& login_animation_playing;
-    int& login_animation_frame;
-    float& login_animation_timer;
-    float& login_animation_frame_time;
-    std::string& pending_username;
-    std::string& pending_password;
-
-    int& preview_animation_frame;
-    float& preview_animation_timer;
-    float& preview_animation_frame_time;
-
-    // Textures/resources
-    std::shared_ptr<Texture>& background_texture;
-    std::shared_ptr<Texture>& create_background_texture;
-    std::shared_ptr<Texture>& class_panel_texture;
-    std::vector<std::shared_ptr<Texture>>& class_select_textures;
-    std::vector<std::shared_ptr<Texture>>& class_highlight_textures;
-    std::vector<LoginScreen::AnimationFrame>& login_animation_frames;
-    std::vector<LoginScreen::AnimationFrame> (&character_preview_frames)[6];
-
-    // Callbacks
-    LoginScreen::LoginCallback& on_login;
-    LoginScreen::CharacterSelectCallback& on_character_select;
-    LoginScreen::CharacterCreateCallback& on_character_create;
-    LoginScreen::StartGameCallback& on_start_game;
-    LoginScreen::OfflinePlayCallback& on_offline_play;
-
-    // Created character info
-    std::string& created_character_name;
-    CharacterClass& created_character_class;
-    Gender& created_character_gender;
-    int& created_character_level;
-    bool& has_created_character;
-
-    // Status/error
-    std::string& error_message;
-    float& error_timer;
-    std::string& status_text;
-
-    std::function<void(LoginScreenState)> transition_to;
-    std::function<void(const std::string&)> set_error;
 };
 
 } // namespace mir2::ui::screens

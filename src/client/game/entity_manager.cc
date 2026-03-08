@@ -5,19 +5,12 @@
 
 #include "entity_manager.h"
 
+#include "common/time_utils.h"
+
 #include <algorithm>
-#include <chrono>
 #include <type_traits>
 
 namespace mir2::game {
-
-namespace {
-uint32_t NowMs() {
-    using clock = std::chrono::steady_clock;
-    return static_cast<uint32_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
-}
-} // namespace
 
 EntityManager::EntityManager(int cell_size)
     : cell_size_(std::max(1, cell_size)) {}
@@ -101,7 +94,7 @@ bool EntityManager::update_entity(const Entity& entity) {
 
     const Position old_position = it->second.position;
     it->second = entity;
-    it->second.interpolator.receive_state(entity.position, NowMs());
+    it->second.interpolator.receive_state(entity.position, static_cast<uint32_t>(mir2::common::now_ms()));
     move_entity(entity.id, old_position, entity.position);
     return true;
 }
@@ -115,7 +108,7 @@ bool EntityManager::update_entity_position(uint64_t id, const Position& position
     const Position old_position = it->second.position;
     it->second.position = position;
     it->second.direction = direction;
-    it->second.interpolator.receive_state(position, NowMs());
+    it->second.interpolator.receive_state(position, static_cast<uint32_t>(mir2::common::now_ms()));
     move_entity(id, old_position, position);
     return true;
 }
@@ -165,8 +158,6 @@ void EntityManager::query_range_impl(const Position& center, int radius, Contain
         return;
     }
 
-    std::unordered_map<uint64_t, const Entity*> entity_cache;
-
     const int min_x = center.x - radius;
     const int max_x = center.x + radius;
     const int min_y = center.y - radius;
@@ -183,19 +174,11 @@ void EntityManager::query_range_impl(const Position& center, int radius, Contain
                 continue;
             }
             for (uint64_t id : cell_it->second) {
-                const Entity* entity = nullptr;
-                auto cache_it = entity_cache.find(id);
-                if (cache_it == entity_cache.end()) {
-                    auto entity_it = entities_.find(id);
-                    if (entity_it == entities_.end()) {
-                        continue;
-                    }
-                    entity = &entity_it->second;
-                    entity_cache.emplace(id, entity);
-                } else {
-                    entity = cache_it->second;
+                auto entity_it = entities_.find(id);
+                if (entity_it == entities_.end()) {
+                    continue;
                 }
-                auto& entity_ref = *entity;
+                auto& entity_ref = entity_it->second;
                 if (entity_ref.position.x < min_x || entity_ref.position.x > max_x ||
                     entity_ref.position.y < min_y || entity_ref.position.y > max_y) {
                     continue;
@@ -223,82 +206,10 @@ std::vector<Entity*> EntityManager::query_range(const Position& center, int radi
     return result;
 }
 
-std::vector<const Entity*> EntityManager::query_at(const Position& position) const {
-    std::vector<const Entity*> result;
-    const GridCoord cell = cell_for_position(position);
-    auto it = grid_.find(cell);
-    if (it == grid_.end()) {
-        return result;
-    }
-
-    for (uint64_t id : it->second) {
-        auto entity_it = entities_.find(id);
-        if (entity_it == entities_.end()) {
-            continue;
-        }
-        const Entity& entity = entity_it->second;
-        if (entity.position == position) {
-            result.push_back(&entity);
-        }
-    }
-
-    return result;
-}
-
-std::vector<Entity*> EntityManager::get_entities_in_view(const mir2::render::Camera& camera, int padding) {
-    std::vector<Entity*> result;
+template <typename EntityPtr, typename Container>
+void EntityManager::get_entities_in_view_impl(const mir2::render::Camera& camera, int padding, Container& result) const {
     if (entities_.empty()) {
-        return result;
-    }
-
-    mir2::common::Rect bounds = camera.get_visible_tile_bounds();
-    const int min_x = bounds.x - padding;
-    const int min_y = bounds.y - padding;
-    const int max_x = bounds.x + bounds.width + padding;
-    const int max_y = bounds.y + bounds.height + padding;
-
-    const GridCoord min_cell = cell_for_position({min_x, min_y});
-    const GridCoord max_cell = cell_for_position({max_x, max_y});
-
-    for (int cy = min_cell.y; cy <= max_cell.y; ++cy) {
-        for (int cx = min_cell.x; cx <= max_cell.x; ++cx) {
-            GridCoord key{cx, cy};
-            auto cell_it = grid_.find(key);
-            if (cell_it == grid_.end()) {
-                continue;
-            }
-            for (uint64_t id : cell_it->second) {
-                auto entity_it = entities_.find(id);
-                if (entity_it == entities_.end()) {
-                    continue;
-                }
-                Entity& entity = entity_it->second;
-                if (entity.position.x < min_x || entity.position.x > max_x ||
-                    entity.position.y < min_y || entity.position.y > max_y) {
-                    continue;
-                }
-                result.push_back(&entity);
-            }
-        }
-    }
-
-    std::stable_sort(result.begin(), result.end(), [](const Entity* a, const Entity* b) {
-        if (a->position.y == b->position.y) {
-            if (a->position.x == b->position.x) {
-                return a->id < b->id;
-            }
-            return a->position.x < b->position.x;
-        }
-        return a->position.y < b->position.y;
-    });
-
-    return result;
-}
-
-std::vector<const Entity*> EntityManager::get_entities_in_view(const mir2::render::Camera& camera, int padding) const {
-    std::vector<const Entity*> result;
-    if (entities_.empty()) {
-        return result;
+        return;
     }
 
     mir2::common::Rect bounds = camera.get_visible_tile_bounds();
@@ -327,12 +238,14 @@ std::vector<const Entity*> EntityManager::get_entities_in_view(const mir2::rende
                     entity.position.y < min_y || entity.position.y > max_y) {
                     continue;
                 }
-                result.push_back(&entity);
+                using Pointee = std::remove_pointer_t<EntityPtr>;
+                // get_entities_in_view_impl is const; casting is safe for non-const callers.
+                result.push_back(const_cast<Pointee*>(&entity));
             }
         }
     }
 
-    std::stable_sort(result.begin(), result.end(), [](const Entity* a, const Entity* b) {
+    std::stable_sort(result.begin(), result.end(), [](const auto* a, const auto* b) {
         if (a->position.y == b->position.y) {
             if (a->position.x == b->position.x) {
                 return a->id < b->id;
@@ -341,7 +254,39 @@ std::vector<const Entity*> EntityManager::get_entities_in_view(const mir2::rende
         }
         return a->position.y < b->position.y;
     });
+}
 
+std::vector<const Entity*> EntityManager::query_at(const Position& position) const {
+    std::vector<const Entity*> result;
+    const GridCoord cell = cell_for_position(position);
+    auto it = grid_.find(cell);
+    if (it == grid_.end()) {
+        return result;
+    }
+
+    for (uint64_t id : it->second) {
+        auto entity_it = entities_.find(id);
+        if (entity_it == entities_.end()) {
+            continue;
+        }
+        const Entity& entity = entity_it->second;
+        if (entity.position == position) {
+            result.push_back(&entity);
+        }
+    }
+
+    return result;
+}
+
+std::vector<Entity*> EntityManager::get_entities_in_view(const mir2::render::Camera& camera, int padding) {
+    std::vector<Entity*> result;
+    get_entities_in_view_impl<Entity*>(camera, padding, result);
+    return result;
+}
+
+std::vector<const Entity*> EntityManager::get_entities_in_view(const mir2::render::Camera& camera, int padding) const {
+    std::vector<const Entity*> result;
+    get_entities_in_view_impl<const Entity*>(camera, padding, result);
     return result;
 }
 

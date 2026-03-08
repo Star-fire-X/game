@@ -5,14 +5,16 @@
 
 #include <benchmark/benchmark.h>
 
-#include <algorithm>
-#include <chrono>
+#include <cstdint>
 #include <random>
+#include <string>
 #include <vector>
 
-#include "server/combat/combat_core.h"
+#include "common/types/constants.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/item_component.h"
 #include "ecs/systems/combat_system.h"
+#include "ecs/systems/inventory_system.h"
 #include "ecs/systems/level_up_system.h"
 #include "ecs/systems/movement_system.h"
 #include "ecs/world.h"
@@ -21,6 +23,10 @@ namespace {
 
 constexpr int kEntityCount = 1000;
 constexpr float kDeltaTime = 0.016f;  // 16ms (60 FPS)
+constexpr int kHotPathAttackCount = 100;
+constexpr int kInventorySlots = mir2::common::constants::MAX_INVENTORY_SIZE;
+constexpr uint32_t kInventoryTrackedItemId = 1001;
+constexpr uint32_t kInventoryOtherItemId = 1002;
 
 /**
  * @brief 创建测试用角色实体
@@ -32,8 +38,8 @@ entt::entity CreateTestCharacter(entt::registry& registry, uint32_t id, int x, i
     auto& identity = registry.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
     identity.id = id;
     identity.name = "Player" + std::to_string(id);
-    identity.char_class = legend2::CharacterClass::WARRIOR;
-    identity.gender = legend2::Gender::MALE;
+    identity.char_class = mir2::common::CharacterClass::WARRIOR;
+    identity.gender = mir2::common::Gender::MALE;
 
     // 属性组件
     auto& attrs = registry.emplace<mir2::ecs::CharacterAttributesComponent>(entity);
@@ -54,7 +60,7 @@ entt::entity CreateTestCharacter(entt::registry& registry, uint32_t id, int x, i
     auto& state = registry.emplace<mir2::ecs::CharacterStateComponent>(entity);
     state.map_id = 1;
     state.position = {x, y};
-    state.direction = legend2::Direction::DOWN;
+    state.direction = mir2::common::Direction::DOWN;
 
     return entity;
 }
@@ -71,6 +77,25 @@ void SetupEntities(entt::registry& registry, std::vector<entt::entity>& entities
         int x = (i % 100) * 10;
         int y = (i / 100) * 10;
         entities.push_back(CreateTestCharacter(registry, i, x, y));
+    }
+}
+
+void ClearInventoryItemsForCharacter(entt::registry& registry,
+                                     entt::entity character) {
+    std::vector<entt::entity> items_to_destroy;
+    auto view = registry.view<mir2::ecs::InventoryOwnerComponent,
+                              mir2::ecs::ItemComponent>();
+    items_to_destroy.reserve(kInventorySlots);
+
+    for (auto entity : view) {
+        const auto& owner = view.get<mir2::ecs::InventoryOwnerComponent>(entity);
+        if (owner.owner == character) {
+            items_to_destroy.push_back(entity);
+        }
+    }
+
+    for (auto entity : items_to_destroy) {
+        registry.destroy(entity);
     }
 }
 
@@ -202,7 +227,7 @@ static void BM_ECS_CombatDamage_100Attacks(benchmark::State& state) {
 
     for (auto _ : state) {
         // 执行100次随机攻击
-        for (int i = 0; i < 100; ++i) {
+        for (int i = 0; i < kHotPathAttackCount; ++i) {
             size_t attacker_idx = dist(rng);
             size_t target_idx = dist(rng);
             if (attacker_idx != target_idx) {
@@ -213,8 +238,8 @@ static void BM_ECS_CombatDamage_100Attacks(benchmark::State& state) {
         }
     }
 
-    state.SetItemsProcessed(state.iterations() * 100);
-    state.counters["attacks_per_iter"] = 100;
+    state.SetItemsProcessed(state.iterations() * kHotPathAttackCount);
+    state.counters["attacks_per_iter"] = kHotPathAttackCount;
 }
 
 /**
@@ -243,6 +268,48 @@ static void BM_ECS_EntityCreationDestruction(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations() * 100);
 }
 
+static void BM_MigrationHotPath_Tick_1000Entities(benchmark::State& state) {
+    BM_ECS_FullTick_1000Entities(state);
+}
+
+static void BM_MigrationHotPath_Combat_100Attacks(benchmark::State& state) {
+    BM_ECS_CombatDamage_100Attacks(state);
+}
+
+static void BM_MigrationHotPath_Inventory_40Slots(benchmark::State& state) {
+    entt::registry registry;
+    const entt::entity character = CreateTestCharacter(registry, 1, 10, 10);
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        ClearInventoryItemsForCharacter(registry, character);
+        state.ResumeTiming();
+
+        int added = 0;
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            const uint32_t item_id = (slot % 2 == 0) ? kInventoryTrackedItemId
+                                                      : kInventoryOtherItemId;
+            const auto item = mir2::ecs::InventorySystem::AddItem(
+                registry, character, item_id, 1);
+            if (item.has_value()) {
+                ++added;
+            }
+        }
+
+        int tracked_count = mir2::ecs::InventorySystem::CountItem(
+            registry, character, kInventoryTrackedItemId);
+        bool has_required_count = mir2::ecs::InventorySystem::HasItem(
+            registry, character, kInventoryTrackedItemId, kInventorySlots / 2);
+
+        benchmark::DoNotOptimize(added);
+        benchmark::DoNotOptimize(tracked_count);
+        benchmark::DoNotOptimize(has_required_count);
+    }
+
+    state.SetItemsProcessed(state.iterations() * kInventorySlots);
+    state.counters["slots"] = kInventorySlots;
+}
+
 // 注册基准测试
 BENCHMARK(BM_ECS_FullTick_1000Entities)
     ->Unit(benchmark::kMillisecond)
@@ -269,6 +336,18 @@ BENCHMARK(BM_ECS_CombatDamage_100Attacks)
     ->Iterations(10000);
 
 BENCHMARK(BM_ECS_EntityCreationDestruction)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(10000);
+
+BENCHMARK(BM_MigrationHotPath_Tick_1000Entities)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(1000);
+
+BENCHMARK(BM_MigrationHotPath_Combat_100Attacks)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(10000);
+
+BENCHMARK(BM_MigrationHotPath_Inventory_40Slots)
     ->Unit(benchmark::kMicrosecond)
     ->Iterations(10000);
 

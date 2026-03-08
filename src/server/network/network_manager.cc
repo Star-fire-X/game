@@ -1,15 +1,11 @@
 #include "network/network_manager.h"
 
+#include <algorithm>
 #include <asio/post.hpp>
 
+#include <shared_mutex>
+
 #include "monitor/metrics.h"
-
-namespace {
-
-constexpr int64_t kHeartbeatCheckIntervalMs = 30000;
-constexpr int64_t kHeartbeatTimeoutMs = 90000;
-
-}  // namespace
 
 namespace mir2::network {
 
@@ -21,7 +17,13 @@ NetworkManager::NetworkManager(asio::io_context& io_context)
 }
 
 bool NetworkManager::Start(const std::string& bind_ip, uint16_t port, int max_connections) {
+  max_connections_.store(std::max(max_connections, 0), std::memory_order_release);
   return server_.Start(bind_ip, port, max_connections);
+}
+
+bool NetworkManager::StartUnix(const std::string& socket_path, int max_connections) {
+  max_connections_.store(std::max(max_connections, 0), std::memory_order_release);
+  return server_.StartUnix(socket_path, max_connections);
 }
 
 void NetworkManager::Stop() {
@@ -34,16 +36,22 @@ void NetworkManager::RegisterHandler(uint16_t msg_id, MessageHandler handler) {
 }
 
 void NetworkManager::Send(uint64_t connection_id, uint16_t msg_id, const std::vector<uint8_t>& payload) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = sessions_.find(connection_id);
-  if (it != sessions_.end() && it->second) {
-    it->second->Send(msg_id, payload);
+  std::shared_ptr<TcpSession> session;
+  {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    auto it = sessions_.find(connection_id);
+    if (it != sessions_.end()) {
+      session = it->second;
+    }
+  }
+  if (session) {
+    session->Send(msg_id, payload);
   }
 }
 
 void NetworkManager::Broadcast(uint16_t msg_id, const std::vector<uint8_t>& payload) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [_, session] : sessions_) {
+  auto sessions = GetAllSessions();
+  for (auto& session : sessions) {
     if (session) {
       session->Send(msg_id, payload);
     }
@@ -52,8 +60,8 @@ void NetworkManager::Broadcast(uint16_t msg_id, const std::vector<uint8_t>& payl
 
 void NetworkManager::BroadcastIf(uint16_t msg_id, const std::vector<uint8_t>& payload,
                                  SessionFilter filter) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [_, session] : sessions_) {
+  auto sessions = GetAllSessions();
+  for (auto& session : sessions) {
     if (session && (!filter || filter(session))) {
       session->Send(msg_id, payload);
     }
@@ -61,7 +69,7 @@ void NetworkManager::BroadcastIf(uint16_t msg_id, const std::vector<uint8_t>& pa
 }
 
 std::shared_ptr<TcpSession> NetworkManager::GetSession(uint64_t session_id) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = sessions_.find(session_id);
   if (it != sessions_.end()) {
     return it->second;
@@ -71,7 +79,7 @@ std::shared_ptr<TcpSession> NetworkManager::GetSession(uint64_t session_id) cons
 
 std::vector<std::shared_ptr<TcpSession>> NetworkManager::GetAllSessions() const {
   std::vector<std::shared_ptr<TcpSession>> result;
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   result.reserve(sessions_.size());
   for (const auto& [_, session] : sessions_) {
     if (session) {
@@ -82,31 +90,41 @@ std::vector<std::shared_ptr<TcpSession>> NetworkManager::GetAllSessions() const 
 }
 
 size_t NetworkManager::GetConnectionCount() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   return sessions_.size();
 }
 
 void NetworkManager::Tick() {
   const int64_t now_ms = TcpSession::NowMs();
-  if (now_ms - last_heartbeat_check_ms_ < kHeartbeatCheckIntervalMs) {
+  const int64_t heartbeat_check_interval_ms =
+      heartbeat_check_interval_ms_.load(std::memory_order_acquire);
+  const int64_t heartbeat_timeout_ms =
+      heartbeat_timeout_ms_.load(std::memory_order_acquire);
+  if (heartbeat_check_interval_ms <= 0 || heartbeat_timeout_ms <= 0) {
+    return;
+  }
+  if (now_ms - last_heartbeat_check_ms_ < heartbeat_check_interval_ms) {
     return;
   }
 
   last_heartbeat_check_ms_ = now_ms;
 
-  asio::post(io_context_, [this]() {
+  asio::post(io_context_, [this, heartbeat_timeout_ms]() {
     const int64_t now_ms = TcpSession::NowMs();
     std::vector<std::shared_ptr<TcpSession>> expired_sessions;
     size_t timeout_count = 0;
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::shared_lock<std::shared_mutex> lock(mutex_);
       for (auto& [_, session] : sessions_) {
         if (!session) {
           continue;
         }
+        if (session->IsServiceSession()) {
+          continue;
+        }
         const int64_t last_heartbeat_ms = session->GetLastHeartbeatMs();
         if (now_ms < last_heartbeat_ms ||
-            now_ms - last_heartbeat_ms >= kHeartbeatTimeoutMs) {
+            now_ms - last_heartbeat_ms >= heartbeat_timeout_ms) {
           expired_sessions.push_back(session);
           ++timeout_count;
         }
@@ -124,6 +142,40 @@ void NetworkManager::Tick() {
   });
 }
 
+void NetworkManager::SetIdlePolicy(int64_t check_interval_ms, int64_t timeout_ms) {
+  heartbeat_check_interval_ms_.store(
+      std::max<int64_t>(check_interval_ms, 1), std::memory_order_release);
+  heartbeat_timeout_ms_.store(std::max<int64_t>(timeout_ms, 1), std::memory_order_release);
+}
+
+void NetworkManager::SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size) {
+  server_.SetAcceptedConnectionWriteQueueSize(std::max<size_t>(max_write_queue_size, 1));
+}
+
+void NetworkManager::SetAcceptedConnectionWriteBatchOptions(
+    TcpConnection::WriteBatchOptions options) {
+  options.flush_interval_us = std::max<int64_t>(options.flush_interval_us, 0);
+  server_.SetAcceptedConnectionWriteBatchOptions(options);
+}
+
+void NetworkManager::SetAcceptedConnectionLowCopySendEnabled(bool enabled) {
+  server_.SetAcceptedConnectionLowCopySendEnabled(enabled);
+}
+
+void NetworkManager::SetMaxConnectionsForTest(int max_connections) {
+  max_connections_.store(std::max(max_connections, 0), std::memory_order_release);
+}
+
+void NetworkManager::AddConnectionForTest(
+    const std::shared_ptr<TcpConnection>& connection) {
+  AddConnection(connection);
+}
+
+size_t NetworkManager::GetTrackedConnectionCountForTest() const {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  return connections_.size();
+}
+
 void NetworkManager::AddConnection(const std::shared_ptr<TcpConnection>& connection) {
   if (!connection) {
     return;
@@ -134,7 +186,14 @@ void NetworkManager::AddConnection(const std::shared_ptr<TcpConnection>& connect
   });
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    const int max_connections = max_connections_.load(std::memory_order_acquire);
+    if (max_connections > 0 &&
+        connections_.size() >= static_cast<size_t>(max_connections)) {
+      monitor::Metrics::Instance().IncrementError("connection_limit");
+      connection->Close();
+      return;
+    }
     connections_[connection->GetConnectionId()] = connection;
   }
 
@@ -144,7 +203,7 @@ void NetworkManager::AddConnection(const std::shared_ptr<TcpConnection>& connect
 void NetworkManager::RemoveConnection(uint64_t connection_id) {
   std::shared_ptr<TcpConnection> connection;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = connections_.find(connection_id);
     if (it == connections_.end()) {
       return;
@@ -157,7 +216,7 @@ void NetworkManager::RemoveConnection(uint64_t connection_id) {
 }
 
 std::shared_ptr<TcpConnection> NetworkManager::FindConnection(uint64_t connection_id) const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = connections_.find(connection_id);
   if (it != connections_.end()) {
     return it->second;
@@ -168,7 +227,7 @@ std::shared_ptr<TcpConnection> NetworkManager::FindConnection(uint64_t connectio
 void NetworkManager::BroadcastRaw(const std::vector<uint8_t>& bytes) {
   std::vector<std::shared_ptr<TcpConnection>> connections;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     connections.reserve(connections_.size());
     for (const auto& [_, connection] : connections_) {
       if (connection) {
@@ -187,7 +246,7 @@ void NetworkManager::BroadcastRaw(const std::vector<uint8_t>& bytes) {
 void NetworkManager::Close(uint64_t connection_id) {
   std::shared_ptr<TcpConnection> connection;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = connections_.find(connection_id);
     if (it != connections_.end()) {
       connection = it->second;
@@ -202,7 +261,7 @@ void NetworkManager::Close(uint64_t connection_id) {
 void NetworkManager::StopAll() {
   std::vector<std::shared_ptr<TcpConnection>> connections;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     connections.reserve(connections_.size());
     for (const auto& [_, connection] : connections_) {
       if (connection) {
@@ -241,7 +300,7 @@ void NetworkManager::OnConnectionClosed(const std::shared_ptr<TcpConnection>& co
 
   std::shared_ptr<TcpSession> session;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = sessions_.find(connection->GetConnectionId());
     if (it != sessions_.end()) {
       session = it->second;
@@ -260,7 +319,7 @@ void NetworkManager::OnSessionConnected(const std::shared_ptr<TcpSession>& sessi
   }
 
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     sessions_[session->GetSessionId()] = session;
     monitor::Metrics::Instance().SetConnections(static_cast<int64_t>(sessions_.size()));
   }
@@ -280,7 +339,7 @@ void NetworkManager::OnSessionDisconnected(const std::shared_ptr<TcpSession>& se
   if (!session) {
     return;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   sessions_.erase(session->GetSessionId());
   monitor::Metrics::Instance().SetConnections(static_cast<int64_t>(sessions_.size()));
 }

@@ -3,8 +3,8 @@
  * @brief 监控指标
  */
 
-#ifndef MIR2_MONITOR_METRICS_H
-#define MIR2_MONITOR_METRICS_H
+#ifndef MIR2_MONITOR_METRICS_H_
+#define MIR2_MONITOR_METRICS_H_
 
 #include <cstdint>
 #include <memory>
@@ -15,9 +15,10 @@
 #include "core/singleton.h"
 
 #if defined(LEGEND2_ENABLE_PROMETHEUS)
+#include <prometheus/exposer.h>
+
 namespace prometheus {
 class Counter;
-class Exposer;
 class Gauge;
 class Histogram;
 class Registry;
@@ -46,9 +47,11 @@ class Metrics : public core::Singleton<Metrics> {
   void IncrementMessagesSent();
   void IncrementMessagesReceived();
   void ObserveDispatchLatency(int64_t microseconds);
+  void ObserveHandlerLatency(double milliseconds);
   void IncrementError(const std::string& reason);
   void IncrementCounter(const std::string& name);
-  void SetGauge(const std::string& name, int64_t value);
+  void IncrementCounter(const std::string& name, uint64_t delta);
+  void SetGauge(const std::string& name, double value);
 
   static constexpr const char* kConnections = "mir2_connections";
   static constexpr const char* kBytesIn = "mir2_bytes_in_total";
@@ -58,6 +61,14 @@ class Metrics : public core::Singleton<Metrics> {
   static constexpr const char* kMessagesReceived = "mir2_messages_received_total";
   static constexpr const char* kDispatchLatency = "mir2_dispatch_latency_us";
   static constexpr const char* kErrors = "mir2_errors_total";
+  static constexpr const char* kHandlerLatency = "logic.handler.latency_ms";
+  static constexpr const char* kMailboxPendingEvents = "logic.mailbox.pending_events";
+  static constexpr const char* kMailboxActiveRunners = "logic.mailbox.active_runners";
+  static constexpr const char* kMailboxSpawnRejectedTotal =
+      "logic.mailbox.spawn_rejected_total";
+  static constexpr const char* kLoginSpawnRejectedTotal = "logic.login.spawn_rejected_total";
+  static constexpr const char* kPrewarmSpawnRejectedTotal =
+      "logic.prewarm.spawn_rejected_total";
 
  private:
   Metrics() = default;
@@ -73,6 +84,7 @@ class Metrics : public core::Singleton<Metrics> {
   prometheus::Counter* messages_sent_ = nullptr;
   prometheus::Counter* messages_received_ = nullptr;
   prometheus::Histogram* dispatch_latency_ = nullptr;
+  prometheus::Histogram* handler_latency_ = nullptr;
   prometheus::Family<prometheus::Counter>* error_family_ = nullptr;
   std::unordered_map<std::string, prometheus::Counter*> error_counters_;
   std::unordered_map<std::string, prometheus::Counter*> counters_;
@@ -82,4 +94,4 @@ class Metrics : public core::Singleton<Metrics> {
 
 }  // namespace mir2::monitor
 
-#endif  // MIR2_MONITOR_METRICS_H
+#endif  // MIR2_MONITOR_METRICS_H_

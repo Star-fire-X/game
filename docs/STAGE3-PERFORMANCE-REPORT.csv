@@ -1,0 +1,24 @@
+timestamp,metric_name,value,unit
+2026-02-13 20:48:22,RttBenchmark.min,9.88604,ms
+2026-02-13 20:48:22,RttBenchmark.max,11.1861,ms
+2026-02-13 20:48:22,RttBenchmark.avg,10.1428,ms
+2026-02-13 20:48:22,RttBenchmark.p50,10.0166,ms
+2026-02-13 20:48:22,RttBenchmark.p95,11.0945,ms
+2026-02-13 20:48:22,RttBenchmark.p99,11.1686,ms
+2026-02-13 20:48:23,ThroughputBenchmark.msg_per_sec,12284.5,msg/s
+2026-02-13 20:48:23,ThroughputBenchmark.mb_per_sec,0.28117,MB/s
+2026-02-13 20:48:25,CombatLatencyBenchmark.min,9.88483,ms
+2026-02-13 20:48:25,CombatLatencyBenchmark.max,21.129,ms
+2026-02-13 20:48:25,CombatLatencyBenchmark.avg,16.9553,ms
+2026-02-13 20:48:25,CombatLatencyBenchmark.p50,19.8985,ms
+2026-02-13 20:48:25,CombatLatencyBenchmark.p95,20.5534,ms
+2026-02-13 20:48:25,CombatLatencyBenchmark.p99,20.9985,ms
+2026-02-13 20:48:41,ConcurrentConnectionsStressTest.success_rate,0.99,ratio
+2026-02-13 20:48:41,ConcurrentConnectionsStressTest.cpu_percent,19.4321,%
+2026-02-13 20:48:41,ConcurrentConnectionsStressTest.memory_mb,215.703,MB
+2026-02-13 20:48:43,PacketLossRecoveryBenchmark.min,8.98757,ms
+2026-02-13 20:48:43,PacketLossRecoveryBenchmark.max,41.2175,ms
+2026-02-13 20:48:43,PacketLossRecoveryBenchmark.avg,14.2247,ms
+2026-02-13 20:48:43,PacketLossRecoveryBenchmark.p50,10.0566,ms
+2026-02-13 20:48:43,PacketLossRecoveryBenchmark.p95,40.8649,ms
+2026-02-13 20:48:43,PacketLossRecoveryBenchmark.p99,41.0279,ms

@@ -3,8 +3,8 @@
  * @brief ECS 玩家间交易系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H_
 
 #include <entt/entt.hpp>
 
@@ -59,7 +59,8 @@ class TradeSystem : public System {
     // 确认交易
     static bool ConfirmTrade(entt::registry& registry,
                              entt::entity trader,
-                             EventBus* event_bus = nullptr);
+                             EventBus* event_bus = nullptr,
+                             bool auto_execute = true);
 
     // 执行交易（双方确认后）
     static bool ExecuteTrade(entt::registry& registry,
@@ -75,4 +76,4 @@ class TradeSystem : public System {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_TRADE_SYSTEM_H_

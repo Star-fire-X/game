@@ -17,7 +17,6 @@
 namespace mir2::render {
 
 // 引入公共类型定义
-using namespace mir2::common;
 
 /// 2D摄像机/视口
 /// 管理游戏世界的可视区域和坐标转换
@@ -31,11 +30,11 @@ struct Camera {
     /// 将世界坐标转换为屏幕坐标
     /// @param world_pos 世界坐标位置
     /// @return 屏幕坐标位置
-    Position world_to_screen(const Position& world_pos) const {
+    mir2::common::Position world_to_screen(const mir2::common::Position& world_pos) const {
         const float world_x = (static_cast<float>(world_pos.x) + 0.5f) *
-                              static_cast<float>(constants::TILE_WIDTH);
+                              static_cast<float>(mir2::common::constants::TILE_WIDTH);
         const float world_y = (static_cast<float>(world_pos.y) + 0.5f) *
-                              static_cast<float>(constants::TILE_HEIGHT);
+                              static_cast<float>(mir2::common::constants::TILE_HEIGHT);
         const float screen_x = (world_x - x) * zoom + static_cast<float>(viewport_width) * 0.5f;
         const float screen_y = (world_y - y) * zoom + static_cast<float>(viewport_height) * 0.5f;
         return {
@@ -47,15 +46,15 @@ struct Camera {
     /// 将屏幕坐标转换为世界坐标
     /// @param screen_pos 屏幕坐标位置
     /// @return 世界坐标位置(瓦片坐标)
-    Position screen_to_world(const Position& screen_pos) const {
+    mir2::common::Position screen_to_world(const mir2::common::Position& screen_pos) const {
         const float world_x = (static_cast<float>(screen_pos.x) - static_cast<float>(viewport_width) * 0.5f) /
                                   zoom +
                               x;
         const float world_y = (static_cast<float>(screen_pos.y) - static_cast<float>(viewport_height) * 0.5f) /
                                   zoom +
                               y;
-        const float tile_x = world_x / static_cast<float>(constants::TILE_WIDTH) - 0.5f;
-        const float tile_y = world_y / static_cast<float>(constants::TILE_HEIGHT) - 0.5f;
+        const float tile_x = world_x / static_cast<float>(mir2::common::constants::TILE_WIDTH) - 0.5f;
+        const float tile_y = world_y / static_cast<float>(mir2::common::constants::TILE_HEIGHT) - 0.5f;
         return {
             static_cast<int>(std::lround(tile_x)),
             static_cast<int>(std::lround(tile_y))
@@ -64,11 +63,11 @@ struct Camera {
 
     /// 获取可见的瓦片范围
     /// @return 可见瓦片的边界矩形
-    Rect get_visible_tile_bounds() const {
-        int half_width = static_cast<int>(viewport_width / (2 * zoom * constants::TILE_WIDTH)) + 2;
-        int half_height = static_cast<int>(viewport_height / (2 * zoom * constants::TILE_HEIGHT)) + 2;
-        int center_x = static_cast<int>(x / constants::TILE_WIDTH);
-        int center_y = static_cast<int>(y / constants::TILE_HEIGHT);
+    mir2::common::Rect get_visible_tile_bounds() const {
+        int half_width = static_cast<int>(viewport_width / (2 * zoom * mir2::common::constants::TILE_WIDTH)) + 2;
+        int half_height = static_cast<int>(viewport_height / (2 * zoom * mir2::common::constants::TILE_HEIGHT)) + 2;
+        int center_x = static_cast<int>(x / mir2::common::constants::TILE_WIDTH);
+        int center_y = static_cast<int>(y / mir2::common::constants::TILE_HEIGHT);
         return {
             center_x - half_width,
             center_y - half_height,
@@ -79,9 +78,11 @@ struct Camera {
 
     /// 将摄像机中心对准指定世界位置
     /// @param world_pos 要对准的世界坐标
-    void center_on(const Position& world_pos) {
-        x = static_cast<float>(world_pos.x * constants::TILE_WIDTH + constants::TILE_WIDTH / 2);
-        y = static_cast<float>(world_pos.y * constants::TILE_HEIGHT + constants::TILE_HEIGHT / 2);
+    void center_on(const mir2::common::Position& world_pos) {
+        x = static_cast<float>(world_pos.x * mir2::common::constants::TILE_WIDTH +
+                               mir2::common::constants::TILE_WIDTH / 2);
+        y = static_cast<float>(world_pos.y * mir2::common::constants::TILE_HEIGHT +
+                               mir2::common::constants::TILE_HEIGHT / 2);
     }
 
     /// 平滑移动摄像机到目标位置

@@ -20,6 +20,18 @@ private:
     int* counter_ = nullptr;
 };
 
+size_t CountEntities(const entt::registry& registry) {
+    size_t count = 0;
+    const auto* entity_storage = registry.storage<entt::entity>();
+    if (entity_storage) {
+      for (const auto entity : entity_storage->each()) {
+        (void)entity;
+        ++count;
+      }
+    }
+    return count;
+}
+
 }  // namespace
 
 TEST(RegistryManagerTest, UpdateAllUpdatesWorldSystems) {
@@ -76,4 +88,39 @@ TEST(RegistryManagerTest, CharacterMovesAcrossWorlds) {
     EXPECT_EQ(state->map_id, kMapId2);
     EXPECT_EQ(state->position.x, 10);
     EXPECT_EQ(state->position.y, 11);
+}
+
+TEST(RegistryManagerTest, CollectEntityCountsReportsPerWorldCounts) {
+    auto& manager = mir2::ecs::RegistryManager::Instance();
+    constexpr uint32_t kMapId1 = 9103;
+    constexpr uint32_t kMapId2 = 9104;
+
+    auto* world1 = manager.CreateWorld(kMapId1);
+    auto* world2 = manager.CreateWorld(kMapId2);
+    ASSERT_NE(world1, nullptr);
+    ASSERT_NE(world2, nullptr);
+
+    const size_t before_world1 = CountEntities(world1->Registry());
+    const size_t before_world2 = CountEntities(world2->Registry());
+    const auto before = manager.CollectEntityCounts();
+
+    (void)world1->Registry().create();
+    (void)world1->Registry().create();
+    (void)world2->Registry().create();
+
+    const auto after = manager.CollectEntityCounts();
+
+    auto find_count = [](const mir2::ecs::WorldEntityCountSnapshot& snapshot,
+                         uint32_t map_id) -> size_t {
+      for (const auto& [current_map_id, count] : snapshot.per_world) {
+        if (current_map_id == map_id) {
+          return count;
+        }
+      }
+      return 0;
+    };
+
+    EXPECT_EQ(find_count(after, kMapId1), before_world1 + 2);
+    EXPECT_EQ(find_count(after, kMapId2), before_world2 + 1);
+    EXPECT_EQ(after.total, before.total + 3);
 }

@@ -2,7 +2,7 @@
 include "common.fbs";
 namespace mir2.proto;
 
-enum ChatChannel : ubyte { WORLD = 0, PRIVATE = 1, GUILD = 2, SYSTEM = 3 }
+enum ChatChannel : ubyte { WORLD = 0, PRIVATE = 1, GUILD = 2, SYSTEM = 3, TEAM = 4, AREA = 5 }
 
 table ChatReq {
   channel: ChatChannel;
@@ -20,5 +20,6 @@ table ChatMessage {
   from_name: string;
   to_id: ulong;
   content: string;
+  color: uint;
   timestamp: uint;
 }

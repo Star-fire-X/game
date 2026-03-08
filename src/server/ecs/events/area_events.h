@@ -3,8 +3,8 @@
  * @brief 区域事件定义
  */
 
-#ifndef MIR2_ECS_EVENTS_AREA_EVENTS_H
-#define MIR2_ECS_EVENTS_AREA_EVENTS_H
+#ifndef MIR2_ECS_EVENTS_AREA_EVENTS_H_
+#define MIR2_ECS_EVENTS_AREA_EVENTS_H_
 
 #include <entt/entt.hpp>
 
@@ -81,4 +81,4 @@ struct MineEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // MIR2_ECS_EVENTS_AREA_EVENTS_H
+#endif  // MIR2_ECS_EVENTS_AREA_EVENTS_H_

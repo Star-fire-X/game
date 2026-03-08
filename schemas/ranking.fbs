@@ -1,0 +1,44 @@
+// ranking.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+enum RankingType : ubyte {
+  LEVEL = 0,
+  PK = 1,
+  GUILD = 2,
+  GOLD = 3
+}
+
+table RankEntry {
+  rank: uint;
+  entity_id: ulong;
+  name: string;
+  value: long;
+  extra: string;
+}
+
+table RankingReq {
+  ranking_type: RankingType;
+  page: uint = 1;
+  page_size: uint = 20;
+}
+
+table RankingRsp {
+  success: bool;
+  error_code: int;
+  ranking_type: RankingType;
+  total_count: uint;
+  entries: [RankEntry];
+}
+
+table RankingMyRankReq {
+  ranking_type: RankingType;
+}
+
+table RankingMyRankRsp {
+  success: bool;
+  error_code: int;
+  ranking_type: RankingType;
+  rank: uint;
+  value: long;
+}

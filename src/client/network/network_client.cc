@@ -13,6 +13,7 @@
 #include "network/network_client.h"
 
 #include <chrono>
+#include <cstring>
 
 #include "common/enums.h"
 #include "common/types/constants.h"
@@ -32,7 +33,6 @@ uint32_t get_timestamp_ms() {
         duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-using PacketHeader = mir2::common::PacketHeader;
 using PacketHeaderV2 = mir2::common::PacketHeaderV2;
 using ProtocolVersion = mir2::common::ProtocolVersion;
 namespace constants = mir2::common::constants;
@@ -127,7 +127,7 @@ void NetworkClient::disconnect() {
 
     // Stop IO thread
     stop_io_thread();
-    write_in_progress_ = false;
+    write_in_progress_.store(false, std::memory_order_release);
 
     // Clear queues
     {
@@ -168,7 +168,13 @@ void NetworkClient::send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
     }
 
     const uint16_t seq = send_sequence_.fetch_add(1, std::memory_order_relaxed);
-    auto encoded = mir2::common::EncodePacketV2(msg_id, payload.data(), payload.size(), seq, 0);
+    std::vector<uint8_t> encoded =
+        mir2::common::EncodePacketV2(msg_id, payload.data(), payload.size(), seq, 0);
+    if (encoded.empty()) {
+        last_error_ = ErrorCode::INVALID_PACKET;
+        handle_disconnect(asio::error::invalid_argument);
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
         send_queue_.push(std::move(encoded));
@@ -177,15 +183,13 @@ void NetworkClient::send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
     // Post write operation to IO thread (serialize writes to avoid interleaving frames).
     asio::post(io_context_, [this]() {
         if (state_ != ConnectionState::CONNECTED || !socket_) {
-            write_in_progress_ = false;
+            write_in_progress_.store(false, std::memory_order_release);
             return;
         }
 
-        if (write_in_progress_) {
+        if (write_in_progress_.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
-
-        write_in_progress_ = true;
         do_write();
     });
 }
@@ -301,6 +305,16 @@ void NetworkClient::set_auto_reconnect(bool enable) {
     auto_reconnect_ = enable;
 }
 
+void NetworkClient::set_use_v2_protocol(bool enable) {
+    (void)enable;
+    use_v2_protocol_.store(true, std::memory_order_relaxed);
+    protocol_version_ = ProtocolVersion::kV2;
+}
+
+bool NetworkClient::use_v2_protocol() const {
+    return true;
+}
+
 // -----------------------------------------------------------------------------
 // IO 线程管理
 // -----------------------------------------------------------------------------
@@ -352,6 +366,7 @@ void NetworkClient::do_connect(const asio::ip::tcp::resolver::results_type& endp
                 last_error_ = ErrorCode::SUCCESS;
                 last_heartbeat_time_ = get_timestamp_ms();
                 protocol_version_ = ProtocolVersion::kV2;
+                use_v2_protocol_.store(true, std::memory_order_relaxed);
                 send_sequence_.store(0, std::memory_order_relaxed);
                 recv_sequence_.store(0, std::memory_order_relaxed);
 
@@ -399,10 +414,16 @@ void NetworkClient::do_read_header() {
                 return;
             }
 
+            uint32_t magic = 0;
+            std::memcpy(&magic, header_buffer_.data(), sizeof(magic));
+            (void)magic;
             protocol_version_ = mir2::common::DetectProtocolVersion(header_buffer_.data());
-            const size_t header_size = protocol_version_ == ProtocolVersion::kV2
-                                           ? PacketHeaderV2::kSize
-                                           : PacketHeader::kSize;
+            if (protocol_version_ == ProtocolVersion::kV1) {
+                last_error_ = ErrorCode::INVALID_PACKET;
+                handle_disconnect(asio::error::operation_not_supported);
+                return;
+            }
+            const size_t header_size = PacketHeaderV2::kSize;
             const size_t remaining_size = header_size - sizeof(uint32_t);
             do_read_remaining_header(remaining_size);
         });
@@ -421,28 +442,17 @@ void NetworkClient::do_read_remaining_header(size_t remaining_size) {
                 return;
             }
 
-            if (protocol_version_ == ProtocolVersion::kV2) {
-                PacketHeaderV2 header{};
-                if (!PacketHeaderV2::FromBytes(header_buffer_.data(),
-                                               PacketHeaderV2::kSize,
-                                               &header) ||
-                    header.version != PacketHeaderV2::kVersion) {
-                    last_error_ = ErrorCode::INVALID_PACKET;
-                    handle_disconnect(asio::error::invalid_argument);
-                    return;
-                }
-                current_msg_id_ = header.msg_id;
-                current_payload_size_ = header.payload_size;
-            } else {
-                PacketHeader header{};
-                if (!PacketHeader::FromBytes(header_buffer_.data(), PacketHeader::kSize, &header)) {
-                    last_error_ = ErrorCode::INVALID_PACKET;
-                    handle_disconnect(asio::error::invalid_argument);
-                    return;
-                }
-                current_msg_id_ = header.msg_id;
-                current_payload_size_ = header.payload_size;
+            PacketHeaderV2 header{};
+            if (!PacketHeaderV2::FromBytes(header_buffer_.data(),
+                                           PacketHeaderV2::kSize,
+                                           &header) ||
+                header.version != PacketHeaderV2::kVersion) {
+                last_error_ = ErrorCode::INVALID_PACKET;
+                handle_disconnect(asio::error::invalid_argument);
+                return;
             }
+            current_msg_id_ = header.msg_id;
+            current_payload_size_ = header.payload_size;
 
             if (current_payload_size_ > MAX_PACKET_SIZE) {
                 last_error_ = ErrorCode::INVALID_PACKET;
@@ -458,29 +468,22 @@ void NetworkClient::do_read_remaining_header(size_t remaining_size) {
                 return;
             }
 
-            if (protocol_version_ == ProtocolVersion::kV2) {
-                NetworkPacket packet{};
-                uint16_t sequence = 0;
-                const auto status = mir2::common::DecodePacketV2(header_buffer_.data(),
-                                                                 PacketHeaderV2::kSize,
-                                                                 &packet,
-                                                                 &sequence);
-                if (status != mir2::common::DecodeStatus::kOk) {
-                    last_error_ = ErrorCode::INVALID_PACKET;
-                    handle_disconnect(asio::error::invalid_argument);
-                    return;
-                }
-                if (!check_recv_sequence(sequence)) {
-                    last_error_ = ErrorCode::INVALID_PACKET;
-                    handle_disconnect(asio::error::invalid_argument);
-                    return;
-                }
-                handle_packet(packet);
-                do_read_header();
+            NetworkPacket packet{};
+            uint16_t sequence = 0;
+            const auto status = mir2::common::DecodePacketV2(header_buffer_.data(),
+                                                             PacketHeaderV2::kSize,
+                                                             &packet,
+                                                             &sequence);
+            if (status != mir2::common::DecodeStatus::kOk) {
+                last_error_ = ErrorCode::INVALID_PACKET;
+                handle_disconnect(asio::error::invalid_argument);
                 return;
             }
-
-            NetworkPacket packet{current_msg_id_, {}};
+            if (!check_recv_sequence(sequence)) {
+                last_error_ = ErrorCode::INVALID_PACKET;
+                handle_disconnect(asio::error::invalid_argument);
+                return;
+            }
             handle_packet(packet);
             do_read_header();
         });
@@ -498,39 +501,32 @@ void NetworkClient::do_read_body(size_t body_length) {
     asio::async_read(*socket_, asio::buffer(read_buffer_.data(), body_length),
         [this, body_length](const asio::error_code& ec, std::size_t bytes_transferred) {
             if (!ec && bytes_transferred == body_length) {
-                if (protocol_version_ == ProtocolVersion::kV2) {
-                    std::vector<uint8_t> packet_buffer;
-                    packet_buffer.reserve(PacketHeaderV2::kSize + body_length);
-                    packet_buffer.insert(packet_buffer.end(),
-                                         header_buffer_.begin(),
-                                         header_buffer_.begin() + PacketHeaderV2::kSize);
-                    packet_buffer.insert(packet_buffer.end(),
-                                         read_buffer_.begin(),
-                                         read_buffer_.begin() + body_length);
+                std::vector<uint8_t> packet_buffer;
+                packet_buffer.reserve(PacketHeaderV2::kSize + body_length);
+                packet_buffer.insert(packet_buffer.end(),
+                                     header_buffer_.begin(),
+                                     header_buffer_.begin() + PacketHeaderV2::kSize);
+                packet_buffer.insert(packet_buffer.end(),
+                                     read_buffer_.begin(),
+                                     read_buffer_.begin() + body_length);
 
-                    NetworkPacket packet{};
-                    uint16_t sequence = 0;
-                    const auto status = mir2::common::DecodePacketV2(packet_buffer.data(),
-                                                                     packet_buffer.size(),
-                                                                     &packet,
-                                                                     &sequence);
-                    if (status != mir2::common::DecodeStatus::kOk) {
-                        last_error_ = ErrorCode::INVALID_PACKET;
-                        handle_disconnect(asio::error::invalid_argument);
-                        return;
-                    }
-                    if (!check_recv_sequence(sequence)) {
-                        last_error_ = ErrorCode::INVALID_PACKET;
-                        handle_disconnect(asio::error::invalid_argument);
-                        return;
-                    }
-                    handle_packet(packet);
-                } else {
-                    std::vector<uint8_t> payload(read_buffer_.begin(),
-                                                 read_buffer_.begin() + body_length);
-                    NetworkPacket packet{current_msg_id_, std::move(payload)};
-                    handle_packet(packet);
+                NetworkPacket packet{};
+                uint16_t sequence = 0;
+                const auto status = mir2::common::DecodePacketV2(packet_buffer.data(),
+                                                                 packet_buffer.size(),
+                                                                 &packet,
+                                                                 &sequence);
+                if (status != mir2::common::DecodeStatus::kOk) {
+                    last_error_ = ErrorCode::INVALID_PACKET;
+                    handle_disconnect(asio::error::invalid_argument);
+                    return;
                 }
+                if (!check_recv_sequence(sequence)) {
+                    last_error_ = ErrorCode::INVALID_PACKET;
+                    handle_disconnect(asio::error::invalid_argument);
+                    return;
+                }
+                handle_packet(packet);
 
                 // Continue reading
                 do_read_header();
@@ -566,7 +562,7 @@ bool NetworkClient::check_recv_sequence(uint16_t seq) {
  */
 void NetworkClient::do_write() {
     if (state_ != ConnectionState::CONNECTED || !socket_) {
-        write_in_progress_ = false;
+        write_in_progress_.store(false, std::memory_order_release);
         return;
     }
 
@@ -574,7 +570,7 @@ void NetworkClient::do_write() {
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
         if (send_queue_.empty()) {
-            write_in_progress_ = false;
+            write_in_progress_.store(false, std::memory_order_release);
             return;
         }
         data = std::move(send_queue_.front());
@@ -588,7 +584,7 @@ void NetworkClient::do_write() {
                 // Continue draining the queue (only one async_write in-flight at a time).
                 do_write();
             } else {
-                write_in_progress_ = false;
+                write_in_progress_.store(false, std::memory_order_release);
                 handle_disconnect(ec);
             }
         });
@@ -701,6 +697,9 @@ void NetworkClient::handle_packet(const NetworkPacket& packet) {
 
     {
         std::lock_guard<std::mutex> lock(receive_mutex_);
+        if (receive_queue_.size() >= MAX_RECEIVE_QUEUE_SIZE) {
+            return;
+        }
         receive_queue_.push(packet);
     }
 }
@@ -717,7 +716,7 @@ void NetworkClient::handle_disconnect(const asio::error_code& ec) {
     }
 
     state_ = ConnectionState::DISCONNECTED;
-    write_in_progress_ = false;
+    write_in_progress_.store(false, std::memory_order_release);
 
     // Drop queued messages to avoid sending stale frames after reconnect.
     {

@@ -3,8 +3,8 @@
  * @brief Map event definitions
  */
 
-#ifndef LEGEND2_SERVER_ECS_EVENTS_MAP_EVENTS_H
-#define LEGEND2_SERVER_ECS_EVENTS_MAP_EVENTS_H
+#ifndef MIR2_SERVER_ECS_EVENTS_MAP_EVENTS_H_
+#define MIR2_SERVER_ECS_EVENTS_MAP_EVENTS_H_
 
 #include <entt/entt.hpp>
 
@@ -23,6 +23,16 @@ struct MapChangeEvent {
   int32_t new_y;
 };
 
+/**
+ * @brief 传送请求事件
+ */
+struct TeleportRequestEvent {
+  entt::entity entity;
+  int32_t target_map_id;
+  int32_t target_x;
+  int32_t target_y;
+};
+
 }  // namespace mir2::ecs::events
 
-#endif  // LEGEND2_SERVER_ECS_EVENTS_MAP_EVENTS_H
+#endif  // MIR2_SERVER_ECS_EVENTS_MAP_EVENTS_H_

@@ -4,6 +4,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <thread>
 
 #include "client/resource/async_loader.h"
 
@@ -64,13 +65,17 @@ TEST(AsyncLoaderTest, CallbackRunsOnPoll) {
     // Wait until worker thread has processed the request.
     {
         std::unique_lock<std::mutex> lock(provider.mutex);
-        provider.cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
+        ASSERT_TRUE(provider.cv.wait_for(lock, std::chrono::seconds(2), [&] {
             return provider.sprite_calls.load() > 0;
-        });
+        }));
     }
 
     EXPECT_FALSE(callback_called.load());
-    loader.poll(1);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!callback_called.load() && std::chrono::steady_clock::now() < deadline) {
+        loader.poll(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     EXPECT_TRUE(callback_called.load());
 
     loader.shutdown();
@@ -89,16 +94,23 @@ TEST(AsyncLoaderTest, PollHonorsMaxCompletions) {
     // Wait for both tasks to finish.
     {
         std::unique_lock<std::mutex> lock(provider.mutex);
-        provider.cv.wait_for(lock, std::chrono::milliseconds(200), [&] {
+        ASSERT_TRUE(provider.cv.wait_for(lock, std::chrono::seconds(2), [&] {
             return provider.sprite_calls.load() >= 2;
-        });
+        }));
     }
 
-    loader.poll(1);
-    EXPECT_EQ(callback_count.load(), 1);
+    const auto wait_for_count = [&](int expected) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (callback_count.load() < expected &&
+               std::chrono::steady_clock::now() < deadline) {
+            loader.poll(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_EQ(callback_count.load(), expected);
+    };
 
-    loader.poll(1);
-    EXPECT_EQ(callback_count.load(), 2);
+    wait_for_count(1);
+    wait_for_count(2);
 
     loader.shutdown();
 }

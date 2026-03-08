@@ -3,8 +3,8 @@
  * @brief ECS世界封装
  */
 
-#ifndef MIR2_ECS_WORLD_H
-#define MIR2_ECS_WORLD_H
+#ifndef MIR2_ECS_WORLD_H_
+#define MIR2_ECS_WORLD_H_
 
 #include <entt/entt.hpp>
 
@@ -28,6 +28,8 @@ enum class SystemPriority {
     kInventory = 150,
     kCombat = 200,
     kLevelUp = 300,
+    kAttributeRecalc = 350,
+    kRecovery = 500,
 };
 
 /**
@@ -66,6 +68,7 @@ class World {
      * @brief 获取底层Registry
      */
     entt::registry& Registry() { return registry_; }
+    const entt::registry& Registry() const { return registry_; }
 
     /**
      * @brief 获取事件总线
@@ -116,4 +119,4 @@ class World {
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_WORLD_H
+#endif  // MIR2_ECS_WORLD_H_

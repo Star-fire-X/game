@@ -3,14 +3,13 @@
  * @brief 网络包编解码
  */
 
-#ifndef MIR2_NETWORK_PACKET_CODEC_H
-#define MIR2_NETWORK_PACKET_CODEC_H
+#ifndef MIR2_NETWORK_PACKET_CODEC_H_
+#define MIR2_NETWORK_PACKET_CODEC_H_
 
 #include "common/protocol/packet_codec.h"
 
 namespace mir2::network {
 
-using PacketHeader = mir2::common::PacketHeader;
 using PacketHeaderV2 = mir2::common::PacketHeaderV2;
 using Packet = mir2::common::NetworkPacket;
 using DecodeStatus = mir2::common::DecodeStatus;
@@ -22,12 +21,12 @@ using ProtocolVersion = mir2::common::ProtocolVersion;
 class PacketCodec {
  public:
   /**
-   * @brief 编码网络包
+   * @brief 编码网络包（兼容接口，等价于 V2 sequence=0）
    */
   static std::vector<uint8_t> Encode(uint16_t msg_id, const uint8_t* payload, size_t payload_size);
 
   /**
-   * @brief 解码网络包
+   * @brief 解码网络包（兼容接口，按 V2 解码）
    */
   static DecodeStatus Decode(const uint8_t* data, size_t length, Packet* out_packet);
 
@@ -52,4 +51,4 @@ class PacketCodec {
 
 }  // namespace mir2::network
 
-#endif  // MIR2_NETWORK_PACKET_CODEC_H
+#endif  // MIR2_NETWORK_PACKET_CODEC_H_

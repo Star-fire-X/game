@@ -1,47 +1,14 @@
 #include "ui/input_validation.h"
 
+#include "common/utf8_utils.h"
+
 #include <cctype>
 #include <cstdint>
 
 namespace mir2::ui::screens {
 
-namespace {
-int utf8_sequence_length(unsigned char lead) {
-    if (lead <= 0x7F) {
-        return 1;
-    }
-    if ((lead & 0xE0) == 0xC0) {
-        return 2;
-    }
-    if ((lead & 0xF0) == 0xE0) {
-        return 3;
-    }
-    if ((lead & 0xF8) == 0xF0) {
-        return 4;
-    }
-    return 0;
-}
-
-size_t utf8_length_internal(const char* text) {
-    if (!text) {
-        return 0;
-    }
-    size_t count = 0;
-    const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
-    while (*p) {
-        const int len = utf8_sequence_length(*p);
-        if (len <= 0) {
-            return 0;
-        }
-        p += len;
-        ++count;
-    }
-    return count;
-}
-} // namespace
-
 size_t utf8_length(const char* text) {
-    return utf8_length_internal(text);
+    return mir2::common::utf8_length(text);
 }
 
 bool is_valid_utf8(const char* text) {
@@ -105,6 +72,20 @@ bool is_valid_utf8(const char* text) {
         p += len;
     }
     return true;
+}
+
+bool contains_control_characters(const char* text) {
+    if (!text) {
+        return false;
+    }
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
+    while (*p) {
+        if (*p < 0x20 || *p == 0x7F) {
+            return true;
+        }
+        ++p;
+    }
+    return false;
 }
 
 ValidationResult validate_character_name(const std::string& name) {

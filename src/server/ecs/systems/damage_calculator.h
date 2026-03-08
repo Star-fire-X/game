@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_DAMAGE_CALCULATOR_H
-#define LEGEND2_SERVER_ECS_DAMAGE_CALCULATOR_H
+#ifndef MIR2_SERVER_ECS_DAMAGE_CALCULATOR_H_
+#define MIR2_SERVER_ECS_DAMAGE_CALCULATOR_H_
 
 #include "ecs/components/skill_template_component.h"
 #include "ecs/components/character_components.h"

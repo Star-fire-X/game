@@ -55,8 +55,8 @@ wil2png_all/
 # ============================================================================
 # Game assets - Audio files (DO NOT COMMIT)
 # ============================================================================
-Wav/
-MUSIC/
+/Wav/
+/MUSIC/
 # Audio file formats
 *.wav
 *.WAV
@@ -78,7 +78,7 @@ MUSIC/
 # ============================================================================
 # Game assets - Map files (DO NOT COMMIT)
 # ============================================================================
-Map/
+/Map/
 # Map file formats
 *.map
 *.MAP
@@ -91,7 +91,7 @@ Map/
 # ============================================================================
 # Game assets - Data files (DO NOT COMMIT)
 # ============================================================================
-Data/
+/Data/
 # Data file formats
 *.wil
 *.WIL
@@ -158,7 +158,7 @@ db_logs/
 world_logs/
 game_logs/
 gateway_logs/
-
+build-wsl/
 # Docker build cache
 .docker-cache/
 
@@ -171,6 +171,8 @@ docker-compose.override.yml
 
 # Codeagent and AI assistant session files
 *.jsonl
+.worktrees/
+config/runtime/
 
 # Backup files
 *.bak
@@ -187,7 +189,7 @@ tmp/
 temp/
 
 # 忽略传奇资源文件
-Data/
+/Data/
 *.wil
 *.wzl
 *.pak

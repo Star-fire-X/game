@@ -11,6 +11,11 @@
 #include <iostream>
 
 namespace mir2::render {
+
+using mir2::common::Color;
+using mir2::common::Position;
+using mir2::common::Rect;
+
 namespace {
 
 constexpr float kDefaultFrameDurationMs = 100.0f;
@@ -239,7 +244,7 @@ void EffectPlayer::play_effect(const std::string& effect_id, int x, int y,
     effect.finished = false;
 
     while (active_effects_.size() >= kMaxActiveEffects) {
-        active_effects_.erase(active_effects_.begin());
+        active_effects_.pop_front();
     }
     active_effects_.push_back(std::move(effect));
 }
@@ -484,9 +489,12 @@ std::shared_ptr<Texture> EffectPlayer::get_effect_texture(const std::string& eff
         return nullptr;
     }
 
-    const std::string cache_key = "effect:" + ref.archive + ":" +
-                                  std::to_string(frame_index);
-    return renderer_.get_sprite_texture(cache_key, *sprite_opt, true);
+    const uint16_t archive_id = ArchiveRegistry::instance().get_or_register(ref.archive);
+    if (archive_id == 0) {
+        return nullptr;
+    }
+    const TextureKey key{archive_id, static_cast<uint32_t>(frame_index), true};
+    return renderer_.get_sprite_texture(key, *sprite_opt);
 }
 
 } // namespace mir2::render

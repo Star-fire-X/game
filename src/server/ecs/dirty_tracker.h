@@ -3,8 +3,8 @@
  * @brief 角色脏标记辅助函数
  */
 
-#ifndef LEGEND2_SERVER_ECS_DIRTY_TRACKER_H
-#define LEGEND2_SERVER_ECS_DIRTY_TRACKER_H
+#ifndef MIR2_SERVER_ECS_DIRTY_TRACKER_H_
+#define MIR2_SERVER_ECS_DIRTY_TRACKER_H_
 
 #include "ecs/components/character_components.h"
 
@@ -29,34 +29,22 @@ inline void mark_state_dirty(entt::registry& registry, entt::entity entity) {
     dirty.state_dirty = true;
 }
 
-/// 兼容旧背包标记：同时标记物品/装备/技能
-inline void mark_inventory_dirty(entt::registry& registry, entt::entity entity) {
-    auto& dirty = registry.get_or_emplace<DirtyComponent>(entity);
-    dirty.inventory_dirty = true;
-    dirty.items_dirty = true;
-    dirty.equipment_dirty = true;
-    dirty.skills_dirty = true;
-}
-
-/// 标记物品脏数据，同时保持旧背包标记可用
+/// 标记物品脏数据（运行时实体物品通道）
 inline void mark_items_dirty(entt::registry& registry, entt::entity entity) {
     auto& dirty = registry.get_or_emplace<DirtyComponent>(entity);
     dirty.items_dirty = true;
-    dirty.inventory_dirty = true;
 }
 
-/// 标记装备脏数据，同时保持旧背包标记可用
+/// 标记装备脏数据（运行时实体装备通道）
 inline void mark_equipment_dirty(entt::registry& registry, entt::entity entity) {
     auto& dirty = registry.get_or_emplace<DirtyComponent>(entity);
     dirty.equipment_dirty = true;
-    dirty.inventory_dirty = true;
 }
 
-/// 标记技能脏数据，同时保持旧背包标记可用
+/// 标记技能脏数据（运行时实体技能通道）
 inline void mark_skills_dirty(entt::registry& registry, entt::entity entity) {
     auto& dirty = registry.get_or_emplace<DirtyComponent>(entity);
     dirty.skills_dirty = true;
-    dirty.inventory_dirty = true;
 }
 
 inline bool is_dirty(entt::registry& registry, entt::entity entity) {
@@ -65,7 +53,7 @@ inline bool is_dirty(entt::registry& registry, entt::entity entity) {
         return false;
     }
     return dirty->identity_dirty || dirty->attributes_dirty ||
-           dirty->state_dirty || dirty->inventory_dirty ||
+           dirty->state_dirty ||
            dirty->items_dirty || dirty->equipment_dirty ||
            dirty->skills_dirty;
 }
@@ -80,4 +68,4 @@ inline void clear_dirty(entt::registry& registry, entt::entity entity) {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_DIRTY_TRACKER_H
+#endif  // MIR2_SERVER_ECS_DIRTY_TRACKER_H_

@@ -8,6 +8,7 @@
 #include "client/handlers/movement_handler.h"
 #include "common/enums.h"
 #include "common/protocol/message_codec.h"
+#include "combat_generated.h"
 #include "game_generated.h"
 
 namespace {
@@ -240,4 +241,147 @@ TEST(MovementHandler, EntityMoveInvalidPayloadReportsParseError) {
 
     EXPECT_EQ(parse_calls, 1);
     EXPECT_EQ(captured_error, "Invalid entity move payload");
+}
+
+TEST(MovementHandler, ChangeMapTriggersCallback) {
+    int called = 0;
+    uint32_t captured_map_id = 0;
+    int captured_x = 0;
+    int captured_y = 0;
+
+    MovementHandler::Callbacks callbacks;
+    callbacks.on_change_map = [&](uint32_t map_id, int x, int y) {
+        captured_map_id = map_id;
+        captured_x = x;
+        captured_y = y;
+        ++called;
+    };
+
+    MovementHandler handler(callbacks);
+
+    flatbuffers::FlatBufferBuilder builder;
+    const auto change_map = mir2::proto::CreateChangeMap(builder, /*map_id=*/7u, /*x=*/111, /*y=*/222);
+    builder.Finish(change_map);
+
+    handler.HandleChangeMap(MakePacket(MsgId::kChangeMap, BuildPayload(builder)));
+
+    EXPECT_EQ(called, 1);
+    EXPECT_EQ(captured_map_id, 7u);
+    EXPECT_EQ(captured_x, 111);
+    EXPECT_EQ(captured_y, 222);
+}
+
+TEST(MovementHandler, TeleportTriggersCallback) {
+    int called = 0;
+    uint32_t captured_map_id = 0;
+    int captured_x = 0;
+    int captured_y = 0;
+
+    MovementHandler::Callbacks callbacks;
+    callbacks.on_teleport = [&](uint32_t map_id, int x, int y) {
+        captured_map_id = map_id;
+        captured_x = x;
+        captured_y = y;
+        ++called;
+    };
+
+    MovementHandler handler(callbacks);
+
+    flatbuffers::FlatBufferBuilder builder;
+    const auto teleport = mir2::proto::CreateTeleport(builder, /*map_id=*/3u, /*x=*/12, /*y=*/34);
+    builder.Finish(teleport);
+
+    handler.HandleTeleport(MakePacket(MsgId::kTeleport, BuildPayload(builder)));
+
+    EXPECT_EQ(called, 1);
+    EXPECT_EQ(captured_map_id, 3u);
+    EXPECT_EQ(captured_x, 12);
+    EXPECT_EQ(captured_y, 34);
+}
+
+TEST(MovementHandler, RespawnTriggersCallback) {
+    int called = 0;
+    mir2::game::events::RespawnEvent captured{};
+
+    MovementHandler::Callbacks callbacks;
+    callbacks.on_respawn = [&](const mir2::game::events::RespawnEvent& event) {
+        captured = event;
+        ++called;
+    };
+
+    MovementHandler handler(callbacks);
+
+    flatbuffers::FlatBufferBuilder builder;
+    const auto respawn = mir2::proto::CreateRespawn(builder,
+                                                    /*entity_id=*/123u,
+                                                    mir2::proto::EntityType::PLAYER,
+                                                    /*x=*/10,
+                                                    /*y=*/20,
+                                                    /*hp=*/88,
+                                                    /*mp=*/11);
+    builder.Finish(respawn);
+
+    handler.HandleRespawn(MakePacket(MsgId::kRespawn, BuildPayload(builder)));
+
+    EXPECT_EQ(called, 1);
+    EXPECT_EQ(captured.entity_id, 123u);
+    EXPECT_EQ(captured.entity_type, mir2::proto::EntityType::PLAYER);
+    EXPECT_EQ(captured.x, 10);
+    EXPECT_EQ(captured.y, 20);
+    EXPECT_EQ(captured.hp, 88);
+    EXPECT_EQ(captured.mp, 11);
+}
+
+TEST(MovementHandler, StateSyncTriggersCallback) {
+    int called = 0;
+    mir2::game::events::StateSyncEvent captured{};
+
+    MovementHandler::Callbacks callbacks;
+    callbacks.on_state_sync = [&](const mir2::game::events::StateSyncEvent& event) {
+        captured = event;
+        ++called;
+    };
+
+    MovementHandler handler(callbacks);
+
+    flatbuffers::FlatBufferBuilder builder;
+    auto player_name = builder.CreateString("tester");
+    auto player = mir2::proto::CreatePlayerInfo(builder,
+                                                 /*id=*/1001u,
+                                                 player_name,
+                                                 mir2::proto::Profession::WARRIOR,
+                                                 /*level=*/20,
+                                                 /*hp=*/180,
+                                                 /*max_hp=*/200,
+                                                 /*mp=*/66,
+                                                 /*max_mp=*/80,
+                                                 /*map_id=*/2u,
+                                                 /*x=*/90,
+                                                 /*y=*/91,
+                                                 /*gold=*/999u);
+    std::vector<flatbuffers::Offset<mir2::proto::EntitySnapshot>> entities;
+    entities.push_back(mir2::proto::CreateEntitySnapshot(builder,
+                                                         /*entity_id=*/2002u,
+                                                         mir2::proto::EntityType::PLAYER,
+                                                         /*x=*/95,
+                                                         /*y=*/96,
+                                                         /*direction=*/3,
+                                                         /*hp=*/120,
+                                                         /*max_hp=*/150,
+                                                         /*mp=*/45,
+                                                         /*max_mp=*/70));
+    auto entities_offset = builder.CreateVector(entities);
+    auto sync = mir2::proto::CreateStateSync(builder, player, entities_offset);
+    builder.Finish(sync);
+
+    handler.HandleStateSync(MakePacket(MsgId::kStateSync, BuildPayload(builder)));
+
+    EXPECT_EQ(called, 1);
+    EXPECT_EQ(captured.player_id, 1001u);
+    EXPECT_EQ(captured.map_id, 2u);
+    EXPECT_EQ(captured.x, 90);
+    EXPECT_EQ(captured.y, 91);
+    ASSERT_EQ(captured.entities.size(), 1u);
+    EXPECT_EQ(captured.entities[0].entity_id, 2002u);
+    EXPECT_EQ(captured.entities[0].direction, 3u);
 }

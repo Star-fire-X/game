@@ -71,7 +71,7 @@ void StorageSystem::RegisterHandlers(entt::registry& registry, EventBus& event_b
         return;
     }
 
-    event_bus.Subscribe<events::NpcOpenStorageEvent>(
+    open_storage_subscription_ = event_bus.SubscribeScoped<events::NpcOpenStorageEvent>(
         [this, &registry, &event_bus](const events::NpcOpenStorageEvent& event) {
             HandleOpenStorage(registry, event_bus, event);
         });

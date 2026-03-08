@@ -2,6 +2,122 @@
 
 这个目录包含项目中使用的各种脚本工具。
 
+## replay_dead_letters.sh
+
+重放 Storage Engine RocksDB 死信数据到 outbox 的脚本包装器（依赖 `mir2_dead_letter_replay`）。
+
+## run-storage-phase0-gate.sh
+
+执行 StorageEngine 第0阶段发布门禁测试集，覆盖：
+
+- Phase0 门禁阈值评估逻辑（`StoragePhase0GateTest.*`）
+- 健康指标可读性（`StorageEngineTest.HealthMetrics`）
+- 启动恢复基线场景（`StorageEngineTtlIsolationTest.StartupRecoveryRepairsPersistentTierWithoutScanningTtlTier`）
+- durable outbox 恢复路径（`StorageEngineDurableOutboxTest.ReplaysPendingWritesAfterRestartWhenBackendRecovers`）
+- outbox 拒绝指标（`AsyncPersistenceQueueOutboxMetricTest.RejectedCriticalCounterIncrementsWhenOutboxFull`）
+
+### 快速示例
+
+```bash
+# 默认使用 build-wsl/bin/storage_engine_focus_tests
+./scripts/run-storage-phase0-gate.sh
+
+# 指定 build 目录
+./scripts/run-storage-phase0-gate.sh build-wsl
+
+# 临时覆盖门禁筛选器
+LEGEND2_STORAGE_PHASE0_GATE_FILTER='StoragePhase0GateTest.*' \
+  ./scripts/run-storage-phase0-gate.sh
+```
+
+### 快速示例
+
+```bash
+# 干跑：按前缀 + 时间窗筛选
+./scripts/replay_dead_letters.sh -- \
+  --db-path ./data/rocksdb \
+  --config ./config/logic.yaml \
+  --prefix char: \
+  --start-ms 1700000000000 \
+  --end-ms 1700100000000 \
+  --dry-run \
+  --verbose
+
+# 实际重放（成功后默认确认删除 dead-letter）
+./scripts/replay_dead_letters.sh -- \
+  --db-path ./data/rocksdb \
+  --prefix char:
+
+# 覆盖 TTL（当运行环境无法读取 logic.yaml 时）
+./scripts/replay_dead_letters.sh -- \
+  --db-path ./data/rocksdb \
+  --ttl-seconds 604800
+```
+
+## run-gateway-logic-io4-pressure.py
+
+`io_threads=4` 网关-逻辑端到端压测脚本，重点观测：
+
+- 断连峰值（`gateway_session_unregister` 每采样增量 + `gateway_disconnect_queue_size` 峰值）
+- `udp_send` 错误指标曲线（`mir2_errors_total{reason="udp_send"}` 每采样增量）
+
+### 快速示例
+
+```bash
+# 先构建网关和逻辑
+cmake --build --preset vcpkg-wsl-debug --target mir2_gateway mir2_logic -j$(nproc)
+
+# 压测 3 分钟，采样间隔 1s
+python3 ./scripts/run-gateway-logic-io4-pressure.py \
+  --build-dir ./build-wsl \
+  --duration-sec 180 \
+  --udp-inject-duration-sec 60 \
+  --sample-interval-sec 1 \
+  --gateway-io-threads 4 \
+  --logic-io-threads 4 \
+  --workers 128 \
+  --burst-per-connection 8 \
+  --gateway-login-rate-limit-capacity 200000 \
+  --gateway-login-rate-limit-refill-rate 200000 \
+  --logic-login-rate-limit-capacity 200000 \
+  --logic-login-rate-limit-refill-rate 200000 \
+  --logic-login-rate-limit-refill-interval-seconds 1 \
+  --gateway-udp-send-fault-inject-every-n 100
+```
+
+关键参数：
+
+- `--logic-login-rate-limit-*`：控制逻辑服用户名登录限流，避免压测被登录限流主导。
+- `--gateway-udp-send-fault-inject-every-n`：每 N 次 UDP 发送注入一次 `udp_send` 错误（`0` 关闭），用于打出指标曲线。
+
+### 输出结果
+
+默认输出到 `artifacts/pressure/gateway_logic_io4_<timestamp>/`：
+
+- `summary.txt`: 峰值与计数汇总
+- `metrics_curve.csv`: 时序原始数据
+- `disconnect_delta_curve.txt`: 断连增量 ASCII 曲线
+- `udp_send_delta_curve.txt`: `udp_send` 错误增量 ASCII 曲线
+- `gateway.stdout.log` / `logic.stdout.log`: 进程日志
+
+## profile-registry-updateall.sh
+
+在生产/压测运行期间对 `RegistryManager::UpdateAll()` 相关热点做诊断采样：
+
+- 拉取 logic metrics：`logic_tick_duration_ms`、`logic_tick_phase_ecs_registry_update_ms`、`logic_tick_phase_ecs_world_systems_ms`
+- 可选对 logic 进程执行 `perf record`，输出 `perf report --stdio`
+- 生成 `profiling_summary.txt`（含 p95 与 `registry_update_share_of_tick_p95_percent`）
+
+### 快速示例
+
+```bash
+./scripts/profile-registry-updateall.sh \
+  --logic-pid 12345 \
+  --metrics-url http://127.0.0.1:9091/metrics \
+  --duration-sec 180 \
+  --sample-interval-sec 1
+```
+
 ## wait-for-it.sh
 
 等待 TCP 主机:端口变为可用的脚本，主要用于 Docker 容器启动时等待依赖服务就绪。

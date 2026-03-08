@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 
 #include "common/enums.h"
-#include "server/combat/combat_core.h"
+#include "server/ecs/systems/combat_core.h"
 
 namespace {
 
-TEST(DamageCalculatorTest, MissRollReturnsMiss) {
+TEST(CombatCoreDamageCalculatorTest, MissRollReturnsMiss) {
     legend2::CombatConfig config;
     legend2::combat::DamageInput input{10, 0, 0.0f, 1.0f};
     legend2::combat::DamageRolls rolls;
@@ -17,7 +17,7 @@ TEST(DamageCalculatorTest, MissRollReturnsMiss) {
     EXPECT_EQ(result.final_damage, 0);
 }
 
-TEST(DamageCalculatorTest, CriticalHitAppliesMultiplier) {
+TEST(CombatCoreDamageCalculatorTest, CriticalHitAppliesMultiplier) {
     legend2::CombatConfig config;
     config.critical_multiplier = 2.0f;
 
@@ -33,7 +33,7 @@ TEST(DamageCalculatorTest, CriticalHitAppliesMultiplier) {
     EXPECT_EQ(result.final_damage, 16);
 }
 
-TEST(DamageCalculatorTest, VarianceIsAppliedWithinRange) {
+TEST(CombatCoreDamageCalculatorTest, VarianceIsAppliedWithinRange) {
     legend2::CombatConfig config;
     config.min_variance_percent = -10;
     config.max_variance_percent = 10;
@@ -50,7 +50,7 @@ TEST(DamageCalculatorTest, VarianceIsAppliedWithinRange) {
     EXPECT_EQ(result.final_damage, 95);
 }
 
-TEST(DamageCalculatorTest, MinimumDamageApplied) {
+TEST(CombatCoreDamageCalculatorTest, MinimumDamageApplied) {
     legend2::CombatConfig config;
     config.minimum_damage = 1;
 
@@ -65,7 +65,7 @@ TEST(DamageCalculatorTest, MinimumDamageApplied) {
     EXPECT_EQ(result.final_damage, 1);
 }
 
-TEST(DamageCalculatorTest, ChanceValuesAreClamped) {
+TEST(CombatCoreDamageCalculatorTest, ChanceValuesAreClamped) {
     legend2::CombatConfig config;
 
     legend2::combat::DamageInput input{10, 0, 2.0f, -1.0f};
@@ -184,6 +184,30 @@ TEST(AttackTypeModifierTest, WideHitIsAoeWithRadius1) {
 TEST(AttackTypeModifierTest, FireHitHasFireDamageBonus) {
     auto modifier = legend2::combat::get_attack_modifier(mir2::common::AttackType::kFireHit);
     EXPECT_EQ(modifier.fire_damage_bonus, 20);
+}
+
+TEST(SkillAttackTypeMappingTest, KnownWarriorSkillIdsMapCorrectly) {
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(3),
+              mir2::common::AttackType::kHeavyHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(4),
+              mir2::common::AttackType::kLongHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(7),
+              mir2::common::AttackType::kWideHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(12),
+              mir2::common::AttackType::kFireHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(25),
+              mir2::common::AttackType::kTwnHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(26),
+              mir2::common::AttackType::kPowerHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(27),
+              mir2::common::AttackType::kLongHit);
+}
+
+TEST(SkillAttackTypeMappingTest, UnknownSkillFallsBackToHit) {
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(0),
+              mir2::common::AttackType::kHit);
+    EXPECT_EQ(legend2::combat::get_attack_type_for_skill(99999),
+              mir2::common::AttackType::kHit);
 }
 
 // ============================================================================

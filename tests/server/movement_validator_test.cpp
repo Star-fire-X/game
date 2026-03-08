@@ -3,7 +3,7 @@
  * @brief MovementValidator 单元测试
  */
 
-#include "handlers/movement/movement_validator.h"
+#include "logic/handlers/movement/movement_validator.h"
 
 #include <gtest/gtest.h>
 
@@ -51,14 +51,17 @@ mir2::game::map::MapTileData BuildTileData(
   return data;
 }
 
-legend2::handlers::MovementValidator MakeValidator(
+mir2::logic::MovementValidator MakeValidator(
     const mir2::game::map::MapInstance& map,
     int max_steps = 20,
-    float speed_tolerance = 1.2f) {
-  legend2::handlers::MovementValidator::Config config;
+    float speed_tolerance = 1.2f,
+    mir2::logic::MovementValidator::Config::DistanceMetric metric =
+        mir2::logic::MovementValidator::Config::DistanceMetric::kEuclidean) {
+  mir2::logic::MovementValidator::Config config;
   config.max_steps = max_steps;
   config.speed_tolerance = speed_tolerance;
-  return legend2::handlers::MovementValidator(map, config);
+  config.distance_metric = metric;
+  return mir2::logic::MovementValidator(map, config);
 }
 
 }  // namespace
@@ -133,6 +136,48 @@ TEST(MovementValidatorTest, SpeedViolationReturnsError) {
   EXPECT_EQ(code, mir2::common::ErrorCode::kSpeedViolation);
 }
 
+TEST(MovementValidatorTest, ChebyshevMetricAllowsDiagonalAtGridSpeed) {
+  mir2::game::map::MapInstance map(
+      70, 20, 20, mir2::game::map::AOIManager::kDefaultGridSize,
+      BuildWalkability(20, 20, {}));
+  auto validator = MakeValidator(
+      map,
+      50,
+      1.0f,
+      mir2::logic::MovementValidator::Config::DistanceMetric::kChebyshev);
+
+  const auto code = validator.Validate({1, 1}, {2, 2}, 1, 1000, 2000);
+  EXPECT_EQ(code, mir2::common::ErrorCode::kOk);
+}
+
+TEST(MovementValidatorTest, ManhattanMetricRejectsFastDiagonal) {
+  mir2::game::map::MapInstance map(
+      71, 20, 20, mir2::game::map::AOIManager::kDefaultGridSize,
+      BuildWalkability(20, 20, {}));
+  auto validator = MakeValidator(
+      map,
+      50,
+      1.0f,
+      mir2::logic::MovementValidator::Config::DistanceMetric::kManhattan);
+
+  const auto code = validator.Validate({1, 1}, {2, 2}, 1, 1000, 2000);
+  EXPECT_EQ(code, mir2::common::ErrorCode::kSpeedViolation);
+}
+
+TEST(MovementValidatorTest, StepBasedMetricMatchesChebyshevDistance) {
+  mir2::game::map::MapInstance map(
+      72, 20, 20, mir2::game::map::AOIManager::kDefaultGridSize,
+      BuildWalkability(20, 20, {}));
+  auto validator = MakeValidator(
+      map,
+      50,
+      1.0f,
+      mir2::logic::MovementValidator::Config::DistanceMetric::kStepBased);
+
+  const auto code = validator.Validate({1, 1}, {2, 2}, 1, 1000, 2000);
+  EXPECT_EQ(code, mir2::common::ErrorCode::kOk);
+}
+
 TEST(MovementValidatorTest, InvalidTimeDeltaIsSpeedViolation) {
   mir2::game::map::MapInstance map(
       8, 10, 10, mir2::game::map::AOIManager::kDefaultGridSize,
@@ -144,7 +189,7 @@ TEST(MovementValidatorTest, InvalidTimeDeltaIsSpeedViolation) {
 }
 
 TEST(MovementValidatorTest, TracePathMatchesBresenham) {
-  const auto path = legend2::handlers::MovementValidator::TracePath({0, 0}, {3, 2});
+  const auto path = mir2::logic::MovementValidator::TracePath({0, 0}, {3, 2});
   std::vector<mir2::common::Position> expected = {{0, 0}, {1, 1}, {2, 1}, {3, 2}};
   EXPECT_EQ(path, expected);
 }
@@ -178,8 +223,8 @@ TEST(MovementValidatorTest, ValidateFlyUsesTileDataFlag) {
       10, 2, 2, mir2::game::map::AOIManager::kDefaultGridSize,
       {}, std::move(tile_data));
 
-  EXPECT_TRUE(legend2::handlers::MovementValidator::ValidateFly(&map, 0, 0));
-  EXPECT_FALSE(legend2::handlers::MovementValidator::ValidateFly(&map, 1, 1));
+  EXPECT_TRUE(mir2::logic::MovementValidator::ValidateFly(&map, 0, 0));
+  EXPECT_FALSE(mir2::logic::MovementValidator::ValidateFly(&map, 1, 1));
 }
 
 TEST(MovementValidatorTest, ValidateFlyFallsBackToWalkable) {
@@ -187,8 +232,8 @@ TEST(MovementValidatorTest, ValidateFlyFallsBackToWalkable) {
       11, 3, 3, mir2::game::map::AOIManager::kDefaultGridSize,
       BuildWalkability(3, 3, {{1, 1}}));
 
-  EXPECT_TRUE(legend2::handlers::MovementValidator::ValidateFly(&map, 0, 0));
-  EXPECT_FALSE(legend2::handlers::MovementValidator::ValidateFly(&map, 1, 1));
+  EXPECT_TRUE(mir2::logic::MovementValidator::ValidateFly(&map, 0, 0));
+  EXPECT_FALSE(mir2::logic::MovementValidator::ValidateFly(&map, 1, 1));
 }
 
 TEST(MovementValidatorTest, ValidateFlyRejectsOutOfBounds) {
@@ -196,6 +241,6 @@ TEST(MovementValidatorTest, ValidateFlyRejectsOutOfBounds) {
       12, 2, 2, mir2::game::map::AOIManager::kDefaultGridSize,
       BuildWalkability(2, 2, {}));
 
-  EXPECT_FALSE(legend2::handlers::MovementValidator::ValidateFly(&map, -1, 0));
-  EXPECT_FALSE(legend2::handlers::MovementValidator::ValidateFly(&map, 0, 2));
+  EXPECT_FALSE(mir2::logic::MovementValidator::ValidateFly(&map, -1, 0));
+  EXPECT_FALSE(mir2::logic::MovementValidator::ValidateFly(&map, 0, 2));
 }

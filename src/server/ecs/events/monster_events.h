@@ -3,8 +3,8 @@
  * @brief 怪物相关事件定义
  */
 
-#ifndef MIR2_ECS_EVENTS_MONSTER_EVENTS_H
-#define MIR2_ECS_EVENTS_MONSTER_EVENTS_H
+#ifndef MIR2_ECS_EVENTS_MONSTER_EVENTS_H_
+#define MIR2_ECS_EVENTS_MONSTER_EVENTS_H_
 
 #include <entt/entt.hpp>
 #include <cstdint>
@@ -51,4 +51,4 @@ struct DynamicSpawnTriggerEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // MIR2_ECS_EVENTS_MONSTER_EVENTS_H
+#endif  // MIR2_ECS_EVENTS_MONSTER_EVENTS_H_

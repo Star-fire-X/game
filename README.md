@@ -1,149 +1,220 @@
-# Legend2 MVP
+# Legend2
 
-![Benchmark](https://github.com/your-username/my-game/actions/workflows/benchmark.yml/badge.svg)
+Modern C++20 reimplementation of the classic Legend of Mir 2 MMORPG server and client.
 
-A Legend of Mir 2 style MMORPG game implementation in C++20.
+## Architecture
 
-## Requirements
+Two-process server design: **Gateway** handles connections, **Logic** runs all game logic.
 
-- CMake 3.16+ (3.19+ for presets)
-- C++20 compatible compiler
-- vcpkg (recommended for dependency management)
-- flatc on PATH when building schemas
-
-### Dependencies (from vcpkg.json)
-
-Client:
-- SDL2
-- SDL2_image
-- SDL2_ttf
-- SDL2_mixer
-
-Shared/server:
-- asio (standalone, header-only)
-- flatbuffers
-- entt
-- spdlog
-- yaml-cpp
-- nlohmann-json
-- sqlite3
-- libpqxx
-- hiredis
-
-## Building with vcpkg (Recommended)
-
-### 1. Install vcpkg
-
-```bash
-# Clone vcpkg
-git clone https://github.com/microsoft/vcpkg.git
-cd vcpkg
-
-# Bootstrap (Windows)
-.\bootstrap-vcpkg.bat
-
-# Bootstrap (Linux/macOS)
-./bootstrap-vcpkg.sh
-
-# Set environment variable
-# Windows (PowerShell)
-$env:VCPKG_ROOT = "C:\path\to\vcpkg"
-
-# Linux/macOS
-export VCPKG_ROOT=/path/to/vcpkg
+```
+Client ──TCP/KCP──> mir2_gateway ──TCP──> mir2_logic
+                    (connections)         (game logic)
 ```
 
-### 2. Configure and build with presets
+| Binary | Role |
+|--------|------|
+| `mir2_gateway` | Client connection management, TCP/KCP dual-channel, message routing, reconnection buffering |
+| `mir2_logic` | ECS-based game logic, coroutine message processing, scene management, storage engine |
+| `legend2_client` | SDL2 game client (optional) |
+
+## Tech Stack
+
+| Category | Technology |
+|----------|-----------|
+| Language | C++20 |
+| Build | CMake 3.25+, vcpkg (manifest mode) |
+| Networking | Asio (standalone) + KCP dual-channel |
+| Serialization | FlatBuffers |
+| ECS | EnTT |
+| Parallelism | Intel TBB |
+| Logging | spdlog |
+| Crash Reporting | breakpad |
+| Encryption | OpenSSL |
+| Storage | L1 Memory -> L2 RocksDB -> L3 PostgreSQL |
+| Database | PostgreSQL (libpqxx), Redis (hiredis) -- optional |
+| Scripting | LuaJIT + sol2 -- optional |
+| Compression | LZ4 |
+| Client | SDL2, SDL2_image, SDL2_ttf, SDL2_mixer -- optional |
+| Testing | GoogleTest, RapidCheck |
+
+## Quick Start
+
+### Prerequisites
+
+- GCC 13.3+ or Clang 16+ (C++20 support)
+- CMake 3.25+
+- vcpkg (latest)
+
+### Build
 
 ```bash
-# Configure (uses vcpkg toolchain automatically)
-cmake --preset vcpkg-debug
+# Dependencies install automatically via vcpkg manifest mode
 
-# Build
+# WSL (recommended)
+cmake --preset vcpkg-wsl-debug
+cmake --build --preset vcpkg-wsl-debug -j$(nproc)
+
+# Linux
+cmake --preset vcpkg-linux-debug
+cmake --build --preset vcpkg-linux-debug -j$(nproc)
+
+# Windows
+cmake --preset vcpkg-debug
 cmake --build --preset vcpkg-debug
 ```
 
-Optional release build:
+### Run
 
 ```bash
-cmake --preset vcpkg-release
-cmake --build --preset vcpkg-release
+# Start both processes
+./build-wsl/bin/mir2_gateway    # TCP 7000, UDP 7001
+./build-wsl/bin/mir2_logic      # TCP 8002
+
+# With custom config
+./build-wsl/bin/mir2_gateway --config config/gateway.yaml
+./build-wsl/bin/mir2_logic --config config/logic.yaml
 ```
 
-Build output lands in `build/<preset>/bin`. Client assets from `Data/`, `Map/`, `Wav/`, and `MUSIC/` are copied into the same bin directory by CMake.
-
-## Building without vcpkg
+### Test
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cmake --build --preset vcpkg-wsl-debug --target legend2_tests -j$(nproc)
+ctest --test-dir build-wsl --output-on-failure
+
+# Filter by module
+ctest --test-dir build-wsl -R "gateway_|combat_|ecs_|guild_"
 ```
 
-Make sure dependencies are installed in your environment and visible via `CMAKE_PREFIX_PATH` or module-specific hints like `ASIO_INCLUDE_DIR`.
+## CMake Options
 
-### Build Options
-
-- `BUILD_TESTS` - Build tests (default: ON)
-- `BUILD_SERVER` - Build server binaries (default: ON)
-- `BUILD_TOOLS` - Build tools (default: ON)
-- `BUILD_BENCHMARKS` - Build benchmarks (default: OFF)
-- `ASIO_INCLUDE_DIR` - Path to Asio headers if not in system path
+| Option | Default | Description |
+|--------|---------|-------------|
+| `BUILD_SERVER` | ON | Build server binaries |
+| `BUILD_CLIENT` | auto | Build SDL2 client |
+| `BUILD_TESTS` | ON | Build test suite |
+| `BUILD_BENCHMARKS` | OFF | Build performance benchmarks |
+| `BUILD_DB` | ON | Database support (libpqxx + hiredis) |
+| `BUILD_LUA_SUPPORT` | auto | Lua scripting (LuaJIT + sol2) |
+| `LEGEND2_ENABLE_PROMETHEUS` | OFF | Prometheus metrics |
+| `LEGEND2_ALLOW_FETCHCONTENT` | OFF | Auto-download missing deps |
 
 ## Project Structure
 
 ```
+mir2-cpp/
 ├── src/
-│   ├── client/     # Game client
-│   ├── server/     # Game server
-│   └── common/     # Shared code
-├── tests/          # Unit and property tests
-├── Data/           # Game resources (WIL/WIX)
-├── Map/            # Map files
-├── Wav/            # Sound effects
-└── MUSIC/          # Background music
+│   ├── common/              # Shared code (client + server)
+│   │   ├── protocol/        #   Packet / message codecs
+│   │   ├── network/         #   Channel router, KCP config, fallback
+│   │   └── types/           #   Types, constants, error codes
+│   │
+│   ├── server/
+│   │   ├── apps/            #   Entry points (gateway_main, logic_main)
+│   │   ├── gateway/         #   Gateway server (connection mgmt, routing, reconnect buffer)
+│   │   ├── logic/           #   Logic server
+│   │   │   ├── handlers/    #     Message handlers (login, character, chat, item,
+│   │   │   │                #       guild, movement, npc, attack, skill, effect)
+│   │   │   ├── services/    #     Business services (combat, inventory, login, merchant)
+│   │   │   └── events/      #     MPSC hot event pipeline
+│   │   ├── ecs/             #   ECS framework (EnTT)
+│   │   │   ├── components/  #     20 components (character, combat, equipment, item, ...)
+│   │   │   ├── systems/     #     27 systems (combat, inventory, skill, movement, ...)
+│   │   │   └── events/      #     13 event types (combat, skill, map, guild, ...)
+│   │   ├── game/            #   Game logic
+│   │   │   ├── map/         #     Map system (loading, AOI, teleport, portals, events)
+│   │   │   ├── entity/      #     Monster & boss management
+│   │   │   ├── npc/         #     NPC system (interaction, scripting, shops)
+│   │   │   ├── chat/        #     Chat service
+│   │   │   ├── guild/       #     Guild manager
+│   │   │   ├── item/        #     Item effects
+│   │   │   └── event/       #     Timed & global events
+│   │   ├── network/         #   Network layer (TCP + KCP dual-channel)
+│   │   ├── storage_engine/  #   Unified storage (L1 Memory, L2 RocksDB, L3 PostgreSQL)
+│   │   │   ├── backends/    #     DB backends (PostgreSQL, Redis, repository)
+│   │   │   └── persistence/ #     Async persistence queue
+│   │   ├── config/          #   Config loading (map, skill)
+│   │   ├── core/            #   Utilities (timer, singleton, lock-free queues)
+│   │   ├── monitor/         #   Prometheus metrics (optional)
+│   │   └── security/        #   Anti-cheat, rate limiting
+│   │
+│   └── client/              # SDL2 client (optional)
+│       ├── game/            #   Game client logic, map, monsters, skills
+│       ├── network/         #   TCP + KCP dual-channel client
+│       ├── render/          #   Renderer, sprite batch, effects
+│       ├── scene/           #   Scene manager
+│       ├── ui/              #   Login, skill bar, NPC dialog, state machine
+│       ├── handlers/        #   Network message handlers
+│       ├── resource/        #   Resource & async loader
+│       └── audio/           #   Audio engine
+│
+├── schemas/                 # FlatBuffers protocol definitions (10 .fbs files)
+├── config/                  # Server config (gateway, logic, game, combat, maps, ...)
+├── tests/                   # Unit & integration tests (~179 files)
+├── benchmarks/              # Performance benchmarks
+├── migrations/              # PostgreSQL migration scripts (11 files)
+├── scripts/                 # Build, deploy, test scripts
+└── docs/                    # Documentation
 ```
 
-## Running
+## Architecture Details
 
-After building:
+### ECS (Entity-Component-System)
 
-```bash
-# vcpkg preset (Debug)
-build/vcpkg-debug/bin/mir2_gateway
-build/vcpkg-debug/bin/mir2_world
-build/vcpkg-debug/bin/mir2_db
-build/vcpkg-debug/bin/mir2_game
-build/vcpkg-debug/bin/legend2_client
+The server uses EnTT-based ECS architecture:
 
-# Manual build
-build/bin/mir2_gateway
-build/bin/mir2_world
-build/bin/mir2_db
-build/bin/mir2_game
-build/bin/legend2_client
+- **RegistryManager**: Manages multiple `World` instances, one per game map
+- **World**: Contains an ECS registry with its own system bundle
+- **Components**: Pure data structs (character, combat, equipment, inventory, skills, effects, etc.)
+- **Systems**: Logic processors (combat, movement, skill execution, monster AI, guild, trade, etc.)
+- All ECS operations run single-threaded in the Logic server tick loop
+
+### Networking
+
+- **Client <-> Gateway**: TCP + KCP dual-channel (upgradeable/degradable at runtime)
+- **Gateway <-> Logic**: TCP internal connection
+- **Serialization**: FlatBuffers binary protocol with zero-copy deserialization
+- **Message routing**: Configured in `config/gateway.yaml` with per-message auth requirements
+
+### Storage Engine
+
+Three-tier storage with automatic data flow:
+
+```
+L1 Memory Cache  ->  L2 RocksDB  ->  L3 PostgreSQL
+   (hot data)        (warm data)      (cold/persistent)
 ```
 
-## Tests
+- `AsyncPersistenceQueue` for non-blocking writes
+- `CircuitBreaker` for backend fault tolerance
+- `GlobalHybridClock` for distributed timestamp ordering
+
+### Coroutine-Based Message Processing
+
+The Logic server uses C++20 coroutines for message handling:
+
+- `CoroutineExecutor` schedules handler coroutines
+- `HotEventPipeline` (MPSC lock-free queue) bridges IO threads to the Logic thread
+- Each handler is a coroutine that can await async operations
+
+## Environment Configuration
+
+Copy `.env.example` to `.env` and customize. Key settings:
+
+- `POSTGRES_HOST/PORT/USER/PASSWORD` -- PostgreSQL connection
+- `REDIS_HOST/PORT` -- Redis cache
+- `GATEWAY_PORT` (7000) -- Client-facing TCP port
+- `GATEWAY_BIND_IP` -- Listen address
+
+## Database
+
+PostgreSQL is used for persistent storage. Initialize with migration scripts:
 
 ```bash
-ctest --test-dir build/vcpkg-debug --output-on-failure
-```
-
-## Performance Benchmarks
-
-Performance targets:
-- Damage calculation: < 100 ns
-- Range check: < 50 ns
-
-Run benchmarks with vcpkg presets:
-
-```bash
-cmake --preset vcpkg-benchmark
-cmake --build --preset vcpkg-benchmark --target combat_core_benchmark
-build/vcpkg-benchmark/bin/Release/combat_core_benchmark --benchmark_format=json --benchmark_out=benchmark_results.json --benchmark_min_time=1s
-python scripts/check_benchmark.py benchmark_results.json
+# Apply migrations in order
+psql -U mir2 -d mir2_game -f migrations/001_create_accounts.sql
+# ... through 011_create_kv_store.sql
 ```
 
 ## License
 
-Private project - All rights reserved.
+MIT License

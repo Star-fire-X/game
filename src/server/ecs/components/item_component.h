@@ -6,8 +6,8 @@
  * and a bag slot. Static/template data lives in tables referenced by item_id.
  */
 
-#ifndef LEGEND2_SERVER_ECS_ITEM_COMPONENT_H
-#define LEGEND2_SERVER_ECS_ITEM_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_ITEM_COMPONENT_H_
+#define MIR2_SERVER_ECS_ITEM_COMPONENT_H_
 
 #include <cstdint>
 
@@ -28,6 +28,8 @@ struct ItemComponent {
     int durability = 0;          ///< Current durability (0..max_durability).
     int max_durability = 0;      ///< Maximum durability for this instance.
     int shape = 0;               ///< Item shape code (used for amulet type checks).
+    int looks = 0;               ///< Item appearance override (dice/lucky items).
+    int std_mode = 0;            ///< Item type code (StdMode from mir2 protocol).
     int enhancement_level = 0;   ///< Enhancement/refine level (+1, +2, ...).
     int luck = 0;                ///< Luck/curse value (may be negative).
     int equip_slot = -1;         ///< Equip slot index (mir2::common::EquipSlot), -1 means not equippable.
@@ -63,4 +65,4 @@ struct InventoryOwnerComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_ITEM_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_ITEM_COMPONENT_H_

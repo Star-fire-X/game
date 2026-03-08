@@ -1,11 +1,15 @@
-#ifndef LEGEND2_SERVER_ECS_SKILL_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SKILL_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SKILL_SYSTEM_H_
+#define MIR2_SERVER_ECS_SKILL_SYSTEM_H_
 
 #include "ecs/systems/skill_result.h"
 #include "ecs/skill_registry.h"
 #include "common/types.h"
 
 #include <entt/entt.hpp>
+
+namespace mir2::game::map {
+class MapContextService;
+}  // namespace mir2::game::map
 
 namespace mir2::ecs {
 
@@ -14,10 +18,14 @@ class EffectBroadcaster;
 
 class SkillSystem {
 public:
-    explicit SkillSystem(entt::registry& registry);
+    explicit SkillSystem(entt::registry& registry,
+                         mir2::game::map::MapContextService* map_context_service = nullptr,
+                         bool allow_registry_ctx_fallback = true);
 
     void set_event_bus(EventBus* event_bus);
     void set_effect_broadcaster(EffectBroadcaster* broadcaster);
+    void set_map_context_service(
+        mir2::game::map::MapContextService* map_context_service);
 
     // Learn skill
     mir2::common::ErrorCode learn_skill(entt::entity entity, uint32_t skill_id);
@@ -47,6 +55,8 @@ private:
     int64_t current_time_ms_ = 0;
     EventBus* event_bus_ = nullptr;
     EffectBroadcaster* effect_broadcaster_ = nullptr;
+    mir2::game::map::MapContextService* map_context_service_ = nullptr;
+    bool allow_registry_ctx_fallback_ = true;
 
     mir2::common::ErrorCode validate_cast(entt::entity caster, const SkillTemplate& skill) const;
     void apply_skill_effect(entt::entity caster, entt::entity target,

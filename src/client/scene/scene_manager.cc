@@ -1,7 +1,7 @@
 #include "scene/scene_manager.h"
 
+#include <cassert>
 #include <iostream>
-#include <stdexcept>
 #include <utility>
 
 namespace mir2::scene {
@@ -20,14 +20,10 @@ void SceneStateMachine::set_state(SceneState new_state) {
 
     auto new_state_it = state_configs_.find(new_state);
     if (new_state_it == state_configs_.end()) {
-#ifndef NDEBUG
-        throw std::runtime_error(
-            std::string("Unregistered state: ") + scene_state_to_string(new_state));
-#else
-        std::cerr << "Warning: Unregistered state: " << scene_state_to_string(new_state)
+        std::cerr << "Error: Unregistered state: " << scene_state_to_string(new_state)
                   << std::endl;
-        return;
-#endif
+        assert(false && "Unregistered state transition");
+        return;  // Release 模式下安全返回，不崩溃
     }
 
     auto old_state_it = state_configs_.find(current_state_);

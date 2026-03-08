@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_COMPONENTS_SKILL_TEMPLATE_COMPONENT_H
-#define LEGEND2_SERVER_ECS_COMPONENTS_SKILL_TEMPLATE_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_COMPONENTS_SKILL_TEMPLATE_COMPONENT_H_
+#define MIR2_SERVER_ECS_COMPONENTS_SKILL_TEMPLATE_COMPONENT_H_
 
 #include <array>
 #include <cstdint>
@@ -33,6 +33,8 @@ struct SkillTemplate {
     mir2::common::SkillType skill_type = mir2::common::SkillType::PHYSICAL;
     /** @brief 目标类型 */
     mir2::common::SkillTarget target_type = mir2::common::SkillTarget::SELF;
+    /** @brief 是否通用技能（所有职业可学） */
+    bool is_universal = false;
     /** @brief 是否被动技能 */
     bool is_passive = false;
     /** @brief 魔法消耗 */
@@ -85,4 +87,4 @@ struct SkillTemplate {
 
 } // namespace mir2::ecs
 
-#endif // LEGEND2_SERVER_ECS_COMPONENTS_SKILL_TEMPLATE_COMPONENT_H
+#endif // MIR2_SERVER_ECS_COMPONENTS_SKILL_TEMPLATE_COMPONENT_H_

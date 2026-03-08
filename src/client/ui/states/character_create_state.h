@@ -2,13 +2,13 @@
 #define LEGEND2_CHARACTER_CREATE_STATE_H
 
 #include "ui/states/login_state_interface.h"
-#include "ui/login_screen.h"
+#include "ui/states/login_state_context.h"
 
 namespace mir2::ui::screens {
 
 class CharacterCreateState : public ILoginState {
 public:
-    explicit CharacterCreateState(LoginStateContext& context);
+    explicit CharacterCreateState(ICharacterCreateStateContext& context);
 
     void on_enter() override;
     void on_exit() override;
@@ -18,7 +18,7 @@ public:
     LoginScreenState get_state_type() const override { return LoginScreenState::CHARACTER_CREATE; }
 
 private:
-    LoginStateContext& context_;
+    ICharacterCreateStateContext& context_;
 
     void layout();
     bool handle_key_press(SDL_Keycode key);

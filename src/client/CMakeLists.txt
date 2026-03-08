@@ -1,7 +1,12 @@
 # Legend2 Client CMakeLists.txt
 
 find_package(flatbuffers CONFIG REQUIRED)
-find_program(FLATC flatc REQUIRED)
+# Prefer vcpkg-provided flatc target when available.
+if(TARGET flatbuffers::flatc)
+    set(FLATC $<TARGET_FILE:flatbuffers::flatc>)
+else()
+    find_program(FLATC flatc REQUIRED)
+endif()
 
 set(SCHEMA_DIR ${CMAKE_SOURCE_DIR}/schemas)
 set(GENERATED_SCHEMA_DIR ${CMAKE_BINARY_DIR}/schemas_generated_client)
@@ -15,6 +20,12 @@ set(SCHEMA_FILES
     ${SCHEMA_DIR}/combat.fbs
     ${SCHEMA_DIR}/item.fbs
     ${SCHEMA_DIR}/guild.fbs
+    ${SCHEMA_DIR}/party.fbs
+    ${SCHEMA_DIR}/trade.fbs
+    ${SCHEMA_DIR}/ranking.fbs
+    ${SCHEMA_DIR}/mail.fbs
+    ${SCHEMA_DIR}/achievement.fbs
+    ${SCHEMA_DIR}/auction.fbs
     ${SCHEMA_DIR}/chat.fbs
     ${SCHEMA_DIR}/system.fbs
 )
@@ -27,6 +38,12 @@ set(GENERATED_SCHEMA_HEADERS
     ${GENERATED_SCHEMA_DIR}/combat_generated.h
     ${GENERATED_SCHEMA_DIR}/item_generated.h
     ${GENERATED_SCHEMA_DIR}/guild_generated.h
+    ${GENERATED_SCHEMA_DIR}/party_generated.h
+    ${GENERATED_SCHEMA_DIR}/trade_generated.h
+    ${GENERATED_SCHEMA_DIR}/ranking_generated.h
+    ${GENERATED_SCHEMA_DIR}/mail_generated.h
+    ${GENERATED_SCHEMA_DIR}/achievement_generated.h
+    ${GENERATED_SCHEMA_DIR}/auction_generated.h
     ${GENERATED_SCHEMA_DIR}/chat_generated.h
     ${GENERATED_SCHEMA_DIR}/system_generated.h
 )
@@ -57,13 +74,15 @@ add_executable(legend2_client
     # Render module
     render/renderer.cc
     render/renderer.h
+    render/sprite_batch.cc
+    render/sprite_batch.h
     render/camera.h
     render/texture.h
-    render/animation.cc
-    render/animation.h
     render/effect_player.cc
     render/actor_renderer.cc
     render/actor_renderer.h
+    render/ground_item_renderer.cc
+    render/ground_item_renderer.h
 
     # Audio module
     audio/audio_engine.cc
@@ -78,6 +97,9 @@ add_executable(legend2_client
     # Game module
     game/game_client.cc
     game/game_client.h
+    game/game_client_input.cc
+    game/game_client_input.h
+    game/game_client_network.h
     game/actor_data.cc
     game/client_character.h
     game/entity_manager.cc
@@ -124,6 +146,20 @@ add_executable(legend2_client
     ui/skill/cast_bar.h
     ui/skill/skill_target_indicator.cc
     ui/skill/skill_target_indicator.h
+    ui/inventory/inventory_panel.cc
+    ui/inventory/inventory_panel.h
+    ui/equipment/equipment_panel.cc
+    ui/equipment/equipment_panel.h
+    ui/hud/status_bar.cc
+    ui/hud/status_bar.h
+    ui/hud/player_info_panel.cc
+    ui/hud/player_info_panel.h
+    ui/hud/hud_container.cc
+    ui/hud/hud_container.h
+    ui/chat/chat_panel.cc
+    ui/chat/chat_panel.h
+    ui/minimap/minimap_widget.cc
+    ui/minimap/minimap_widget.h
     ui/states/login_screen_state.h
     ui/states/login_state_interface.h
     ui/states/login_state_helpers.cc
@@ -164,6 +200,24 @@ add_executable(legend2_client
     handlers/effect_handler.h
     handlers/system_handler.cpp
     handlers/system_handler.h
+    handlers/item_handler.cpp
+    handlers/item_handler.h
+    handlers/chat_handler.cpp
+    handlers/chat_handler.h
+    handlers/guild_handler.cpp
+    handlers/guild_handler.h
+    handlers/trade_handler.cpp
+    handlers/trade_handler.h
+    handlers/party_handler.cpp
+    handlers/party_handler.h
+    handlers/mail_handler.cpp
+    handlers/mail_handler.h
+    handlers/ranking_handler.cpp
+    handlers/ranking_handler.h
+    handlers/achievement_handler.cpp
+    handlers/achievement_handler.h
+    handlers/auction_handler.cpp
+    handlers/auction_handler.h
 
     # Network module
     network/message_dispatcher.cpp
@@ -172,6 +226,14 @@ add_executable(legend2_client
     network/network_manager.h
     network/network_client.cc
     network/network_client.h
+    network/dual_channel_client.cc
+    network/dual_channel_client.h
+    network/kcp_upgrade_handler.cc
+    network/kcp_upgrade_handler.h
+    network/udp_transport.cc
+    network/udp_transport.h
+    network/kcp_channel.cc
+    network/kcp_channel.h
 )
 
 add_dependencies(legend2_client legend2_client_schemas)
@@ -186,6 +248,7 @@ target_link_libraries(legend2_client PRIVATE
     legend2_common
     yaml-cpp::yaml-cpp
     flatbuffers::flatbuffers
+    spdlog::spdlog
     asio
     $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
     SDL2::SDL2

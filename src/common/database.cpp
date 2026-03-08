@@ -11,9 +11,34 @@
 
 #include "database.h"
 #include <sqlite3.h>
+#include <charconv>
 #include <sstream>
+#include <string_view>
+#include <system_error>
 
 namespace mir2::common {
+
+namespace {
+
+uint64_t ParseAccountIdTextFallback(const char* value) {
+    if (value == nullptr) {
+        return 0;
+    }
+    const std::string_view text(value);
+    if (text.empty()) {
+        return 0;
+    }
+
+    uint64_t parsed = 0;
+    const auto result =
+        std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (result.ec != std::errc() || result.ptr != text.data() + text.size()) {
+        return 0;
+    }
+    return parsed;
+}
+
+}  // namespace
 
 // =============================================================================
 // SQLiteDatabase 类实现
@@ -137,7 +162,7 @@ DbResult<void> SQLiteDatabase::create_tables() {
     const char* create_characters_sql = R"(
         CREATE TABLE IF NOT EXISTS characters (
             id INTEGER PRIMARY KEY,
-            account_id TEXT NOT NULL,
+            account_id INTEGER NOT NULL,
             name TEXT UNIQUE NOT NULL,
             char_class INTEGER NOT NULL,
             gender INTEGER NOT NULL DEFAULT 0,
@@ -306,7 +331,7 @@ DbResult<CharacterData> SQLiteDatabase::load_character_by_name(const std::string
  * 用于角色选择界面，返回该账号创建的所有角色。
  */
 DbResult<std::vector<CharacterData>> SQLiteDatabase::load_characters_by_account(
-    const std::string& account_id) 
+    uint64_t account_id) 
 {
     if (!db_) {
         return DbResult<std::vector<CharacterData>>::error(
@@ -320,7 +345,7 @@ DbResult<std::vector<CharacterData>> SQLiteDatabase::load_characters_by_account(
             ErrorCode::DATABASE_ERROR, get_error_message());
     }
     
-    sqlite3_bind_text(stmt, 1, account_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(account_id));
     
     std::vector<CharacterData> characters;
     int rc;
@@ -511,7 +536,7 @@ bool SQLiteDatabase::bind_character_data(sqlite3_stmt* stmt, const CharacterData
         sqlite3_bind_int(stmt, idx++, static_cast<int>(data.id));
     }
     
-    sqlite3_bind_text(stmt, idx++, data.account_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, idx++, static_cast<sqlite3_int64>(data.account_id));
     sqlite3_bind_text(stmt, idx++, data.name.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, idx++, static_cast<int>(data.char_class));
     sqlite3_bind_int(stmt, idx++, static_cast<int>(data.gender));
@@ -560,8 +585,13 @@ CharacterData SQLiteDatabase::read_character_row(sqlite3_stmt* stmt) {
     
     data.id = static_cast<uint32_t>(sqlite3_column_int(stmt, col++));
     
-    const char* account_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col++));
-    data.account_id = account_id ? account_id : "";
+    if (sqlite3_column_type(stmt, col) == SQLITE_TEXT) {
+        const char* account_id_text =
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt, col++));
+        data.account_id = ParseAccountIdTextFallback(account_id_text);
+    } else {
+        data.account_id = static_cast<uint64_t>(sqlite3_column_int64(stmt, col++));
+    }
     
     const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col++));
     data.name = name ? name : "";

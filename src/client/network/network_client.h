@@ -141,6 +141,10 @@ public:
     /// 启用/禁用自动重连
     void set_auto_reconnect(bool enable);
 
+    /// 设置发送侧协议版本（V1 已下线，false 会被忽略并保持 V2）
+    void set_use_v2_protocol(bool enable);
+    bool use_v2_protocol() const;
+
  private:
     // Asio components
     asio::io_context io_context_;
@@ -156,12 +160,14 @@ public:
     std::atomic<ErrorCode> last_error_{ErrorCode::SUCCESS};
     // Protocol version
     mir2::common::ProtocolVersion protocol_version_{mir2::common::ProtocolVersion::kV2};
+    std::atomic<bool> use_v2_protocol_{true};
     std::atomic<uint16_t> send_sequence_{0};
     std::atomic<uint16_t> recv_sequence_{0};
 
     // Header buffer for V2 (16 bytes)
     static constexpr size_t HEADER_BUFFER_SIZE = 16;
     std::array<uint8_t, HEADER_BUFFER_SIZE> header_buffer_{};
+    static constexpr size_t MAX_RECEIVE_QUEUE_SIZE = 1000;
      std::atomic<bool> auto_reconnect_{false};
 
      // Message queues
@@ -169,7 +175,7 @@ public:
      std::queue<NetworkPacket> receive_queue_;
      std::mutex send_mutex_;
      std::mutex receive_mutex_;
-    bool write_in_progress_ = false;
+    std::atomic<bool> write_in_progress_{false};
 
      // Callbacks
      std::function<void(const NetworkPacket&)> on_message_;

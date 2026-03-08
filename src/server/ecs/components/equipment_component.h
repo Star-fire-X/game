@@ -5,8 +5,8 @@
  * Holds references to equipped item entities on a character.
  */
 
-#ifndef LEGEND2_SERVER_ECS_EQUIPMENT_COMPONENT_H
-#define LEGEND2_SERVER_ECS_EQUIPMENT_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_EQUIPMENT_COMPONENT_H_
+#define MIR2_SERVER_ECS_EQUIPMENT_COMPONENT_H_
 
 #include "common/enums.h"
 
@@ -29,9 +29,14 @@ struct EquipmentSlotComponent {
     static constexpr std::size_t kSlotCount =
         static_cast<std::size_t>(mir2::common::EquipSlot::MAX_SLOTS);
 
-    std::array<entt::entity, kSlotCount> slots{};  ///< Equipped item entities.
+    // EnTT's null sentinel is not guaranteed to be zero; initialize explicitly.
+    std::array<entt::entity, kSlotCount> slots = [] {
+        std::array<entt::entity, kSlotCount> value{};
+        value.fill(entt::null);
+        return value;
+    }();  ///< Equipped item entities.
 };
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_EQUIPMENT_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_EQUIPMENT_COMPONENT_H_

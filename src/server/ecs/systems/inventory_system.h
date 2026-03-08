@@ -3,8 +3,8 @@
  * @brief ECS 物品/装备/技能逻辑系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_INVENTORY_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_INVENTORY_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_INVENTORY_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_INVENTORY_SYSTEM_H_
 
 #include <optional>
 
@@ -89,4 +89,4 @@ class InventorySystem : public System {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_INVENTORY_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_INVENTORY_SYSTEM_H_

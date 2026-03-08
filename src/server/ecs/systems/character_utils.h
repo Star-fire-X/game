@@ -3,8 +3,8 @@
  * @brief ECS 角色金币与属性工具函数
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_CHARACTER_UTILS_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_CHARACTER_UTILS_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_CHARACTER_UTILS_H_
+#define MIR2_SERVER_ECS_SYSTEMS_CHARACTER_UTILS_H_
 
 #include <entt/entt.hpp>
 
@@ -36,4 +36,4 @@ void RemoveStats(entt::registry& registry, entt::entity entity,
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_CHARACTER_UTILS_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_CHARACTER_UTILS_H_

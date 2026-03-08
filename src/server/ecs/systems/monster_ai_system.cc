@@ -4,12 +4,15 @@
  */
 
 #include "ecs/systems/monster_ai_system.h"
+#include "ecs/systems/effect_system.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/effect_component.h"
 #include "ecs/components/monster_component.h"
 #include "ecs/components/transform_component.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/monster_events.h"
 #include "game/entity/monster.h"
+#include "core/utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,6 +30,11 @@ constexpr float kMaxChaseDistance = 15.0f;
 constexpr float kIdleToPatrolTime = 2.0f;
 constexpr float kPatrolToIdleTime = 3.0f;
 constexpr float kReturnToIdleTime = 1.0f;
+constexpr float kBossCowKingFrenzyDurationSeconds = 15.0f;
+constexpr int64_t kBossCowKingFrenzyDurationMs = 15000;
+constexpr uint32_t kBossCowKingFrenzySkillId = 900001;
+constexpr float kBossCowKingSummonIntervalSeconds = 30.0f;
+constexpr int kBossCowKingMaxSummonCount = 3;
 
 float get_distance_to_position(entt::registry& registry,
                                entt::entity entity,
@@ -36,8 +44,8 @@ float get_distance_to_position(entt::registry& registry,
         return 999999.0f;
     }
 
-    int dx = transform->x - position.x;
-    int dy = transform->y - position.y;
+    int dx = transform->position.x - position.x;
+    int dy = transform->position.y - position.y;
     return std::sqrt(static_cast<float>(dx * dx + dy * dy));
 }
 
@@ -52,6 +60,8 @@ MonsterAISystem::MonsterAISystem(entt::registry& registry, EventBus& event_bus)
 MonsterAISystem::~MonsterAISystem() = default;
 
 void MonsterAISystem::Update(entt::registry& registry, float dt) {
+    const int64_t current_time_ms = mir2::core::GetCurrentTimestampMs();
+
     // 遍历所有拥有AI组件的怪物
     auto view = registry.view<MonsterAIComponent, MonsterAggroComponent>();
     
@@ -89,7 +99,7 @@ void MonsterAISystem::Update(entt::registry& registry, float dt) {
                 UpdateGuardAI(registry, entity, dt);
                 break;
             case MonsterAIType::kBossCowKing:
-                UpdateBossCowKingAI(registry, entity, dt);
+                UpdateBossCowKingAI(registry, entity, dt, current_time_ms);
                 break;
             default:
                 UpdateStateMachine(registry, entity, dt);
@@ -140,8 +150,8 @@ void MonsterAISystem::UpdateStateMachine(entt::registry& registry,
 }
 
 void MonsterAISystem::UpdateIdle(entt::registry& registry, entt::entity entity, float dt) {
+    (void)dt;
     auto& ai = registry.get<MonsterAIComponent>(entity);
-    auto& aggro = registry.get<MonsterAggroComponent>(entity);
     
     // 检查是否有仇恨目标
     entt::entity target = SelectTarget(registry, entity);
@@ -158,6 +168,7 @@ void MonsterAISystem::UpdateIdle(entt::registry& registry, entt::entity entity, 
 }
 
 void MonsterAISystem::UpdatePatrol(entt::registry& registry, entt::entity entity, float dt) {
+    (void)dt;
     auto& ai = registry.get<MonsterAIComponent>(entity);
     
     // 检查是否有仇恨目标
@@ -175,6 +186,7 @@ void MonsterAISystem::UpdatePatrol(entt::registry& registry, entt::entity entity
 }
 
 void MonsterAISystem::UpdateChase(entt::registry& registry, entt::entity entity, float dt) {
+    (void)dt;
     auto& ai = registry.get<MonsterAIComponent>(entity);
     auto& aggro = registry.get<MonsterAggroComponent>(entity);
     
@@ -201,6 +213,7 @@ void MonsterAISystem::UpdateChase(entt::registry& registry, entt::entity entity,
 }
 
 void MonsterAISystem::UpdateAttack(entt::registry& registry, entt::entity entity, float dt) {
+    (void)dt;
     auto& ai = registry.get<MonsterAIComponent>(entity);
     auto& aggro = registry.get<MonsterAggroComponent>(entity);
     
@@ -226,6 +239,7 @@ void MonsterAISystem::UpdateAttack(entt::registry& registry, entt::entity entity
 }
 
 void MonsterAISystem::UpdateReturn(entt::registry& registry, entt::entity entity, float dt) {
+    (void)dt;
     auto& ai = registry.get<MonsterAIComponent>(entity);
     auto& aggro = registry.get<MonsterAggroComponent>(entity);
     
@@ -354,7 +368,7 @@ void MonsterAISystem::UpdateSummonerAI(entt::registry& registry,
                 events::MonsterSummonEvent event;
                 event.summoner = entity;
                 if (auto* transform = registry.try_get<TransformComponent>(entity)) {
-                    event.position = {transform->x, transform->y};
+                    event.position = transform->position;
                     event.map_id = transform->map_id;
                 } else {
                     event.position = ai.return_position;
@@ -506,7 +520,16 @@ bool MonsterAISystem::IsTargetValid(entt::registry& registry, entt::entity targe
     }
     // 目标必须存活（HP > 0）
     auto* attributes = registry.try_get<CharacterAttributesComponent>(target);
-    return attributes && attributes->hp > 0;
+    if (!attributes || attributes->hp <= 0) {
+        return false;
+    }
+
+    EffectSystem effect_system(registry);
+    if (effect_system.is_invisible(target)) {
+        return false;
+    }
+
+    return true;
 }
 
 float MonsterAISystem::GetDistance(entt::registry& registry, entt::entity a, entt::entity b) {
@@ -515,19 +538,40 @@ float MonsterAISystem::GetDistance(entt::registry& registry, entt::entity a, ent
     
     if (!transform_a || !transform_b) return 999999.0f;
     
-    int dx = transform_a->x - transform_b->x;
-    int dy = transform_a->y - transform_b->y;
+    int dx = transform_a->position.x - transform_b->position.x;
+    int dy = transform_a->position.y - transform_b->position.y;
     return std::sqrt(static_cast<float>(dx * dx + dy * dy));
 }
 
-void MonsterAISystem::UpdateBossCowKingAI(entt::registry& registry, entt::entity entity, float dt) {
+void MonsterAISystem::UpdateBossCowKingAI(entt::registry& registry,
+                                          entt::entity entity,
+                                          float dt,
+                                          int64_t current_time_ms) {
     auto& ai = registry.get<MonsterAIComponent>(entity);
-    auto& aggro = registry.get<MonsterAggroComponent>(entity);
     auto* attributes = registry.try_get<CharacterAttributesComponent>(entity);
 
     if (!attributes) return;
 
+    float hp_percent = 0.0f;
+    if (attributes->max_hp > 0) {
+        hp_percent = static_cast<float>(attributes->hp) /
+            static_cast<float>(attributes->max_hp);
+    }
+
+    BossPhase new_phase = BossPhase::PHASE_1;
+    if (hp_percent > 0.7f) {
+        new_phase = BossPhase::PHASE_1;
+    } else if (hp_percent >= 0.3f) {
+        new_phase = BossPhase::PHASE_2;
+    } else {
+        new_phase = BossPhase::PHASE_3;
+    }
+    if (new_phase != ai.current_phase) {
+        ai.current_phase = new_phase;
+    }
+
     // 更新疯狂模式计时器
+    const bool was_crazy_mode = ai.is_crazy_mode;
     if (ai.is_crazy_mode) {
         ai.crazy_mode_timer -= dt;
         if (ai.crazy_mode_timer <= 0.0f) {
@@ -535,19 +579,33 @@ void MonsterAISystem::UpdateBossCowKingAI(entt::registry& registry, entt::entity
         }
     }
 
+    if (was_crazy_mode && !ai.is_crazy_mode) {
+        EffectSystem effect_system(registry);
+        effect_system.remove_effect(entity, kBossCowKingFrenzySkillId);
+    }
+
     // 更新瞬移冷却
     if (ai.teleport_cooldown > 0.0f) {
         ai.teleport_cooldown -= dt;
     }
 
-    // 检查HP触发特殊机制
-    const float hp_percent = static_cast<float>(attributes->hp) / static_cast<float>(attributes->max_hp);
-
     // HP低于30%进入疯狂模式
     if (hp_percent < 0.3f && !ai.is_crazy_mode) {
         ai.is_crazy_mode = true;
-        ai.crazy_mode_timer = 15.0f; // 持续15秒
-        ai.attack_cooldown *= 0.5f;  // 攻击速度翻倍
+        ai.crazy_mode_timer = kBossCowKingFrenzyDurationSeconds; // 持续15秒
+
+        // 使用EffectSystem应用疯狂效果
+        EffectSystem effect_system(registry);
+        ActiveEffect frenzy_effect;
+        frenzy_effect.skill_id = kBossCowKingFrenzySkillId;
+        frenzy_effect.source_entity = entity;
+        frenzy_effect.category = EffectCategory::FRENZY;
+        frenzy_effect.attack_multiplier = 2.0f;   // 攻击力x2
+        frenzy_effect.defense_multiplier = 0.5f;  // 防御力x0.5
+        frenzy_effect.start_time_ms = current_time_ms;
+        frenzy_effect.end_time_ms = current_time_ms + kBossCowKingFrenzyDurationMs;
+        frenzy_effect.last_tick_ms = current_time_ms;
+        effect_system.apply_effect(entity, frenzy_effect);
     }
 
     // HP低于50%且冷却完成时，有30%概率瞬移
@@ -558,6 +616,56 @@ void MonsterAISystem::UpdateBossCowKingAI(entt::registry& registry, entt::entity
             // TODO: 实现瞬移逻辑（需要TransformComponent）
             ai.teleport_cooldown = 10.0f; // 10秒冷却
         }
+    }
+
+    if (ai.current_phase == BossPhase::PHASE_2) {
+        if (ai.summon_cooldown > 0.0f) {
+            ai.summon_cooldown -= dt;
+        }
+        if (ai.summon_cooldown <= 0.0f &&
+            ai.summon_count < kBossCowKingMaxSummonCount &&
+            event_bus_) {
+            events::MonsterSummonEvent event;
+            event.summoner = entity;
+            if (auto* transform = registry.try_get<TransformComponent>(entity)) {
+                event.position = transform->position;
+                event.map_id = transform->map_id;
+            } else {
+                event.position = ai.return_position;
+            }
+            event_bus_->Publish(event);
+            ai.summon_count += 1;
+            ai.summon_cooldown = kBossCowKingSummonIntervalSeconds;
+        }
+    }
+
+    if (ai.current_phase == BossPhase::PHASE_3) {
+        UpdateSpecialAI(registry, entity, dt,
+            [this](entt::registry& registry, entt::entity entity, [[maybe_unused]] float dt) {
+                auto& ai = registry.get<MonsterAIComponent>(entity);
+                auto& aggro = registry.get<MonsterAggroComponent>(entity);
+
+                if (!IsTargetValid(registry, ai.target_entity)) {
+                    TransitionToState(registry, entity,
+                                      static_cast<int>(game::entity::MonsterState::kChase));
+                    return;
+                }
+
+                float distance = GetDistance(registry, entity, ai.target_entity);
+                if (distance > static_cast<float>(aggro.attack_range)) {
+                    TransitionToState(registry, entity,
+                                      static_cast<int>(game::entity::MonsterState::kChase));
+                    return;
+                }
+
+                if (ai.attack_cooldown_timer >= ai.attack_cooldown) {
+                    ai.attack_cooldown_timer = 0.0f;
+                    CombatSystem::ProcessAttackWithType(
+                        registry, entity, ai.target_entity, combat_config_,
+                        mir2::common::AttackType::kWideHit, event_bus_);
+                }
+            });
+        return;
     }
 
     // 使用普通AI状态机

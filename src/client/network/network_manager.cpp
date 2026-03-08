@@ -1,5 +1,7 @@
 #include "client/network/network_manager.h"
 
+#include "client/network/dual_channel_client.h"
+
 #include <utility>
 
 namespace mir2::client {
@@ -83,6 +85,46 @@ void NetworkManager::update() {
     if (disconnect_pending_.exchange(false)) {
         handle_disconnect();
     }
+}
+
+bool NetworkManager::reset_kcp_session() {
+    auto* dual_client = dynamic_cast<DualChannelClient*>(client_.get());
+    if (!dual_client) {
+        return false;
+    }
+    dual_client->reset_kcp_session();
+    return true;
+}
+
+void NetworkManager::set_use_v2_protocol(bool enable) {
+    if (!client_) {
+        return;
+    }
+
+    if (auto* tcp_client = dynamic_cast<NetworkClient*>(client_.get())) {
+        tcp_client->set_use_v2_protocol(enable);
+        return;
+    }
+
+    if (auto* dual_client = dynamic_cast<DualChannelClient*>(client_.get())) {
+        dual_client->set_use_v2_protocol(enable);
+    }
+}
+
+bool NetworkManager::use_v2_protocol() const {
+    if (!client_) {
+        return true;
+    }
+
+    if (const auto* tcp_client = dynamic_cast<const NetworkClient*>(client_.get())) {
+        return tcp_client->use_v2_protocol();
+    }
+
+    if (const auto* dual_client = dynamic_cast<const DualChannelClient*>(client_.get())) {
+        return dual_client->use_v2_protocol();
+    }
+
+    return true;
 }
 
 void NetworkManager::wire_callbacks() {

@@ -30,7 +30,9 @@
 namespace mir2::ui {
 
 // 引入公共类型定义
-using namespace mir2::common;
+using mir2::common::Color;
+using mir2::common::Position;
+using mir2::common::Rect;
 
 // 跨模块类型引用
 using mir2::render::SDLRenderer;
@@ -237,11 +239,11 @@ private:
     
     // UI scale
     float ui_scale_ = 1.0f;
-    
+    int default_font_size_ = 14;                               // 默认字体大小
+
 #ifdef HAS_SDL2_TTF
     // 字体管理
     std::string font_path_;                                    // 字体文件路径
-    int default_font_size_ = 14;                               // 默认字体大小
     std::unordered_map<int, TTF_Font*> font_cache_;           // 按大小缓存的字体
     struct CacheEntry {
         std::shared_ptr<Texture> texture;

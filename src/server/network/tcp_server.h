@@ -7,12 +7,17 @@
 #define MIR2_NETWORK_TCP_SERVER_H
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 
+#include <asio/error_code.hpp>
 #include <asio/ip/tcp.hpp>
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+#include <asio/local/stream_protocol.hpp>
+#endif
 
 #include "network/tcp_connection.h"
 
@@ -33,19 +38,37 @@ class TcpServer {
   bool Start(const std::string& bind_ip, uint16_t port, int max_connections);
 
   /**
+   * @brief 启动 UDS 监听（仅 Unix 平台）
+   */
+  bool StartUnix(const std::string& socket_path, int max_connections);
+
+  /**
    * @brief 停止服务器
    */
   void Stop();
+
+  void SetAcceptedConnectionWriteQueueSize(size_t max_write_queue_size);
+  void SetAcceptedConnectionWriteBatchOptions(TcpConnection::WriteBatchOptions options);
+  void SetAcceptedConnectionLowCopySendEnabled(bool enabled);
 
   void SetConnectHandler(ConnectHandler handler) { connect_handler_ = std::move(handler); }
 
  private:
   void DoAccept();
+  void StopAndResetAcceptors();
+  void CleanupUnixSocketPath();
 
   asio::io_context& io_context_;
-  std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
+  std::unique_ptr<asio::ip::tcp::acceptor> tcp_acceptor_;
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+  std::unique_ptr<asio::local::stream_protocol::acceptor> uds_acceptor_;
+#endif
+  std::string uds_socket_path_;
   std::atomic<uint64_t> next_connection_id_{1};
   int max_connections_ = 0;
+  size_t accepted_connection_write_queue_size_ = TcpConnection::kDefaultMaxWriteQueueSize;
+  TcpConnection::WriteBatchOptions accepted_connection_write_batch_options_{};
+  bool accepted_connection_low_copy_send_enabled_ = false;
 
   ConnectHandler connect_handler_;
 };

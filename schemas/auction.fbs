@@ -1,0 +1,75 @@
+// auction.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+enum AuctionNotifyType : ubyte {
+  LISTED = 0,
+  SOLD = 1,
+  CANCELLED = 2,
+  BOUGHT = 3
+}
+
+table AuctionListing {
+  listing_id: ulong;
+  seller_character_id: uint;
+  item_id: uint;
+  count: uint;
+  unit_price: uint;
+  total_price: uint;
+  created_at_ms: ulong;
+  expires_at_ms: ulong;
+  sold: bool;
+  cancelled: bool;
+}
+
+table AuctionListReq {
+  page: uint = 1;
+  page_size: uint = 20;
+  seller_only: bool = false;
+}
+
+table AuctionListRsp {
+  success: bool;
+  error_code: int;
+  total_count: uint;
+  listings: [AuctionListing];
+}
+
+table AuctionSellReq {
+  inventory_slot: ushort;
+  item_id: uint;
+  count: uint;
+  unit_price: uint;
+  duration_sec: uint = 86400;
+}
+
+table AuctionSellRsp {
+  success: bool;
+  error_code: int;
+  listing_id: ulong;
+}
+
+table AuctionBuyReq {
+  listing_id: ulong;
+}
+
+table AuctionBuyRsp {
+  success: bool;
+  error_code: int;
+  listing_id: ulong;
+}
+
+table AuctionCancelReq {
+  listing_id: ulong;
+}
+
+table AuctionCancelRsp {
+  success: bool;
+  error_code: int;
+  listing_id: ulong;
+}
+
+table AuctionNotify {
+  notify_type: AuctionNotifyType;
+  listing: AuctionListing;
+}

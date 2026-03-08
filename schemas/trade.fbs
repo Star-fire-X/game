@@ -1,0 +1,77 @@
+// trade.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table TradeReq {
+  target_character_id: uint;
+}
+
+table TradeRsp {
+  success: bool;
+  error_code: int;
+  trade_id: ulong;
+}
+
+table TradeAddItemReq {
+  trade_id: ulong;
+  inventory_slot: ushort;
+  item_id: uint;
+  count: uint;
+}
+
+table TradeAddItemRsp {
+  success: bool;
+  error_code: int;
+}
+
+table TradeSetGoldReq {
+  trade_id: ulong;
+  gold: uint;
+}
+
+table TradeSetGoldRsp {
+  success: bool;
+  error_code: int;
+}
+
+table TradeConfirmReq {
+  trade_id: ulong;
+}
+
+table TradeConfirmRsp {
+  success: bool;
+  error_code: int;
+}
+
+table TradeCancelReq {
+  trade_id: ulong;
+}
+
+table TradeCancelRsp {
+  success: bool;
+  error_code: int;
+}
+
+table TradeItemInfo {
+  inventory_slot: ushort;
+  item_id: uint;
+  count: uint;
+}
+
+table TradeUpdate {
+  trade_id: ulong;
+  left_character_id: uint;
+  right_character_id: uint;
+  left_items: [TradeItemInfo];
+  right_items: [TradeItemInfo];
+  left_gold: uint;
+  right_gold: uint;
+  left_confirmed: bool;
+  right_confirmed: bool;
+}
+
+table TradeComplete {
+  trade_id: ulong;
+  success: bool;
+  error_code: int;
+}

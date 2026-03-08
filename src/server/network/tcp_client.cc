@@ -1,7 +1,13 @@
 #include "network/tcp_client.h"
 
+#include <algorithm>
+
 #include <asio/connect.hpp>
 #include <asio/ip/tcp.hpp>
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+#include <asio/local/stream_protocol.hpp>
+#endif
+#include <asio/post.hpp>
 
 namespace mir2::network {
 
@@ -12,7 +18,8 @@ constexpr uint16_t kSequenceWindow = 256;
 }  // namespace
 
 TcpClient::TcpClient(asio::io_context& io_context)
-    : io_context_(io_context) {}
+    : io_context_(io_context),
+      send_strand_(asio::make_strand(io_context)) {}
 
 bool TcpClient::Connect(const std::string& host, uint16_t port) {
   if (connected_.load()) {
@@ -34,123 +41,185 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
 
   connection_ = std::make_shared<TcpConnection>(
       std::make_unique<AsioSocketAdapter>(std::move(socket)),
-      1);
-  protocol_version_ = ProtocolVersion::kV1;
-  protocol_version_detected_ = false;
+      1,
+      std::max<size_t>(write_queue_size_, 1));
+  connection_->SetLowCopySendEnabled(low_copy_send_enabled_);
+  const uint64_t epoch =
+      connection_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  ingress_parser_.Reset();
+  ingress_parser_.SetProtocolVersion(ProtocolVersion::kV2, /*detected=*/true);
   send_sequence_.store(0, std::memory_order_relaxed);
   recv_sequence_.store(0, std::memory_order_relaxed);
-  read_buffer_.clear();
-  connection_->SetReadHandler([this](const uint8_t* data, size_t size) {
-    HandleBytes(data, size);
+  connection_->SetReadHandler([this, epoch](const uint8_t* data, size_t size) {
+    HandleBytes(data, size, epoch);
   });
-  connection_->SetDisconnectHandler([this](uint64_t id) { HandleDisconnect(id); });
+  connection_->SetDisconnectHandler(
+      [this, epoch](uint64_t id) { HandleDisconnect(id, epoch); });
   connection_->Start();
   connected_.store(true);
   return true;
 }
 
+bool TcpClient::ConnectUnix(const std::string& socket_path) {
+  if (connected_.load()) {
+    return true;
+  }
+
+#if defined(ASIO_HAS_LOCAL_SOCKETS)
+  if (socket_path.empty()) {
+    return false;
+  }
+
+  asio::error_code ec;
+  asio::local::stream_protocol::socket socket(io_context_);
+  socket.connect(asio::local::stream_protocol::endpoint(socket_path), ec);
+  if (ec) {
+    return false;
+  }
+
+  connection_ = std::make_shared<TcpConnection>(
+      std::make_unique<UdsSocketAdapter>(std::move(socket)),
+      1,
+      std::max<size_t>(write_queue_size_, 1));
+  connection_->SetLowCopySendEnabled(low_copy_send_enabled_);
+  const uint64_t epoch =
+      connection_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  ingress_parser_.Reset();
+  ingress_parser_.SetProtocolVersion(ProtocolVersion::kV2, /*detected=*/true);
+  send_sequence_.store(0, std::memory_order_relaxed);
+  recv_sequence_.store(0, std::memory_order_relaxed);
+  connection_->SetReadHandler([this, epoch](const uint8_t* data, size_t size) {
+    HandleBytes(data, size, epoch);
+  });
+  connection_->SetDisconnectHandler(
+      [this, epoch](uint64_t id) { HandleDisconnect(id, epoch); });
+  connection_->Start();
+  connected_.store(true);
+  return true;
+#else
+  (void)socket_path;
+  return false;
+#endif
+}
+
 void TcpClient::Send(uint16_t msg_id, const std::vector<uint8_t>& payload) {
-  if (!connection_) {
+  Send(msg_id, std::vector<uint8_t>(payload));
+}
+
+void TcpClient::Send(uint16_t msg_id, std::vector<uint8_t>&& payload) {
+  if (!connected_.load(std::memory_order_acquire)) {
     return;
   }
-  std::vector<uint8_t> buffer;
-  if (protocol_version_ == ProtocolVersion::kV2) {
+  const uint64_t epoch = connection_epoch_.load(std::memory_order_acquire);
+
+  // Keep sequence assignment and enqueue order serialized to avoid sequence-window
+  // false positives when many threads call Send() concurrently.
+  asio::post(send_strand_, [this, epoch, msg_id, payload = std::move(payload)]() mutable {
+    if (!connection_ || !connected_.load(std::memory_order_acquire) ||
+        connection_epoch_.load(std::memory_order_acquire) != epoch) {
+      return;
+    }
+
     const uint16_t sequence = send_sequence_.fetch_add(1, std::memory_order_relaxed);
-    buffer = PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
-  } else {
-    buffer = PacketCodec::Encode(msg_id, payload.data(), payload.size());
+    std::vector<uint8_t> buffer =
+        PacketCodec::EncodeV2(msg_id, payload.data(), payload.size(), sequence);
+    connection_->SendRaw(std::move(buffer));
+  });
+}
+
+void TcpClient::SetWriteQueueSize(size_t max_write_queue_size) {
+  write_queue_size_ = std::max<size_t>(max_write_queue_size, 1);
+}
+
+void TcpClient::SetLowCopySendEnabled(bool enabled) {
+  low_copy_send_enabled_ = enabled;
+  if (connection_) {
+    connection_->SetLowCopySendEnabled(enabled);
   }
-  connection_->SendRaw(buffer);
+}
+
+void TcpClient::AttachConnectionForTest(
+    const std::shared_ptr<TcpConnection>& connection,
+    bool connected) {
+  connection_ = connection;
+  const uint64_t epoch =
+      connection_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  ingress_parser_.Reset();
+  ingress_parser_.SetProtocolVersion(ProtocolVersion::kV2, /*detected=*/true);
+  send_sequence_.store(0, std::memory_order_relaxed);
+  recv_sequence_.store(0, std::memory_order_relaxed);
+  if (connection_) {
+    connection_->SetLowCopySendEnabled(low_copy_send_enabled_);
+    connection_->SetReadHandler([this, epoch](const uint8_t* data, size_t size) {
+      HandleBytes(data, size, epoch);
+    });
+    connection_->SetDisconnectHandler(
+        [this, epoch](uint64_t id) { HandleDisconnect(id, epoch); });
+  }
+  connected_.store(connected, std::memory_order_release);
 }
 
 void TcpClient::Close() {
-  if (connection_) {
-    connection_->Close();
+  const bool was_connected = connected_.exchange(false, std::memory_order_acq_rel);
+  std::shared_ptr<TcpConnection> old_connection = std::move(connection_);
+  connection_epoch_.fetch_add(1, std::memory_order_acq_rel);
+  ingress_parser_.Reset();
+  ingress_parser_.SetProtocolVersion(ProtocolVersion::kV2, /*detected=*/true);
+  if (old_connection) {
+    old_connection->Close();
   }
-  connected_.store(false);
+  if (was_connected && disconnect_handler_) {
+    disconnect_handler_();
+  }
 }
 
-void TcpClient::HandleDisconnect(uint64_t /*connection_id*/) {
+void TcpClient::HandleDisconnect(uint64_t /*connection_id*/, uint64_t epoch) {
+  if (connection_epoch_.load(std::memory_order_acquire) != epoch) {
+    return;
+  }
+  connection_.reset();
   connected_.store(false);
   if (disconnect_handler_) {
     disconnect_handler_();
   }
 }
 
-void TcpClient::HandleBytes(const uint8_t* data, size_t size) {
+void TcpClient::HandleBytes(const uint8_t* data, size_t size, uint64_t epoch) {
+  if (connection_epoch_.load(std::memory_order_acquire) != epoch) {
+    return;
+  }
   if (!data || size == 0) {
     return;
   }
+  if (!connected_.load(std::memory_order_acquire)) {
+    return;
+  }
 
-  read_buffer_.insert(read_buffer_.end(), data, data + size);
+  if (!ingress_parser_.AppendBytes(
+          data,
+          size,
+          mir2::common::kMaxPayloadSize + PacketHeaderV2::kSize)) {
+    Close();
+    return;
+  }
 
   while (true) {
-    if (read_buffer_.size() < sizeof(uint32_t)) {
+    const IngressParseResult result = ingress_parser_.NextPacket();
+    if (result.action == IngressParseAction::kNeedMoreData) {
       return;
     }
-
-    if (!protocol_version_detected_) {
-      protocol_version_ = mir2::common::DetectProtocolVersion(read_buffer_.data());
-      protocol_version_detected_ = true;
-    }
-
-    const size_t header_size = protocol_version_ == ProtocolVersion::kV2
-                                   ? PacketHeaderV2::kSize
-                                   : PacketHeader::kSize;
-    if (read_buffer_.size() < header_size) {
+    if (result.action == IngressParseAction::kFatalError) {
+      Close();
       return;
     }
-
-    size_t payload_size = 0;
-    if (protocol_version_ == ProtocolVersion::kV2) {
-      PacketHeaderV2 header{};
-      if (!PacketHeaderV2::FromBytes(read_buffer_.data(), header_size, &header) ||
-          header.version != PacketHeaderV2::kVersion) {
-        Close();
-        return;
-      }
-      payload_size = header.payload_size;
-    } else {
-      PacketHeader header{};
-      if (!PacketHeader::FromBytes(read_buffer_.data(), header_size, &header)) {
-        Close();
-        return;
-      }
-      payload_size = header.payload_size;
-    }
-
-    if (payload_size > mir2::common::kMaxPayloadSize) {
+    if (!CheckRecvSequence(result.parsed.sequence)) {
       Close();
       return;
     }
 
-    const size_t packet_size = header_size + payload_size;
-    if (read_buffer_.size() < packet_size) {
-      return;
-    }
-
-    Packet packet{};
-    if (protocol_version_ == ProtocolVersion::kV2) {
-      uint16_t sequence = 0;
-      const auto status =
-          PacketCodec::DecodeV2(read_buffer_.data(), packet_size, &packet, &sequence);
-      if (status != DecodeStatus::kOk || !CheckRecvSequence(sequence)) {
-        Close();
-        return;
-      }
-    } else {
-      const auto status = PacketCodec::Decode(read_buffer_.data(), packet_size, &packet);
-      if (status != DecodeStatus::kOk) {
-        Close();
-        return;
-      }
-    }
-
     if (packet_handler_) {
-      packet_handler_(packet);
+      packet_handler_(result.parsed.packet);
     }
-
-    read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + packet_size);
   }
 }
 

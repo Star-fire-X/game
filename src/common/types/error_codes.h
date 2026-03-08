@@ -28,10 +28,33 @@ enum class ErrorCode : uint16_t {
     kInvalidAction = 400,
     kTargetNotFound = 401,
     kTargetOutOfRange = 402,
+    kDecodeInvalidMsgId = 420,
+    kDecodeInvalidPayload = 421,
+    kDecodeMissingField = 422,
+    kDecodeStringTooLong = 423,
+    kDecodeValueOutOfRange = 424,
+    kNoParty = 410,
+    kTargetRefused = 411,
     kInvalidPath = 403,
     kSpeedViolation = 404,
     kPathBlocked = 405,
     kInsufficientMp = 500,
+    kTradeInvalidState = 600,
+    kTradeTargetBusy = 601,
+    kTradeTimeout = 602,
+    kPartyInviteInvalid = 700,
+    kPartyFull = 701,
+    kPartyNotFound = 702,
+    kRankingTypeInvalid = 750,
+    kMailNotFound = 800,
+    kMailAlreadyClaimed = 801,
+    kMailAttachmentInvalid = 802,
+    kAchievementNotFound = 820,
+    kAchievementAlreadyClaimed = 821,
+    kAchievementNotCompleted = 822,
+    kAuctionNotFound = 900,
+    kAuctionBidTooLow = 901,
+    kAuctionAlreadySold = 902,
     kKickHeartbeatTimeout = 9001,
     kKickDuplicateLogin = 9002,
     kKickAdminManual = 9003,
@@ -51,6 +74,8 @@ enum class ErrorCode : uint16_t {
     INVALID_CHARACTER_NAME = 2006,
     INVALID_CHARACTER_CLASS = 2007,
     MAX_CHARACTERS_REACHED = 2008,
+    ACCOUNT_BANNED = 2009,
+    RATE_LIMITED = 2010,
 
     // 游戏逻辑错误 (3xxx)
     INVALID_POSITION = 3001,
@@ -90,10 +115,33 @@ inline const char* error_code_to_string(ErrorCode code) {
         case ErrorCode::kInvalidAction: return "Invalid action";
         case ErrorCode::kTargetNotFound: return "Target not found";
         case ErrorCode::kTargetOutOfRange: return "Target out of range";
+        case ErrorCode::kDecodeInvalidMsgId: return "Decode invalid message id";
+        case ErrorCode::kDecodeInvalidPayload: return "Decode invalid payload";
+        case ErrorCode::kDecodeMissingField: return "Decode missing field";
+        case ErrorCode::kDecodeStringTooLong: return "Decode string too long";
+        case ErrorCode::kDecodeValueOutOfRange: return "Decode value out of range";
+        case ErrorCode::kNoParty: return "No party";
+        case ErrorCode::kTargetRefused: return "Target refused";
         case ErrorCode::kInvalidPath: return "Invalid path";
         case ErrorCode::kSpeedViolation: return "Speed violation";
         case ErrorCode::kPathBlocked: return "Path blocked";
         case ErrorCode::kInsufficientMp: return "Insufficient MP";
+        case ErrorCode::kTradeInvalidState: return "Trade invalid state";
+        case ErrorCode::kTradeTargetBusy: return "Trade target busy";
+        case ErrorCode::kTradeTimeout: return "Trade timeout";
+        case ErrorCode::kPartyInviteInvalid: return "Party invite invalid";
+        case ErrorCode::kPartyFull: return "Party full";
+        case ErrorCode::kPartyNotFound: return "Party not found";
+        case ErrorCode::kRankingTypeInvalid: return "Ranking type invalid";
+        case ErrorCode::kMailNotFound: return "Mail not found";
+        case ErrorCode::kMailAlreadyClaimed: return "Mail already claimed";
+        case ErrorCode::kMailAttachmentInvalid: return "Mail attachment invalid";
+        case ErrorCode::kAchievementNotFound: return "Achievement not found";
+        case ErrorCode::kAchievementAlreadyClaimed: return "Achievement already claimed";
+        case ErrorCode::kAchievementNotCompleted: return "Achievement not completed";
+        case ErrorCode::kAuctionNotFound: return "Auction not found";
+        case ErrorCode::kAuctionBidTooLow: return "Auction bid too low";
+        case ErrorCode::kAuctionAlreadySold: return "Auction already sold";
         case ErrorCode::kKickHeartbeatTimeout: return "Heartbeat timeout";
         case ErrorCode::kKickDuplicateLogin: return "Duplicate login";
         case ErrorCode::kKickAdminManual: return "Kicked by admin";
@@ -109,6 +157,8 @@ inline const char* error_code_to_string(ErrorCode code) {
         case ErrorCode::INVALID_CHARACTER_NAME: return "Invalid character name";
         case ErrorCode::INVALID_CHARACTER_CLASS: return "Invalid character class";
         case ErrorCode::MAX_CHARACTERS_REACHED: return "Maximum characters reached";
+        case ErrorCode::ACCOUNT_BANNED: return "Account banned";
+        case ErrorCode::RATE_LIMITED: return "Too many login attempts";
         case ErrorCode::INVALID_POSITION: return "Invalid position";
         case ErrorCode::POSITION_NOT_WALKABLE: return "Position not walkable";
         case ErrorCode::TARGET_OUT_OF_RANGE: return "Target out of range";

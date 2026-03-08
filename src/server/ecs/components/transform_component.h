@@ -3,8 +3,8 @@
  * @brief ECS 位置组件兼容头
  */
 
-#ifndef LEGEND2_SERVER_ECS_TRANSFORM_COMPONENT_H
-#define LEGEND2_SERVER_ECS_TRANSFORM_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_TRANSFORM_COMPONENT_H_
+#define MIR2_SERVER_ECS_TRANSFORM_COMPONENT_H_
 
 #include "ecs/components/character_components.h"
 
@@ -14,4 +14,4 @@ using TransformComponent = CharacterStateComponent;
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_TRANSFORM_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_TRANSFORM_COMPONENT_H_

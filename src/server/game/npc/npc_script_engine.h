@@ -53,7 +53,7 @@ struct NpcScriptCommand {
   int32_t x = 0;
   int32_t y = 0;
   uint32_t store_id = 0;
-  uint32_t guild_id = 0;
+  mir2::ecs::GuildId guild_id = mir2::ecs::kInvalidGuildId;
   int guard_level = 0;
 };
 

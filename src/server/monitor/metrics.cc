@@ -16,6 +16,10 @@ std::vector<double> BuildLatencyBuckets() {
   return {50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000};
 }
 
+std::vector<double> BuildHandlerLatencyBuckets() {
+  return {0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000};
+}
+
 std::string NormalizeMetricName(const std::string& name) {
   std::string normalized = name;
   for (char& ch : normalized) {
@@ -86,6 +90,12 @@ void Metrics::Init(uint16_t port) {
                              .Register(*registry_);
   dispatch_latency_ = &latency_family.Add({}, BuildLatencyBuckets());
 
+  auto& handler_latency_family = prometheus::BuildHistogram()
+                                     .Name(NormalizeMetricName(kHandlerLatency))
+                                     .Help("Logic handler latency in milliseconds.")
+                                     .Register(*registry_);
+  handler_latency_ = &handler_latency_family.Add({}, BuildHandlerLatencyBuckets());
+
   error_family_ = &prometheus::BuildCounter()
                        .Name(kErrors)
                        .Help("Total error count by reason.")
@@ -141,6 +151,13 @@ void Metrics::ObserveDispatchLatency(int64_t microseconds) {
   dispatch_latency_->Observe(static_cast<double>(microseconds));
 }
 
+void Metrics::ObserveHandlerLatency(double milliseconds) {
+  if (!handler_latency_) {
+    return;
+  }
+  handler_latency_->Observe(milliseconds);
+}
+
 void Metrics::IncrementError(const std::string& reason) {
   if (!error_family_) {
     return;
@@ -156,7 +173,14 @@ void Metrics::IncrementError(const std::string& reason) {
 }
 
 void Metrics::IncrementCounter(const std::string& name) {
+  IncrementCounter(name, 1);
+}
+
+void Metrics::IncrementCounter(const std::string& name, uint64_t delta) {
   if (!registry_) {
+    return;
+  }
+  if (delta == 0) {
     return;
   }
 
@@ -176,11 +200,11 @@ void Metrics::IncrementCounter(const std::string& name) {
   }
 
   if (counter) {
-    counter->Increment();
+    counter->Increment(static_cast<double>(delta));
   }
 }
 
-void Metrics::SetGauge(const std::string& name, int64_t value) {
+void Metrics::SetGauge(const std::string& name, double value) {
   if (!registry_) {
     return;
   }
@@ -201,7 +225,7 @@ void Metrics::SetGauge(const std::string& name, int64_t value) {
   }
 
   if (gauge) {
-    gauge->Set(static_cast<double>(value));
+    gauge->Set(value);
   }
 }
 

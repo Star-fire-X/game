@@ -3,8 +3,8 @@
  * @brief 令牌桶限流器
  */
 
-#ifndef MIR2_SECURITY_RATE_LIMITER_H
-#define MIR2_SECURITY_RATE_LIMITER_H
+#ifndef MIR2_SECURITY_RATE_LIMITER_H_
+#define MIR2_SECURITY_RATE_LIMITER_H_
 
 #include <chrono>
 #include <mutex>
@@ -21,6 +21,7 @@ class RateLimiter {
   struct Config {
     int capacity = 10;
     int refill_rate = 10;
+    int refill_interval_seconds = 1;
   };
 
   explicit RateLimiter(const Config& config) : config_(config) {}
@@ -34,6 +35,13 @@ class RateLimiter {
    * @brief 获取当前令牌数
    */
   int GetTokens(const std::string& key);
+
+  /**
+   * @brief 更新限流配置
+   * @param config 新配置
+   * @param clear_buckets 是否清空现有桶状态
+   */
+  void SetConfig(const Config& config, bool clear_buckets = true);
 
  private:
   struct Bucket {
@@ -50,4 +58,4 @@ class RateLimiter {
 
 }  // namespace mir2::security
 
-#endif  // MIR2_SECURITY_RATE_LIMITER_H
+#endif  // MIR2_SECURITY_RATE_LIMITER_H_

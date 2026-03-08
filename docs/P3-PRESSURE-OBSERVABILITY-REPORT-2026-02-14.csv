@@ -1,0 +1,5 @@
+metric,legacy,current,delta_percent,unit
+tick_p95,4548.05,290.10,-93.62,us
+tick_p99,5100.32,477.08,-90.65,us
+effect_alloc_per_tick,3000,0,-100.00,count
+guild_alloc_per_tick,0,0,0.00,count

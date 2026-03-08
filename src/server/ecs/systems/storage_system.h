@@ -3,8 +3,8 @@
  * @brief ECS 仓库系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H_
 
 #include <vector>
 
@@ -12,11 +12,8 @@
 
 #include "ecs/components/item_component.h"
 #include "ecs/components/storage_component.h"
+#include "ecs/event_bus.h"
 #include "ecs/world.h"
-
-namespace mir2::ecs {
-class EventBus;
-}  // namespace mir2::ecs
 
 namespace mir2::ecs::events {
 struct NpcOpenStorageEvent;
@@ -57,8 +54,9 @@ class StorageSystem : public System {
                            const events::NpcOpenStorageEvent& event);
 
     bool handlers_registered_ = false;
+    EventBus::Subscription open_storage_subscription_;
 };
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_STORAGE_SYSTEM_H_

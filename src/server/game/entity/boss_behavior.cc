@@ -32,7 +32,7 @@ BossBehavior::BossBehavior(uint32_t boss_id, const BossConfig& config,
     config_.name = "Boss_" + std::to_string(config_.monster_id);
   }
   max_hp_ = std::max(max_hp_, 1);
-  current_hp_ = std::clamp(current_hp_, 0, max_hp_);
+  current_hp_ = max_hp_;
   base_attack_ = std::max(base_attack_, 0);
   base_attack_speed_ = std::max(base_attack_speed_, 0.0f);
   attack_ = base_attack_;

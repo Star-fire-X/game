@@ -3,14 +3,16 @@
  * @brief 角色实体管理器
  */
 
-#ifndef LEGEND2_SERVER_ECS_CHARACTER_ENTITY_MANAGER_H
-#define LEGEND2_SERVER_ECS_CHARACTER_ENTITY_MANAGER_H
+#ifndef MIR2_SERVER_ECS_CHARACTER_ENTITY_MANAGER_H_
+#define MIR2_SERVER_ECS_CHARACTER_ENTITY_MANAGER_H_
 
 #include "common/character_data.h"
 
 #include <entt/entt.hpp>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
+#include <list>
 #include <optional>
 #include <thread>
 #include <unordered_map>
@@ -38,10 +40,21 @@ class CharacterEntityManager {
     kSaveFailed,
   };
 
+  struct DisconnectPersistResult {
+    bool was_dirty_before_save = false;
+    SaveResult save_result = SaveResult::kEntityNotFound;
+  };
+
   enum class ErrorPolicy {
     kRetainDirtyFlag,
     kClearDirtyFlag,
   };
+
+  /// 获取默认地图ID（从配置读取，带缓存）
+  static uint32_t GetDefaultMapId();
+
+  /// 设置默认地图ID（仅用于测试）
+  static void SetDefaultMapId(uint32_t map_id);
 
   /// 旧接口：绑定单 Registry（兼容已有测试与单 World 使用）
   explicit CharacterEntityManager(entt::registry& registry);
@@ -66,6 +79,9 @@ class CharacterEntityManager {
   /// 尝试获取角色实体
   std::optional<entt::entity> TryGet(uint32_t character_id);
 
+  /// 启动时重建索引（O(n) 扫描 Registry）
+  void RebuildIndex();
+
   /// 获取角色所在地图
   std::optional<uint32_t> TryGetMapId(uint32_t character_id) const;
 
@@ -84,7 +100,8 @@ class CharacterEntityManager {
   void OnLogin(uint32_t character_id, EventBus* event_bus = nullptr);
 
   /// 断线时保存角色并标记离线
-  void OnDisconnect(uint32_t character_id, EventBus* event_bus = nullptr);
+  DisconnectPersistResult OnDisconnect(uint32_t character_id,
+                                       EventBus* event_bus = nullptr);
 
   /// 周期更新（保存与超时清理）
   void Update(float delta_time);
@@ -94,6 +111,9 @@ class CharacterEntityManager {
 
   /// 仅在脏标记存在时保存
   SaveResult SaveIfDirty(uint32_t character_id);
+
+  /// 关键路径保存：强制同步写入持久层
+  SaveResult SaveCritical(uint32_t character_id);
 
   /// 保存全部角色数据
   void SaveAll();
@@ -107,9 +127,14 @@ class CharacterEntityManager {
   /// 获取索引大小（测试用）
   size_t GetIndexSize() const;
 
+  /// 绑定当前线程为管理器拥有线程。
+  /// 仅应在无并发访问时调用（例如 Initialize->Run 线程切换点）。
+  void BindToCurrentThread();
+
   void SetSaveIntervalSeconds(float seconds) { save_interval_seconds_ = seconds; }
   void SetTimeoutSeconds(float seconds) { timeout_seconds_ = seconds; }
   void SetErrorPolicy(ErrorPolicy policy) { error_policy_ = policy; }
+  void SetMaxStoredCharacters(size_t max);
 
  private:
   struct SessionState {
@@ -118,14 +143,22 @@ class CharacterEntityManager {
     float time_since_disconnect = 0.0f;
   };
 
+  using LruList = std::list<uint32_t>;
+
   entt::registry* ResolveRegistry(uint32_t map_id) const;
   entt::registry* EnsureRegistry(uint32_t map_id);
-  std::optional<entt::entity> FindEntityByComponentId(uint32_t character_id,
-                                                      uint32_t map_id);
-  std::optional<entt::entity> FindEntityByComponentId(uint32_t character_id);
+  void RepairIndexFromRegistry(entt::registry& registry,
+                               std::optional<uint32_t> map_id);
   bool IndexCharacter(uint32_t character_id, uint32_t map_id, entt::entity entity);
   void UnindexCharacter(uint32_t character_id);
   void Touch(uint32_t character_id);
+  void TouchStoredCharacter(uint32_t character_id) const;
+  bool StoreCharacterData(uint32_t character_id, const mir2::common::CharacterData& data);
+  void EnsureEntityVersion(entt::registry& registry,
+                           entt::entity entity,
+                           uint32_t character_id);
+  uint32_t NextEntityVersion(uint32_t character_id);
+  void EnforceStoredCapacity();
   static int64_t NowSeconds();
   void AssertSameThread() const {
     assert(std::this_thread::get_id() == thread_id_ &&
@@ -145,13 +178,17 @@ class CharacterEntityManager {
 
   /// character_id -> map_id
   std::unordered_map<uint32_t, uint32_t> character_to_map_;
+  std::unordered_map<uint32_t, uint32_t> entity_versions_;
   std::unordered_map<uint32_t, mir2::common::CharacterData> stored_characters_;
+  mutable LruList stored_lru_;
+  mutable std::unordered_map<uint32_t, LruList::iterator> stored_lru_index_;
   std::unordered_map<uint32_t, SessionState> sessions_;
   float save_interval_seconds_ = 30.0f;
   float timeout_seconds_ = 60.0f;
+  size_t max_stored_characters_ = 10000;
   ErrorPolicy error_policy_ = ErrorPolicy::kRetainDirtyFlag;
 };
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_CHARACTER_ENTITY_MANAGER_H
+#endif  // MIR2_SERVER_ECS_CHARACTER_ENTITY_MANAGER_H_

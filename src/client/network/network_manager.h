@@ -74,6 +74,13 @@ public:
     /// Update the network client (process queued callbacks).
     void update() override;
 
+    /// Reset KCP session if using a dual-channel client.
+    bool reset_kcp_session();
+
+    /// Enable or disable V2 packet encoding on client send path.
+    void set_use_v2_protocol(bool enable);
+    bool use_v2_protocol() const;
+
 private:
     void wire_callbacks();
     void handle_connect();

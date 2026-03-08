@@ -3,21 +3,18 @@
  * @brief ECS NPC AI logic system
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H_
 
 #include "ecs/components/npc_component.h"
 #include "ecs/components/transform_component.h"
+#include "ecs/event_bus.h"
 
 #include <entt/entt.hpp>
 
 #include <memory>
 #include <unordered_map>
 #include <vector>
-
-namespace mir2::ecs {
-class EventBus;
-}  // namespace mir2::ecs
 
 namespace mir2::ecs::events {
 struct NpcHasItemEvent;
@@ -84,8 +81,9 @@ class NpcAISystem {
     std::unordered_map<entt::entity, std::unique_ptr<NpcRuntime>> runtime_;
     std::vector<PendingInteraction> pending_interactions_;
     bool query_handlers_registered_ = false;
+    std::vector<ecs::EventBus::Subscription> query_subscriptions_;
 };
 
 }  // namespace mir2::game::npc
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_NPC_AI_SYSTEM_H_

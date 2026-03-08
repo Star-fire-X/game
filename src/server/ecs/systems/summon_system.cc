@@ -2,7 +2,13 @@
 
 #include "ecs/components/character_components.h"
 #include "ecs/components/combat_component.h"
+#include "ecs/components/monster_component.h"
 #include "ecs/components/skill_component.h"
+#include "ecs/systems/combat_system.h"
+#include "ecs/systems/movement_system.h"
+#include "ecs/systems/pathfinding_helper.h"
+#include "core/utils.h"
+#include "log/logger.h"
 
 #include <algorithm>
 #include <vector>
@@ -11,8 +17,30 @@ namespace mir2::ecs {
 
 namespace {
 
+constexpr int kFollowMinDistance = 3;
+constexpr int kFollowMaxDistance = 5;
+constexpr int64_t kSummonAttackCooldownMs = 1000;
+
 bool is_valid_entity(const entt::registry& registry, entt::entity entity) {
     return entity != entt::null && registry.valid(entity);
+}
+
+int get_attack_range(const CombatComponent* combat) {
+    if (!combat) {
+        return 1;
+    }
+    return std::max(1, combat->attack_range);
+}
+
+int get_tile_distance(const mir2::common::Position& a, const mir2::common::Position& b) {
+    return PathfindingHelper::ChebyshevDistance(a.x, a.y, b.x, b.y);
+}
+
+mir2::common::Position step_away_from(const mir2::common::Position& from,
+                                      const mir2::common::Position& anchor) {
+    const int dx = (from.x > anchor.x) ? 1 : (from.x < anchor.x) ? -1 : 0;
+    const int dy = (from.y > anchor.y) ? 1 : (from.y < anchor.y) ? -1 : 0;
+    return {from.x + dx, from.y + dy};
 }
 
 int resolve_skill_level(entt::registry& registry, entt::entity summoner, uint32_t skill_id) {
@@ -99,6 +127,44 @@ mir2::common::ErrorCode SummonSystem::summon_creature(entt::entity summoner, uin
     return mir2::common::ErrorCode::SUCCESS;
 }
 
+bool SummonSystem::convert_monster_to_summon(entt::entity owner, entt::entity monster, int skill_level) {
+    if (!is_valid_entity(registry_, owner) || !is_valid_entity(registry_, monster)) {
+        return false;
+    }
+
+    if (registry_.all_of<SummonComponent>(monster)) {
+        return false;
+    }
+
+    if (!registry_.all_of<MonsterAIComponent>(monster)) {
+        return false;
+    }
+
+    auto& summoner_comp = registry_.get_or_emplace<SummonerComponent>(owner);
+    prune_summons(registry_, owner, summoner_comp);
+
+    registry_.remove<MonsterAIComponent>(monster);
+
+    auto& summon_comp = registry_.emplace<SummonComponent>(monster);
+    const int safe_level = std::max(0, skill_level);
+    const int64_t now_ms = current_time_ms_ > 0 ? current_time_ms_
+                                                : mir2::core::GetCurrentTimestampMs();
+    current_time_ms_ = now_ms;
+
+    summon_comp.owner = owner;
+    summon_comp.skill_id = mir2::common::constants::SKILL_ID_CHARM;
+    summon_comp.skill_level = static_cast<uint8_t>(safe_level);
+    summon_comp.summon_time_ms = now_ms;
+    summon_comp.loyalty_expire_time_ms = now_ms + 600000;
+    summon_comp.ai_state = SummonAIState::IDLE;
+    summon_comp.target_entity = entt::null;
+    summon_comp.last_ai_update_ms = now_ms;
+    summon_comp.next_attack_time_ms = 0;
+
+    summoner_comp.summons.push_back(monster);
+    return true;
+}
+
 void SummonSystem::dismiss_summon(entt::entity summoner, entt::entity summon) {
     if (!is_valid_entity(registry_, summoner)) {
         return;
@@ -161,10 +227,12 @@ void SummonSystem::update(int64_t current_time_ms) {
     std::vector<entt::entity> to_destroy;
     auto summon_view = registry_.view<SummonComponent>();
     for (auto summon : summon_view) {
-        const auto& summon_comp = summon_view.get<SummonComponent>(summon);
+        auto& summon_comp = summon_view.get<SummonComponent>(summon);
         if (!is_valid_entity(registry_, summon_comp.owner)) {
             to_destroy.push_back(summon);
+            continue;
         }
+        update_summon_ai(summon, summon_comp);
     }
 
     for (auto summon : to_destroy) {
@@ -197,18 +265,98 @@ void SummonSystem::check_loyalty_expiration() {
     }
 }
 
+void SummonSystem::update_summon_ai(entt::entity summon, SummonComponent& summon_comp) {
+    if (!is_valid_entity(registry_, summon) ||
+        !is_valid_entity(registry_, summon_comp.owner)) {
+        return;
+    }
+
+    auto* summon_state = registry_.try_get<CharacterStateComponent>(summon);
+    auto* owner_state = registry_.try_get<CharacterStateComponent>(summon_comp.owner);
+    if (!summon_state || !owner_state) {
+        summon_comp.ai_state = SummonAIState::IDLE;
+        summon_comp.target_entity = entt::null;
+        return;
+    }
+
+    if (summon_state->map_id != owner_state->map_id) {
+        summon_comp.ai_state = SummonAIState::IDLE;
+        summon_comp.target_entity = entt::null;
+        return;
+    }
+
+    entt::entity owner_target = entt::null;
+    if (const auto* owner_combat = registry_.try_get<CombatComponent>(summon_comp.owner)) {
+        owner_target = owner_combat->target_entity;
+    }
+
+    if (is_valid_entity(registry_, owner_target) &&
+        owner_target != summon_comp.owner &&
+        owner_target != summon) {
+        const auto* target_state = registry_.try_get<CharacterStateComponent>(owner_target);
+        if (target_state && target_state->map_id == summon_state->map_id) {
+            summon_comp.ai_state = SummonAIState::ATTACK;
+            summon_comp.target_entity = owner_target;
+
+            const int distance = get_tile_distance(summon_state->position, target_state->position);
+            const int attack_range = get_attack_range(registry_.try_get<CombatComponent>(summon));
+
+            if (distance > attack_range) {
+                const auto next = PathfindingHelper::GotoTargetXY(
+                    summon_state->position.x, summon_state->position.y,
+                    target_state->position.x, target_state->position.y);
+                if (next != summon_state->position) {
+                    MovementSystem::SetPosition(registry_, summon, next.x, next.y);
+                }
+            } else if (current_time_ms_ >= summon_comp.next_attack_time_ms) {
+                static const legend2::CombatConfig kDefaultCombatConfig{};
+                CombatSystem::ExecuteAttack(registry_, summon, owner_target, kDefaultCombatConfig);
+                summon_comp.next_attack_time_ms = current_time_ms_ + kSummonAttackCooldownMs;
+            }
+
+            summon_comp.last_ai_update_ms = current_time_ms_;
+            return;
+        }
+    }
+
+    summon_comp.target_entity = entt::null;
+
+    const int owner_distance = get_tile_distance(summon_state->position, owner_state->position);
+    if (owner_distance > kFollowMaxDistance) {
+        summon_comp.ai_state = SummonAIState::FOLLOW;
+        const auto next = PathfindingHelper::GotoTargetXY(
+            summon_state->position.x, summon_state->position.y,
+            owner_state->position.x, owner_state->position.y);
+        if (next != summon_state->position) {
+            MovementSystem::SetPosition(registry_, summon, next.x, next.y);
+        }
+    } else if (owner_distance < kFollowMinDistance) {
+        summon_comp.ai_state = SummonAIState::FOLLOW;
+        const auto next = step_away_from(summon_state->position, owner_state->position);
+        if (next != summon_state->position) {
+            MovementSystem::SetPosition(registry_, summon, next.x, next.y);
+        }
+    } else {
+        summon_comp.ai_state = SummonAIState::IDLE;
+    }
+
+    summon_comp.last_ai_update_ms = current_time_ms_;
+}
+
 entt::entity SummonSystem::create_skeleton(entt::entity owner, int skill_level,
                                            const mir2::common::Position& pos) {
+    const auto* owner_state = registry_.try_get<CharacterStateComponent>(owner);
+    if (!owner_state) {
+        SYSLOG_ERROR("SummonSystem::create_skeleton: owner {} missing CharacterStateComponent",
+                     entt::to_integral(owner));
+        return entt::null;
+    }
+
     entt::entity summon = registry_.create();
 
     auto& state = registry_.emplace<CharacterStateComponent>(summon);
-    if (const auto* owner_state = registry_.try_get<CharacterStateComponent>(owner)) {
-        state.map_id = owner_state->map_id;
-        state.direction = owner_state->direction;
-    } else {
-        state.map_id = 1;
-        state.direction = mir2::common::Direction::DOWN;
-    }
+    state.map_id = owner_state->map_id;
+    state.direction = owner_state->direction;
     state.position = pos;
 
     auto& attributes = registry_.emplace<CharacterAttributesComponent>(summon);
@@ -232,16 +380,18 @@ entt::entity SummonSystem::create_skeleton(entt::entity owner, int skill_level,
 
 entt::entity SummonSystem::create_elf_monster(entt::entity owner, int skill_level,
                                               const mir2::common::Position& pos) {
+    const auto* owner_state = registry_.try_get<CharacterStateComponent>(owner);
+    if (!owner_state) {
+        SYSLOG_ERROR("SummonSystem::create_elf_monster: owner {} missing CharacterStateComponent",
+                     entt::to_integral(owner));
+        return entt::null;
+    }
+
     entt::entity summon = registry_.create();
 
     auto& state = registry_.emplace<CharacterStateComponent>(summon);
-    if (const auto* owner_state = registry_.try_get<CharacterStateComponent>(owner)) {
-        state.map_id = owner_state->map_id;
-        state.direction = owner_state->direction;
-    } else {
-        state.map_id = 1;
-        state.direction = mir2::common::Direction::DOWN;
-    }
+    state.map_id = owner_state->map_id;
+    state.direction = owner_state->direction;
     state.position = pos;
 
     // 神兽属性比骷髅更强

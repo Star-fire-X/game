@@ -27,6 +27,9 @@
 
 namespace mir2::client {
 
+constexpr size_t MAX_SPRITE_AREA = 4096 * 4096;  // 16M 像素上限
+constexpr int MAX_IMAGE_COUNT = 100000;           // 减少到合理上限
+
 // =============================================================================
 // WIX索引文件结构 (WIX Index File Structures)
 // =============================================================================
@@ -543,12 +546,12 @@ public:
     /// @param archive_name Archive name
     /// @param index Sprite index
     /// @return true if sprite is cached
-    bool is_sprite_cached(const std::string& archive_name, int index) const;
+    bool is_sprite_cached(const std::string& archive_name, int index);
     
     /// Check if a map is in cache
     /// @param map_path Path to the map file
     /// @return true if map is cached
-    bool is_map_cached(const std::string& map_path) const;
+    bool is_map_cached(const std::string& map_path);
     
     /// Get sprite cache size
     size_t get_sprite_cache_size() const { return sprite_cache_.size(); }
@@ -572,17 +575,17 @@ public:
     bool is_archive_loaded(const std::string& archive_name) const override;
     
     /// Get total cache memory usage estimate (in bytes)
-    size_t get_estimated_cache_memory() const;
+    size_t get_estimated_cache_memory();
     
 private:
     // Loaded WIL archives
     std::unordered_map<std::string, std::unique_ptr<WilArchive>> archives_;
     
     // Sprite cache (key: "archive_name:index")
-    mutable LRUCache<std::string, Sprite> sprite_cache_;
+    LRUCache<std::string, Sprite> sprite_cache_;
     
     // Map cache (key: map file path)
-    mutable LRUCache<std::string, MapData> map_cache_;
+    LRUCache<std::string, MapData> map_cache_;
     
     // Map loader
     MapLoader map_loader_;

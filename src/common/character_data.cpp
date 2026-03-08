@@ -5,9 +5,31 @@
 
 #include "common/character_data.h"
 
+#include <charconv>
 #include <cctype>
+#include <string_view>
+#include <system_error>
 
 namespace mir2::common {
+
+namespace {
+
+bool ParseAccountIdText(std::string_view text, uint64_t* out) {
+    if (text.empty() || out == nullptr) {
+        return false;
+    }
+    uint64_t parsed = 0;
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto result = std::from_chars(begin, end, parsed);
+    if (result.ec != std::errc() || result.ptr != end) {
+        return false;
+    }
+    *out = parsed;
+    return true;
+}
+
+}  // namespace
 
 // =============================================================================
 // CharacterData 实现 - 用于数据库持久化的角色数据结构
@@ -80,7 +102,19 @@ void to_json(nlohmann::json& j, const CharacterData& data) {
  */
 void from_json(const nlohmann::json& j, CharacterData& data) {
     j.at("id").get_to(data.id);
-    j.at("account_id").get_to(data.account_id);
+    const auto& account_json = j.at("account_id");
+    if (account_json.is_number_unsigned()) {
+        data.account_id = account_json.get<uint64_t>();
+    } else if (account_json.is_number_integer()) {
+        const auto value = account_json.get<int64_t>();
+        data.account_id = value > 0 ? static_cast<uint64_t>(value) : 0;
+    } else if (account_json.is_string()) {
+        const std::string text = account_json.get<std::string>();
+        uint64_t parsed = 0;
+        data.account_id = ParseAccountIdText(text, &parsed) ? parsed : 0;
+    } else {
+        data.account_id = 0;
+    }
     j.at("name").get_to(data.name);
     data.char_class = static_cast<CharacterClass>(j.at("char_class").get<uint8_t>());
     data.gender = static_cast<Gender>(j.at("gender").get<uint8_t>());
@@ -270,7 +304,7 @@ CharacterValidationResult validate_character_create_request(const CharacterCreat
     }
 
     // 验证账号ID不为空
-    if (request.account_id.empty()) {
+    if (request.account_id == 0) {
         return CharacterValidationResult::failure(
             ErrorCode::INVALID_CREDENTIALS,
             "Account ID cannot be empty"

@@ -3,8 +3,8 @@
  * @brief NPC event definitions.
  */
 
-#ifndef MIR2_ECS_EVENTS_NPC_EVENTS_H
-#define MIR2_ECS_EVENTS_NPC_EVENTS_H
+#ifndef MIR2_ECS_EVENTS_NPC_EVENTS_H_
+#define MIR2_ECS_EVENTS_NPC_EVENTS_H_
 
 #include <cstdint>
 #include <string>
@@ -13,6 +13,7 @@
 #include <entt/entt.hpp>
 
 #include "common/types/error_codes.h"
+#include "ecs/id_types.h"
 
 namespace mir2::ecs::events {
 
@@ -256,7 +257,7 @@ struct NpcGetPlayerLevelResultEvent {
 struct NpcOpenGuildEvent {
   entt::entity player;
   uint64_t npc_id;
-  uint32_t guild_id;
+  GuildId guild_id = kInvalidGuildId;
 };
 
 /**
@@ -270,4 +271,4 @@ struct NpcGuardAlertEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // MIR2_ECS_EVENTS_NPC_EVENTS_H
+#endif  // MIR2_ECS_EVENTS_NPC_EVENTS_H_

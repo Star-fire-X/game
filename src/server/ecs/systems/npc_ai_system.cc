@@ -189,25 +189,25 @@ void NpcAISystem::RegisterQueryHandlers(entt::registry& registry,
         return;
     }
 
-    event_bus.Subscribe<ecs::events::NpcHasItemEvent>(
+    query_subscriptions_.push_back(event_bus.SubscribeScoped<ecs::events::NpcHasItemEvent>(
         [this, &registry, &event_bus](const ecs::events::NpcHasItemEvent& event) {
             HandleHasItemQuery(registry, event_bus, event);
-        });
+        }));
 
-    event_bus.Subscribe<ecs::events::NpcGetGoldEvent>(
+    query_subscriptions_.push_back(event_bus.SubscribeScoped<ecs::events::NpcGetGoldEvent>(
         [this, &registry, &event_bus](const ecs::events::NpcGetGoldEvent& event) {
             HandleGetGoldQuery(registry, event_bus, event);
-        });
+        }));
 
-    event_bus.Subscribe<ecs::events::NpcGetPlayerNameEvent>(
+    query_subscriptions_.push_back(event_bus.SubscribeScoped<ecs::events::NpcGetPlayerNameEvent>(
         [this, &registry, &event_bus](const ecs::events::NpcGetPlayerNameEvent& event) {
             HandleGetPlayerInfoQuery(registry, event_bus, event);
-        });
+        }));
 
-    event_bus.Subscribe<ecs::events::NpcGetPlayerLevelEvent>(
+    query_subscriptions_.push_back(event_bus.SubscribeScoped<ecs::events::NpcGetPlayerLevelEvent>(
         [this, &registry, &event_bus](const ecs::events::NpcGetPlayerLevelEvent& event) {
             HandleGetPlayerInfoQuery(registry, event_bus, event);
-        });
+        }));
 
     query_handlers_registered_ = true;
 }

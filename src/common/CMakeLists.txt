@@ -4,11 +4,16 @@
 # Core sources (always built)
 # Note: network_client.cpp moved to src/client/network/
 set(COMMON_SOURCES
+    compression.cpp
     types.cpp
+    utf8_utils.cc
     character_data.cpp
     protocol/packet_codec.cpp
     protocol/message_codec.cpp
     protocol/npc_message_codec.cpp
+    network/channel_router.cc
+    network/fallback_controller.cc
+    3rd_party/ikcp_wrapper.cc
 )
 
 # Configure version header from project version
@@ -17,13 +22,18 @@ set(VERSION_HEADER_OUT ${CMAKE_CURRENT_BINARY_DIR}/version.h)
 configure_file(${VERSION_HEADER_IN} ${VERSION_HEADER_OUT} @ONLY)
 
 # FlatBuffers - already found in root CMakeLists.txt
-find_program(FLATC flatc HINTS ${flatbuffers_BINARY_DIR} ${CMAKE_BINARY_DIR}/_deps/flatbuffers-build)
-if(NOT FLATC)
-    # If FetchContent was used, flatc is built as a target
-    if(TARGET flatc)
-        set(FLATC $<TARGET_FILE:flatc>)
-    else()
-        message(FATAL_ERROR "flatc not found")
+# Prefer vcpkg-provided flatc target when available.
+if(TARGET flatbuffers::flatc)
+    set(FLATC $<TARGET_FILE:flatbuffers::flatc>)
+else()
+    find_program(FLATC flatc HINTS ${flatbuffers_BINARY_DIR} ${CMAKE_BINARY_DIR}/_deps/flatbuffers-build)
+    if(NOT FLATC)
+        # If FetchContent was used, flatc is built as a target
+        if(TARGET flatc)
+            set(FLATC $<TARGET_FILE:flatc>)
+        else()
+            message(FATAL_ERROR "flatc not found")
+        endif()
     endif()
 endif()
 
@@ -33,16 +43,38 @@ file(MAKE_DIRECTORY ${GENERATED_SCHEMA_DIR})
 
 set(SCHEMA_FILES
     ${SCHEMA_DIR}/common.fbs
+    ${SCHEMA_DIR}/internal.fbs
     ${SCHEMA_DIR}/login.fbs
     ${SCHEMA_DIR}/game.fbs
     ${SCHEMA_DIR}/combat.fbs
+    ${SCHEMA_DIR}/item.fbs
+    ${SCHEMA_DIR}/guild.fbs
+    ${SCHEMA_DIR}/party.fbs
+    ${SCHEMA_DIR}/trade.fbs
+    ${SCHEMA_DIR}/ranking.fbs
+    ${SCHEMA_DIR}/mail.fbs
+    ${SCHEMA_DIR}/achievement.fbs
+    ${SCHEMA_DIR}/auction.fbs
+    ${SCHEMA_DIR}/chat.fbs
+    ${SCHEMA_DIR}/system.fbs
 )
 
 set(GENERATED_SCHEMA_HEADERS
     ${GENERATED_SCHEMA_DIR}/common_generated.h
+    ${GENERATED_SCHEMA_DIR}/internal_generated.h
     ${GENERATED_SCHEMA_DIR}/login_generated.h
     ${GENERATED_SCHEMA_DIR}/game_generated.h
     ${GENERATED_SCHEMA_DIR}/combat_generated.h
+    ${GENERATED_SCHEMA_DIR}/item_generated.h
+    ${GENERATED_SCHEMA_DIR}/guild_generated.h
+    ${GENERATED_SCHEMA_DIR}/party_generated.h
+    ${GENERATED_SCHEMA_DIR}/trade_generated.h
+    ${GENERATED_SCHEMA_DIR}/ranking_generated.h
+    ${GENERATED_SCHEMA_DIR}/mail_generated.h
+    ${GENERATED_SCHEMA_DIR}/achievement_generated.h
+    ${GENERATED_SCHEMA_DIR}/auction_generated.h
+    ${GENERATED_SCHEMA_DIR}/chat_generated.h
+    ${GENERATED_SCHEMA_DIR}/system_generated.h
 )
 
 add_custom_command(
@@ -65,11 +97,13 @@ target_include_directories(legend2_common PUBLIC
 )
 
 # yaml-cpp already found in root CMakeLists.txt
+find_package(lz4 CONFIG REQUIRED)
 
 target_link_libraries(legend2_common PUBLIC
     nlohmann_json::nlohmann_json
     flatbuffers
     yaml-cpp::yaml-cpp
+    lz4::lz4
 )
 
 # Platform-specific settings

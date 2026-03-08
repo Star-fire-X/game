@@ -27,7 +27,7 @@ namespace mir2::common {
  */
 struct CharacterData {
     uint32_t id = 0;                    ///< 角色唯一ID
-    std::string account_id;             ///< 所属账号ID
+    uint64_t account_id = 0;            ///< 所属账号ID（稳定数值ID）
     std::string name;                   ///< 角色名称
     CharacterClass char_class = CharacterClass::WARRIOR;  ///< 职业
     Gender gender = Gender::MALE;       ///< 性别
@@ -121,7 +121,7 @@ bool is_valid_character_class(uint8_t class_value);
  * @brief 创建新角色的请求
  */
 struct CharacterCreateRequest {
-    std::string account_id;                              ///< 账号ID
+    uint64_t account_id = 0;                             ///< 账号ID（稳定数值ID）
     std::string name;                                    ///< 角色名称
     CharacterClass char_class = CharacterClass::WARRIOR; ///< 职业
     Gender gender = Gender::MALE;                        ///< 性别

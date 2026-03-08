@@ -3,8 +3,8 @@
  * @brief 内部路由消息编解码
  */
 
-#ifndef MIR2_COMMON_INTERNAL_MESSAGE_HELPER_H
-#define MIR2_COMMON_INTERNAL_MESSAGE_HELPER_H
+#ifndef MIR2_COMMON_INTERNAL_MESSAGE_HELPER_H_
+#define MIR2_COMMON_INTERNAL_MESSAGE_HELPER_H_
 
 #include <cstdint>
 #include <vector>
@@ -55,4 +55,4 @@ bool ParseServiceHelloAck(const std::vector<uint8_t>& buffer, ServiceType* out_s
 
 }  // namespace mir2::common
 
-#endif  // MIR2_COMMON_INTERNAL_MESSAGE_HELPER_H
+#endif  // MIR2_COMMON_INTERNAL_MESSAGE_HELPER_H_

@@ -50,10 +50,19 @@ class MockSocket : public SocketAdapter {
   }
 
   const std::vector<std::vector<uint8_t>>& GetWrites() const { return writes_; }
+  size_t GetWriteCallCount() const { return write_calls_; }
+  size_t GetWritevCallCount() const { return writev_calls_; }
   bool IsClosed() const { return closed_; }
   bool ShutdownCalled() const { return shutdown_called_; }
 
   void async_read_some(const asio::mutable_buffer& buffer, IoHandler handler) override {
+    if (closed_) {
+      asio::post(executor_, [handler = std::move(handler)]() {
+        handler(asio::error::operation_aborted, 0);
+      });
+      return;
+    }
+
     if (read_error_once_) {
       const auto error = read_error_;
       read_error_once_ = false;
@@ -78,6 +87,7 @@ class MockSocket : public SocketAdapter {
       asio::post(executor_, [handler = std::move(handler), error]() { handler(error, 0); });
       return;
     }
+    ++write_calls_;
 
     const auto* data = static_cast<const uint8_t*>(buffer.data());
     writes_.emplace_back(data, data + buffer.size());
@@ -85,13 +95,38 @@ class MockSocket : public SocketAdapter {
     asio::post(executor_, [handler = std::move(handler), bytes]() { handler({}, bytes); });
   }
 
-  void shutdown(asio::ip::tcp::socket::shutdown_type /*type*/, asio::error_code& ec) override {
+  void async_writev(const std::vector<asio::const_buffer>& buffers,
+                    IoHandler handler) override {
+    if (write_error_once_) {
+      const auto error = write_error_;
+      write_error_once_ = false;
+      asio::post(executor_, [handler = std::move(handler), error]() { handler(error, 0); });
+      return;
+    }
+    ++writev_calls_;
+
+    size_t total_bytes = 0;
+    std::vector<uint8_t> combined;
+    for (const auto& buffer : buffers) {
+      const auto* data = static_cast<const uint8_t*>(buffer.data());
+      const size_t size = buffer.size();
+      total_bytes += size;
+      combined.insert(combined.end(), data, data + size);
+    }
+    writes_.push_back(std::move(combined));
+    asio::post(executor_,
+               [handler = std::move(handler), total_bytes]() { handler({}, total_bytes); });
+  }
+
+  void shutdown(asio::socket_base::shutdown_type /*type*/, asio::error_code& ec) override {
     shutdown_called_ = true;
+    CancelPendingRead(asio::error::operation_aborted);
     ec.clear();
   }
 
   void close(asio::error_code& ec) override {
     closed_ = true;
+    CancelPendingRead(asio::error::operation_aborted);
     ec.clear();
   }
 
@@ -108,6 +143,17 @@ class MockSocket : public SocketAdapter {
     std::size_t size = 0;
     IoHandler handler;
   };
+
+  void CancelPendingRead(const asio::error_code& error) {
+    if (!pending_read_) {
+      return;
+    }
+    auto handler = std::move(pending_read_->handler);
+    pending_read_.reset();
+    asio::post(executor_, [handler = std::move(handler), error]() mutable {
+      handler(error, 0);
+    });
+  }
 
   void TryFulfillPendingRead() {
     if (!pending_read_) {
@@ -154,6 +200,8 @@ class MockSocket : public SocketAdapter {
   asio::ip::tcp::endpoint endpoint_;
   std::deque<std::vector<uint8_t>> read_queue_;
   std::vector<std::vector<uint8_t>> writes_;
+  size_t write_calls_ = 0;
+  size_t writev_calls_ = 0;
   std::optional<PendingRead> pending_read_;
   asio::error_code read_error_;
   asio::error_code write_error_;

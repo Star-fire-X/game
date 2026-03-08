@@ -423,6 +423,22 @@ TEST(SkillCooldownComponent, CooldownTracking) {
     EXPECT_TRUE(cooldowns.cooldowns.empty());
 }
 
+TEST(SkillCooldownComponent, CleanupExpiredShrinksBucketsAfterLargeErase) {
+    SkillCooldownComponent cooldowns;
+
+    for (uint32_t i = 0; i < 512; ++i) {
+        cooldowns.start_cooldown(i, 1000, 0);
+    }
+    const std::size_t bucket_count_before = cooldowns.cooldowns.bucket_count();
+    ASSERT_GT(bucket_count_before, 0u);
+
+    cooldowns.cleanup_expired(2000);
+    EXPECT_TRUE(cooldowns.cooldowns.empty());
+
+    const std::size_t bucket_count_after = cooldowns.cooldowns.bucket_count();
+    EXPECT_LT(bucket_count_after, bucket_count_before);
+}
+
 TEST(EffectListComponent, EffectManagement) {
     EffectListComponent effects;
 

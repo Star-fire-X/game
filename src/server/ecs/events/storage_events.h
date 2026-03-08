@@ -3,8 +3,8 @@
  * @brief 仓库事件定义
  */
 
-#ifndef LEGEND2_SERVER_ECS_EVENTS_STORAGE_EVENTS_H
-#define LEGEND2_SERVER_ECS_EVENTS_STORAGE_EVENTS_H
+#ifndef MIR2_SERVER_ECS_EVENTS_STORAGE_EVENTS_H_
+#define MIR2_SERVER_ECS_EVENTS_STORAGE_EVENTS_H_
 
 #include <cstdint>
 
@@ -38,4 +38,4 @@ struct ItemWithdrawnEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // LEGEND2_SERVER_ECS_EVENTS_STORAGE_EVENTS_H
+#endif  // MIR2_SERVER_ECS_EVENTS_STORAGE_EVENTS_H_

@@ -4,6 +4,8 @@
 #include "game/event/timed_event_scheduler.h"
 #include "log/logger.h"
 
+#include <algorithm>
+
 namespace mir2::ecs {
 
 RegistryManager::RegistryManager()
@@ -51,6 +53,30 @@ void RegistryManager::UpdateAll(float delta_time) {
     world->Update(delta_time);
   }
   legend2::game::event::TimedEventScheduler::Instance().Update(delta_time);
+}
+
+WorldEntityCountSnapshot RegistryManager::CollectEntityCounts() const {
+  WorldEntityCountSnapshot snapshot;
+  snapshot.per_world.reserve(worlds_.size());
+
+  for (const auto& [map_id, world] : worlds_) {
+    if (!world) {
+      continue;
+    }
+    std::size_t entity_count = 0;
+    const entt::registry& registry = world->Registry();
+    if (const auto* entity_storage = registry.storage<entt::entity>()) {
+      entity_count = static_cast<std::size_t>(entity_storage->free_list());
+    }
+    snapshot.total += entity_count;
+    snapshot.per_world.emplace_back(map_id, entity_count);
+  }
+
+  std::sort(snapshot.per_world.begin(), snapshot.per_world.end(),
+            [](const auto& lhs, const auto& rhs) {
+              return lhs.first < rhs.first;
+            });
+  return snapshot;
 }
 
 CharacterEntityManager& RegistryManager::GetCharacterManager() {

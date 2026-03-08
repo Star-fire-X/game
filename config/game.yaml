@@ -1,3 +1,11 @@
+# ==========================================
+# 废弃通知 (DEPRECATED)
+# ==========================================
+# 本文件为旧 GameServer 配置，已在双进程架构迁移中废弃。
+# 当前生产环境使用 config/logic.yaml 和 config/gateway.yaml。
+# 保留此文件仅作历史参考。
+# ==========================================
+
 server:
   id: 4
   name: "Mir2-Game"
@@ -16,28 +24,11 @@ database:
   database: "mir2_game"
   pool_size: 10
 
-redis:
-  host: "127.0.0.1"
-  port: 6379
-  password: ""
-  db: 0
-
 log:
   level: "info"
   path: "logs"
   max_size_mb: 100
   max_files: 10
-
-services:
-  world:
-    host: "127.0.0.1"
-    port: 7001
-  game:
-    host: "127.0.0.1"
-    port: 7003
-  db:
-    host: "127.0.0.1"
-    port: 7002
 
 ecs:
   world_registry_reserve: 1000

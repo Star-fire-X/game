@@ -119,7 +119,7 @@ void CharacterHandler::HandleCharacterListResponse(const NetworkPacket& packet) 
             mir2::common::CharacterData data;
             data.id = static_cast<uint32_t>(role->player_id());
             const uint64_t account_id = callbacks_.get_account_id ? callbacks_.get_account_id() : 0;
-            data.account_id = std::to_string(account_id);
+            data.account_id = account_id;
             data.name = role->name()->str();
             data.char_class = from_proto_profession(role->profession());
             data.gender = from_proto_gender(role->gender());
@@ -214,7 +214,7 @@ void CharacterHandler::HandleEnterGameResponse(const NetworkPacket& packet) {
     mir2::common::CharacterData data;
     data.id = static_cast<uint32_t>(info->id());
     const uint64_t account_id = callbacks_.get_account_id ? callbacks_.get_account_id() : 0;
-    data.account_id = std::to_string(account_id);
+    data.account_id = account_id;
     data.name = info->name() ? info->name()->str() : "";
     data.char_class = from_proto_profession(info->profession());
     data.gender = mir2::common::Gender::MALE;

@@ -19,7 +19,6 @@
 
 #include "render/i_renderer.h"
 #include "game/map/map_renderer.h"
-#include "render/animation.h"
 #include "client/render/effect_player.h"
 #include "ui/ui_renderer.h"
 #include "audio/audio_engine.h"
@@ -29,6 +28,7 @@
 #include "core/timer.h"
 #include "scene/scene_manager.h"
 #include "render/actor_renderer.h"
+#include "render/ground_item_renderer.h"
 #include "common/types.h"
 #include "common/character_data.h"
 #include "client/network/i_network_manager.h"
@@ -60,6 +60,14 @@ class EffectHandler;
 class SystemHandler;
 class NpcHandler;
 class SkillHandler;
+class ItemHandler;
+class ChatHandler;
+class GuildHandler;
+class TradeHandler;
+class PartyHandler;
+class MailHandler;
+class RankingHandler;
+class AchievementHandler;
 } // namespace mir2::game::handlers
 
 namespace mir2::client {
@@ -75,6 +83,26 @@ namespace mir2::ui {
 class NpcDialogUI;
 class UIManager;
 } // namespace mir2::ui
+
+namespace mir2::ui::hud {
+class HudContainer;
+} // namespace mir2::ui::hud
+
+namespace mir2::ui::inventory {
+class InventoryPanel;
+} // namespace mir2::ui::inventory
+
+namespace mir2::ui::equipment {
+class EquipmentPanel;
+} // namespace mir2::ui::equipment
+
+namespace mir2::ui::chat {
+class ChatPanel;
+} // namespace mir2::ui::chat
+
+namespace mir2::ui::minimap {
+class MinimapWidget;
+} // namespace mir2::ui::minimap
 
 namespace mir2::ui::skill {
 class SkillBar;
@@ -99,11 +127,9 @@ using mir2::scene::LoginFlowState;
 using mir2::render::IRenderer;
 using mir2::render::Camera;
 using mir2::render::Texture;
-using mir2::render::AnimationManager;
 using mir2::render::ActorRenderer;
+using mir2::render::GroundItemRenderer;
 using mir2::render::Actor;
-using mir2::render::AnimatedEntity;
-using mir2::render::CharacterAnimator;
 using mir2::render::EffectPlayer;
 using mir2::ui::UIRenderer;
 using mir2::ui::UIManager;
@@ -120,6 +146,7 @@ using mir2::client::ResourceManager;
 using mir2::client::INetworkManager;
 
 class MovementController;
+class GameClientInput;
 
 // =============================================================================
 // 游戏状态 (Game State)
@@ -189,6 +216,7 @@ struct ClientConfig {
     std::string server_host = "127.0.0.1";      // 服务器地址
     uint16_t server_port = constants::DEFAULT_SERVER_PORT;  // 服务器端口
     bool auto_connect = false;                  // 是否自动连接
+    bool use_v2_protocol = true;                // 是否使用V2协议发送
     
     // 图形设置
     int target_fps = constants::TARGET_FPS;     // 目标FPS
@@ -345,18 +373,33 @@ private:
     std::unique_ptr<handlers::SystemHandler> system_handler_;
     std::unique_ptr<handlers::NpcHandler> npc_handler_;
     std::shared_ptr<handlers::SkillHandler> skill_handler_;
+    std::shared_ptr<handlers::ItemHandler> item_handler_;
+    std::shared_ptr<handlers::ChatHandler> chat_handler_;
+    std::shared_ptr<handlers::GuildHandler> guild_handler_;
+    std::shared_ptr<handlers::TradeHandler> trade_handler_;
+    std::shared_ptr<handlers::PartyHandler> party_handler_;
+    std::shared_ptr<handlers::MailHandler> mail_handler_;
+    std::shared_ptr<handlers::RankingHandler> ranking_handler_;
+    std::shared_ptr<handlers::AchievementHandler> achievement_handler_;
     
     // Rendering subsystems
     std::unique_ptr<MapRenderer> map_renderer_;
-    std::unique_ptr<AnimationManager> animation_manager_;
     std::unique_ptr<EffectPlayer> effect_player_;
     std::unique_ptr<UIRenderer> ui_renderer_;
     std::unique_ptr<AudioManager> audio_manager_;
     std::unique_ptr<LoginScreen> login_screen_;
     std::unique_ptr<ActorRenderer> actor_renderer_;  // 角色渲染
+    std::unique_ptr<GroundItemRenderer> ground_item_renderer_;  // 地面物品渲染
     LoginFlowManager login_flow_;
     std::unique_ptr<UIManager> ui_manager_;
     std::unique_ptr<NpcDialogUI> npc_dialog_ui_;
+
+    // HUD and gameplay UI
+    std::unique_ptr<ui::hud::HudContainer> hud_container_;
+    std::unique_ptr<ui::inventory::InventoryPanel> inventory_panel_;
+    std::unique_ptr<ui::equipment::EquipmentPanel> equipment_panel_;
+    std::unique_ptr<ui::chat::ChatPanel> chat_panel_;
+    std::unique_ptr<ui::minimap::MinimapWidget> minimap_widget_;
 
     // Skill system
     std::unique_ptr<client::skill::SkillManager> skill_manager_;
@@ -377,8 +420,6 @@ private:
 
     // Player
     std::unique_ptr<ClientCharacter> player_;
-    std::unique_ptr<AnimatedEntity> player_entity_;
-    std::unique_ptr<CharacterAnimator> character_animator_;
     Actor player_actor_;  // 玩家角色渲染数据
     Position last_player_pos_ = {-1, -1};
     legend2::PositionInterpolator player_interpolator_;
@@ -395,6 +436,9 @@ private:
 
     // Event dispatcher
     EventDispatcher event_dispatcher_;
+
+    // Input module
+    std::unique_ptr<GameClientInput> input_handler_;
     
     // Timing
     FrameTimer frame_timer_;
@@ -404,6 +448,11 @@ private:
     std::string session_token_;
     uint64_t last_created_player_id_ = 0;
     bool awaiting_enter_game_ = false;
+    uint64_t current_guild_id_ = 0;
+    uint64_t current_party_id_ = 0;
+    uint64_t current_trade_id_ = 0;
+    uint32_t current_party_member_count_ = 0;
+    uint32_t unread_mail_count_ = 0;
 
     // Character selection
     std::vector<CharacterData> character_list_;
@@ -496,10 +545,9 @@ private:
     /// Send skill request to server
     void send_skill_request(uint32_t skill_id, uint64_t target_id);
 
-    /// Validate skill target existence and range.
-    bool validate_skill_target(uint64_t target_id) const;
+    /// Validate skill target (type, range, friendly/hostile).
+    bool validate_skill_target(uint32_t skill_id, uint64_t target_id) const;
 
-    void process_skill_hotkeys();
     void update_skill_system(float delta_time);
     void render_skill_ui();
 

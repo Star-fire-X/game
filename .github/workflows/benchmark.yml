@@ -15,6 +15,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate legacy source gating
+        shell: bash
+        run: scripts/check_build_sources.sh
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -42,22 +46,38 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build --preset vcpkg-benchmark --target combat_core_benchmark
+        run: >-
+          cmake --build --preset vcpkg-benchmark
+          --target combat_core_benchmark ecs_performance_benchmark
 
-      - name: Run benchmarks
+      - name: Run combat-core benchmarks
         shell: pwsh
         run: >-
           build/vcpkg-benchmark/bin/Release/combat_core_benchmark.exe
           --benchmark_format=json
-          --benchmark_out=benchmark_results.json
+          --benchmark_out=benchmark_results_combat_core.json
+          --benchmark_min_time=1s
+
+      - name: Run ECS migration hotpath benchmarks
+        shell: pwsh
+        run: >-
+          build/vcpkg-benchmark/bin/Release/ecs_performance_benchmark.exe
+          --benchmark_filter='BM_MigrationHotPath_.*'
+          --benchmark_format=json
+          --benchmark_out=benchmark_results_ecs_hotpath.json
           --benchmark_min_time=1s
 
       - name: Check thresholds
         shell: pwsh
-        run: python scripts/check_benchmark.py benchmark_results.json
+        run: >-
+          python scripts/check_benchmark.py
+          benchmark_results_combat_core.json
+          benchmark_results_ecs_hotpath.json
 
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: benchmark_results.json
+          path: |
+            benchmark_results_combat_core.json
+            benchmark_results_ecs_hotpath.json

@@ -8,6 +8,9 @@
 #include "ui/states/connecting_state.h"
 #include "ui/states/error_state.h"
 #include "ui/states/login_state_helpers.h"
+#include "ui/states/login_state_interface.h"
+#include "common/utf8_utils.h"
+#include "common/types/constants.h"
 #include "client/resource/resource_loader.h"
 #include "scene/scene_manager.h"
 #include <algorithm>
@@ -16,84 +19,12 @@
 
 namespace mir2::ui::screens {
 
+LoginScreen::~LoginScreen() = default;
+
 namespace {
 constexpr const char* kUILayoutPath = "Data/ui_layout.json";
+constexpr int kClassSelectCount = 5;
 
-int utf8_sequence_length(unsigned char lead) {
-    if (lead <= 0x7F) {
-        return 1;
-    }
-    if ((lead & 0xE0) == 0xC0) {
-        return 2;
-    }
-    if ((lead & 0xF0) == 0xE0) {
-        return 3;
-    }
-    if ((lead & 0xF8) == 0xF0) {
-        return 4;
-    }
-    return 0;
-}
-
-int clamp_cursor_to_boundary(const std::string& text, int pos) {
-    const int size = static_cast<int>(text.size());
-    if (pos < 0) pos = 0;
-    if (pos > size) pos = size;
-    while (pos > 0 && pos < size &&
-           (static_cast<unsigned char>(text[static_cast<size_t>(pos)]) & 0xC0) == 0x80) {
-        --pos;
-    }
-    return pos;
-}
-
-int previous_utf8_boundary(const std::string& text, int pos) {
-    pos = clamp_cursor_to_boundary(text, pos);
-    if (pos <= 0) {
-        return 0;
-    }
-    --pos;
-    while (pos > 0 &&
-           (static_cast<unsigned char>(text[static_cast<size_t>(pos)]) & 0xC0) == 0x80) {
-        --pos;
-    }
-    return pos;
-}
-
-int next_utf8_boundary(const std::string& text, int pos) {
-    pos = clamp_cursor_to_boundary(text, pos);
-    const int size = static_cast<int>(text.size());
-    if (pos >= size) {
-        return size;
-    }
-    const unsigned char lead = static_cast<unsigned char>(text[static_cast<size_t>(pos)]);
-    int len = utf8_sequence_length(lead);
-    if (len <= 0) {
-        return std::min(size, pos + 1);
-    }
-    if (pos + len > size) {
-        return size;
-    }
-    return pos + len;
-}
-
-std::string utf8_prefix(const char* text, size_t max_chars) {
-    std::string result;
-    if (!text || max_chars == 0) {
-        return result;
-    }
-    const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
-    size_t count = 0;
-    while (*p && count < max_chars) {
-        const int len = utf8_sequence_length(*p);
-        if (len <= 0) {
-            break;
-        }
-        result.append(reinterpret_cast<const char*>(p), static_cast<size_t>(len));
-        p += len;
-        ++count;
-    }
-    return result;
-}
 } // namespace
 
 // =============================================================================
@@ -116,7 +47,7 @@ void TextInputField::input_text(const char* text_input) {
         return;
     }
 
-    cursor_pos = clamp_cursor_to_boundary(text, cursor_pos);
+    cursor_pos = mir2::common::clamp_cursor_to_boundary(text, cursor_pos);
 
     const size_t current_len = utf8_length(text.c_str());
     const size_t insert_len = utf8_length(text_input);
@@ -127,7 +58,7 @@ void TextInputField::input_text(const char* text_input) {
         return;
     }
     const size_t remaining = static_cast<size_t>(max_length) - current_len;
-    const std::string insert_text = (insert_len > remaining) ? utf8_prefix(text_input, remaining) : std::string(text_input);
+    const std::string insert_text = (insert_len > remaining) ? mir2::common::utf8_prefix(text_input, remaining) : std::string(text_input);
     if (insert_text.empty()) {
         return;
     }
@@ -143,11 +74,11 @@ void TextInputField::input_text(const char* text_input) {
 }
 
 void TextInputField::backspace() {
-    cursor_pos = clamp_cursor_to_boundary(text, cursor_pos);
+    cursor_pos = mir2::common::clamp_cursor_to_boundary(text, cursor_pos);
     if (cursor_pos <= 0) {
         return;
     }
-    const int prev_pos = previous_utf8_boundary(text, cursor_pos);
+    const int prev_pos = mir2::common::previous_utf8_boundary(text, cursor_pos);
     const int erase_len = cursor_pos - prev_pos;
     if (erase_len <= 0) {
         return;
@@ -157,11 +88,11 @@ void TextInputField::backspace() {
 }
 
 void TextInputField::delete_char() {
-    cursor_pos = clamp_cursor_to_boundary(text, cursor_pos);
+    cursor_pos = mir2::common::clamp_cursor_to_boundary(text, cursor_pos);
     if (cursor_pos >= static_cast<int>(text.length())) {
         return;
     }
-    const int next_pos = next_utf8_boundary(text, cursor_pos);
+    const int next_pos = mir2::common::next_utf8_boundary(text, cursor_pos);
     const int erase_len = next_pos - cursor_pos;
     if (erase_len <= 0) {
         return;
@@ -170,11 +101,11 @@ void TextInputField::delete_char() {
 }
 
 void TextInputField::cursor_left() {
-    cursor_pos = previous_utf8_boundary(text, cursor_pos);
+    cursor_pos = mir2::common::previous_utf8_boundary(text, cursor_pos);
 }
 
 void TextInputField::cursor_right() {
-    cursor_pos = next_utf8_boundary(text, cursor_pos);
+    cursor_pos = mir2::common::next_utf8_boundary(text, cursor_pos);
 }
 
 void TextInputField::clear() {
@@ -202,11 +133,11 @@ LoginScreen::LoginScreen(SDLRenderer& renderer, UIRenderer& ui_renderer, Resourc
 {
     // Initialize fields
     username_field_.placeholder = "Username";
-    username_field_.max_length = 20;
+    username_field_.max_length = static_cast<int>(mir2::common::constants::LOGIN_USERNAME_MAX_LENGTH);
     
     password_field_.placeholder = "Password";
     password_field_.password = true;
-    password_field_.max_length = 20;
+    password_field_.max_length = static_cast<int>(mir2::common::constants::LOGIN_PASSWORD_MAX_LENGTH);
     
     create_name_field_.placeholder = "Character Name";
     create_name_field_.max_length = 12;
@@ -220,73 +151,327 @@ LoginScreen::LoginScreen(SDLRenderer& renderer, UIRenderer& ui_renderer, Resourc
         std::cerr << "[LoginScreen] Falling back to built-in layout for login screen.\n";
     }
 
-    state_context_ = std::make_unique<LoginStateContext>(LoginStateContext{
-        renderer_,
-        ui_renderer_,
-        resource_manager_,
-        layout_loader_,
-        width_,
-        height_,
-        LoginStateEnterReason::Transition,
-        username_field_,
-        password_field_,
-        login_confirm_bounds_,
-        offline_button_,
-        character_slots_,
-        selected_character_index_,
-        create_name_field_,
-        create_class_,
-        create_gender_,
-        confirm_create_button_,
-        cancel_create_button_,
-        selected_create_class_index_,
-        selected_create_gender_index_,
-        class_panel_visible_,
-        class_panel_visibility_,
-        create_button_bounds_,
-        class_panel_bounds_,
-        class_select_bounds_,
-        preview_area_bounds_,
-        start_game_bounds_,
-        created_name_bounds_,
-        created_level_bounds_,
-        created_class_bounds_,
-        cursor_blink_timer_,
-        cursor_visible_,
-        login_animation_playing_,
-        login_animation_frame_,
-        login_animation_timer_,
-        login_animation_frame_time_,
-        pending_username_,
-        pending_password_,
-        preview_animation_frame_,
-        preview_animation_timer_,
-        preview_animation_frame_time_,
-        background_texture_,
-        create_background_texture_,
-        class_panel_texture_,
-        class_select_textures_,
-        class_highlight_textures_,
-        login_animation_frames_,
-        character_preview_frames_,
-        on_login_,
-        on_character_select_,
-        on_character_create_,
-        on_start_game_,
-        on_offline_play_,
-        created_character_name_,
-        created_character_class_,
-        created_character_gender_,
-        created_character_level_,
-        has_created_character_,
-        error_message_,
-        error_timer_,
-        status_text_,
-        [this](LoginScreenState state) { set_state(state); },
-        [this](const std::string& msg) { set_error(msg); }
-    });
-
     transition_to(build_state(LoginScreenState::LOGIN));
+}
+
+SDLRenderer& LoginScreen::get_renderer() const {
+    return renderer_;
+}
+
+UIRenderer& LoginScreen::get_ui_renderer() const {
+    return ui_renderer_;
+}
+
+UILayoutLoader& LoginScreen::get_layout_loader() const {
+    return layout_loader_;
+}
+
+int LoginScreen::get_screen_width() const {
+    return width_;
+}
+
+int LoginScreen::get_screen_height() const {
+    return height_;
+}
+
+LoginStateEnterReason LoginScreen::get_enter_reason() const {
+    return enter_reason_;
+}
+
+const std::string& LoginScreen::get_status_text() const {
+    return status_text_;
+}
+
+const std::string& LoginScreen::get_error_message() const {
+    return error_message_;
+}
+
+TextInputField& LoginScreen::get_username_field() {
+    return username_field_;
+}
+
+TextInputField& LoginScreen::get_password_field() {
+    return password_field_;
+}
+
+Rect& LoginScreen::get_login_confirm_bounds() {
+    return login_confirm_bounds_;
+}
+
+Button& LoginScreen::get_offline_button() {
+    return offline_button_;
+}
+
+std::vector<CharacterSlot>& LoginScreen::get_character_slots() {
+    return character_slots_;
+}
+
+void LoginScreen::set_selected_character_index(int index) {
+    selected_character_index_ = index;
+}
+
+TextInputField& LoginScreen::get_create_name_field() {
+    return create_name_field_;
+}
+
+void LoginScreen::set_create_class(CharacterClass c) {
+    create_class_ = c;
+}
+
+void LoginScreen::set_create_gender(Gender g) {
+    create_gender_ = g;
+}
+
+Button& LoginScreen::get_confirm_create_button() {
+    return confirm_create_button_;
+}
+
+Button& LoginScreen::get_cancel_create_button() {
+    return cancel_create_button_;
+}
+
+int LoginScreen::get_selected_class_index() const {
+    return selected_create_class_index_;
+}
+
+void LoginScreen::set_selected_class_index(int idx) {
+    selected_create_class_index_ = idx;
+}
+
+int LoginScreen::get_selected_gender_index() const {
+    return selected_create_gender_index_;
+}
+
+void LoginScreen::set_selected_gender_index(int idx) {
+    selected_create_gender_index_ = idx;
+}
+
+bool LoginScreen::is_class_panel_visible() const {
+    return class_panel_visible_;
+}
+
+void LoginScreen::set_class_panel_visible(bool visible) {
+    class_panel_visible_ = visible;
+}
+
+float LoginScreen::get_class_panel_visibility() const {
+    return class_panel_visibility_;
+}
+
+void LoginScreen::set_class_panel_visibility(float v) {
+    class_panel_visibility_ = v;
+}
+
+Rect& LoginScreen::get_create_button_bounds() {
+    return create_button_bounds_;
+}
+
+Rect& LoginScreen::get_class_panel_bounds() {
+    return class_panel_bounds_;
+}
+
+Rect& LoginScreen::get_class_select_bounds(int index) {
+    if (index < 0 || index >= kClassSelectCount) {
+        return invalid_bounds_;
+    }
+    return class_select_bounds_[index];
+}
+
+Rect& LoginScreen::get_preview_area_bounds() {
+    return preview_area_bounds_;
+}
+
+Rect& LoginScreen::get_start_game_bounds() {
+    return start_game_bounds_;
+}
+
+Rect& LoginScreen::get_created_name_bounds() {
+    return created_name_bounds_;
+}
+
+Rect& LoginScreen::get_created_level_bounds() {
+    return created_level_bounds_;
+}
+
+Rect& LoginScreen::get_created_class_bounds() {
+    return created_class_bounds_;
+}
+
+const std::string& LoginScreen::get_created_character_name() const {
+    return created_character_name_;
+}
+
+CharacterClass LoginScreen::get_created_character_class() const {
+    return created_character_class_;
+}
+
+Gender LoginScreen::get_created_character_gender() const {
+    return created_character_gender_;
+}
+
+int LoginScreen::get_created_character_level() const {
+    return created_character_level_;
+}
+
+bool LoginScreen::has_created_character() const {
+    return has_created_character_;
+}
+
+bool LoginScreen::is_cursor_visible() const {
+    return cursor_visible_;
+}
+
+bool LoginScreen::is_login_animation_playing() const {
+    return login_animation_playing_;
+}
+
+void LoginScreen::set_login_animation_playing(bool playing) {
+    login_animation_playing_ = playing;
+}
+
+void LoginScreen::start_login_animation(const std::string& username, const std::string& password) {
+    pending_username_ = username;
+    pending_password_ = password;
+    login_animation_playing_ = true;
+    login_animation_frame_ = 0;
+    login_animation_timer_ = 0.0f;
+}
+
+int LoginScreen::get_login_animation_frame() const {
+    return login_animation_frame_;
+}
+
+void LoginScreen::set_login_animation_frame(int frame) {
+    login_animation_frame_ = frame;
+}
+
+float LoginScreen::get_login_animation_timer() const {
+    return login_animation_timer_;
+}
+
+void LoginScreen::set_login_animation_timer(float timer) {
+    login_animation_timer_ = timer;
+}
+
+float LoginScreen::get_login_animation_frame_time() const {
+    return login_animation_frame_time_;
+}
+
+const std::string& LoginScreen::get_pending_username() const {
+    return pending_username_;
+}
+
+const std::string& LoginScreen::get_pending_password() const {
+    return pending_password_;
+}
+
+void LoginScreen::clear_pending_credentials() {
+    if (!pending_username_.empty()) {
+        std::fill(pending_username_.begin(), pending_username_.end(), '\0');
+        pending_username_.clear();
+        pending_username_.shrink_to_fit();
+    }
+    if (!pending_password_.empty()) {
+        std::fill(pending_password_.begin(), pending_password_.end(), '\0');
+        pending_password_.clear();
+        pending_password_.shrink_to_fit();
+    }
+}
+
+int LoginScreen::get_preview_animation_frame() const {
+    return preview_animation_frame_;
+}
+
+void LoginScreen::set_preview_animation_frame(int frame) {
+    preview_animation_frame_ = frame;
+}
+
+float LoginScreen::get_preview_animation_timer() const {
+    return preview_animation_timer_;
+}
+
+void LoginScreen::set_preview_animation_timer(float timer) {
+    preview_animation_timer_ = timer;
+}
+
+float LoginScreen::get_preview_animation_frame_time() const {
+    return preview_animation_frame_time_;
+}
+
+ResourceManager& LoginScreen::get_resource_manager() {
+    return resource_manager_;
+}
+
+std::shared_ptr<Texture> LoginScreen::get_background_texture() const {
+    return background_texture_;
+}
+
+std::shared_ptr<Texture> LoginScreen::get_create_background_texture() const {
+    return create_background_texture_;
+}
+
+std::shared_ptr<Texture> LoginScreen::get_class_panel_texture() const {
+    return class_panel_texture_;
+}
+
+const std::vector<std::shared_ptr<Texture>>& LoginScreen::get_class_select_textures() const {
+    return class_select_textures_;
+}
+
+const std::vector<std::shared_ptr<Texture>>& LoginScreen::get_class_highlight_textures() const {
+    return class_highlight_textures_;
+}
+
+const std::vector<AnimationFrame>& LoginScreen::get_login_animation_frames() const {
+    return login_animation_frames_;
+}
+
+std::vector<AnimationFrame>& LoginScreen::get_character_preview_frames(int index) {
+    if (index < 0 || index >= layout::MAX_CHARACTER_PREVIEW_SLOTS) {
+        return invalid_preview_frames_;
+    }
+    return character_preview_frames_[index];
+}
+
+const std::vector<AnimationFrame>& LoginScreen::get_character_preview_frames(int index) const {
+    if (index < 0 || index >= layout::MAX_CHARACTER_PREVIEW_SLOTS) {
+        return invalid_preview_frames_;
+    }
+    return character_preview_frames_[index];
+}
+
+void LoginScreen::transition_to(LoginScreenState state) {
+    set_state(state);
+}
+
+void LoginScreen::invoke_login(const std::string& username, const std::string& password) {
+    if (on_login_) {
+        on_login_(username, password);
+    }
+}
+
+void LoginScreen::invoke_character_select(uint32_t character_id) {
+    if (on_character_select_) {
+        on_character_select_(character_id);
+    }
+}
+
+void LoginScreen::invoke_character_create(const std::string& name, CharacterClass c, Gender g) {
+    if (on_character_create_) {
+        on_character_create_(name, c, g);
+    }
+}
+
+void LoginScreen::invoke_start_game() {
+    if (on_start_game_) {
+        on_start_game_();
+    }
+}
+
+void LoginScreen::invoke_offline_play() {
+    if (on_offline_play_) {
+        on_offline_play_();
+    }
 }
 
 void LoginScreen::set_state_machine(const SceneStateMachine* state_machine) {
@@ -340,9 +525,7 @@ void LoginScreen::set_created_character_info(const std::string& name, CharacterC
     created_character_level_ = level;
     has_created_character_ = true;
 
-    if (state_context_) {
-        load_character_preview_on_demand(*state_context_, char_class, gender);
-    }
+    load_character_preview_on_demand(*this, char_class, gender);
     preview_animation_frame_ = 0;
     preview_animation_timer_ = 0.0f;
 }
@@ -536,26 +719,22 @@ void LoginScreen::render() {
 }
 
 std::unique_ptr<ILoginState> LoginScreen::build_state(LoginScreenState state) {
-    if (!state_context_) {
-        return nullptr;
-    }
-
     switch (state) {
         case LoginScreenState::LOGIN:
-            return std::make_unique<LoginInputState>(*state_context_);
+            return std::make_unique<LoginInputState>(*this);
         case LoginScreenState::CHARACTER_SELECT:
-            return std::make_unique<CharacterSelectState>(*state_context_);
+            return std::make_unique<CharacterSelectState>(*this);
         case LoginScreenState::CHARACTER_CREATE:
-            return std::make_unique<CharacterCreateState>(*state_context_);
+            return std::make_unique<CharacterCreateState>(*this);
         case LoginScreenState::CONNECTING:
-            return std::make_unique<ConnectingState>(*state_context_);
+            return std::make_unique<ConnectingState>(*this);
         case LoginScreenState::ERROR:
-            return std::make_unique<ErrorState>(*state_context_);
+            return std::make_unique<ErrorState>(*this);
         default:
             break;
     }
 
-    return std::make_unique<LoginInputState>(*state_context_);
+    return std::make_unique<LoginInputState>(*this);
 }
 
 void LoginScreen::transition_to(std::unique_ptr<ILoginState> new_state) {
@@ -570,19 +749,17 @@ void LoginScreen::transition_to(std::unique_ptr<ILoginState> new_state) {
 
     current_state_ = std::move(new_state);
     state_ = current_state_->get_state_type();
-    if (state_context_) {
-        state_context_->enter_reason = LoginStateEnterReason::Transition;
-    }
+    enter_reason_ = LoginStateEnterReason::Transition;
     current_state_->on_enter();
 }
 
 void LoginScreen::refresh_layout() {
-    if (!current_state_ || !state_context_) {
+    if (!current_state_) {
         return;
     }
-    state_context_->enter_reason = LoginStateEnterReason::LayoutRefresh;
+    enter_reason_ = LoginStateEnterReason::LayoutRefresh;
     current_state_->on_enter();
-    state_context_->enter_reason = LoginStateEnterReason::Transition;
+    enter_reason_ = LoginStateEnterReason::Transition;
 }
 
 } // namespace mir2::ui::screens

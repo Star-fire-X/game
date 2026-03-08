@@ -1,0 +1,7 @@
+Disconnect Peak Curve (gateway_session_unregister delta/sample)
+===============================================================
+    0.0s [business  ] |  0
+    1.0s [business  ] | ######################################## 4
+    2.0s [business  ] | #################### 2
+    3.0s [business  ] | ########## 1
+    4.0s [business  ] | ########## 1

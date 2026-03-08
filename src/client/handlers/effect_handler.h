@@ -15,6 +15,10 @@
 #include <optional>
 #include <string>
 
+namespace mir2::proto {
+enum class EntityType : uint8_t;
+}
+
 namespace mir2::game::handlers {
 
 /**
@@ -72,6 +76,14 @@ public:
                            uint8_t direction,
                            uint32_t duration_ms)> on_play_effect;
         std::function<void(const std::string& sound_id, int x, int y)> on_play_sound;
+        std::function<void(uint64_t entity_id,
+                           mir2::proto::EntityType entity_type,
+                           uint32_t buff_id,
+                           uint32_t duration_ms,
+                           uint16_t stack_count)> on_buff_add;
+        std::function<void(uint64_t entity_id,
+                           mir2::proto::EntityType entity_type,
+                           uint32_t buff_id)> on_buff_remove;
         std::function<void(const std::string& error)> on_parse_error;
     };
 
@@ -85,6 +97,8 @@ public:
     void HandleSkillEffect(const NetworkPacket& packet);
     void HandlePlayEffect(const NetworkPacket& packet);
     void HandlePlaySound(const NetworkPacket& packet);
+    void HandleBuffAdd(const NetworkPacket& packet);
+    void HandleBuffRemove(const NetworkPacket& packet);
 
 private:
     Callbacks callbacks_;

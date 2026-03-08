@@ -7,14 +7,16 @@
 #include "ecs/components/item_component.h"
 #include "ecs/components/monster_component.h"
 #include "ecs/components/character_components.h"
+#include "ecs/components/party_component.h"
+#include "ecs/events/combat_events.h"
 #include "ecs/events/inventory_events.h"
-#include "ecs/events/skill_events.h"
 #include "ecs/event_bus.h"
 
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <random>
+#include <cmath>
 
 #include <yaml-cpp/yaml.h>
 
@@ -134,7 +136,19 @@ void MonsterDropSystem::LoadDropTables(const std::string& config_path) {
     }
 }
 
+void MonsterDropSystem::ReplaceAllDropTables(
+    const std::unordered_map<uint32_t, game::entity::MonsterDropTable>& tables) {
+    drop_tables_.clear();
+    drop_tables_ = tables;
+}
+
 void MonsterDropSystem::OnMonsterDeath(entt::entity monster, entt::entity killer) {
+    DamageContributors empty_contributors;
+    OnMonsterDeath(monster, killer, empty_contributors);
+}
+
+void MonsterDropSystem::OnMonsterDeath(entt::entity monster, entt::entity killer,
+                                        const DamageContributors& damage_contributors) {
     (void)killer;
     if (!registry_ || !registry_->valid(monster)) {
         return;
@@ -150,15 +164,17 @@ void MonsterDropSystem::OnMonsterDeath(entt::entity monster, entt::entity killer
         return;
     }
 
+    const auto* ai = registry_->try_get<MonsterAIComponent>(monster);
+    const bool is_boss = ai && ai->ai_type == MonsterAIType::kBossCowKing;
+
     auto it = drop_tables_.find(identity->monster_template_id);
     if (it == drop_tables_.end()) {
         return;
     }
 
-    // 缓存地图ID以便创建掉落实体
     cached_loot_map_id_ = state->map_id;
-
-    const auto drops = SelectDropItems(it->second);
+    const auto drops = is_boss ? SelectDropItemsForBoss(it->second)
+                               : SelectDropItems(it->second);
     if (drops.empty()) {
         return;
     }
@@ -166,8 +182,33 @@ void MonsterDropSystem::OnMonsterDeath(entt::entity monster, entt::entity killer
     const int32_t x = state->position.x;
     const int32_t y = state->position.y;
 
+    // 确定掉落归属
+    LootMode loot_mode = LootMode::FREE_FOR_ALL;
+    int32_t loot_range = 15;
+
+    // 检查击杀者是否在小队中
+    auto* party_member = registry_->try_get<PartyMemberComponent>(killer);
+    if (party_member && party_member->party_id != 0) {
+        // 查找小队实体
+        auto party_view = registry_->view<PartyComponent>();
+        for (auto [entity, party] : party_view.each()) {
+            if (party.party_id == party_member->party_id) {
+                loot_mode = party.loot_mode;
+                loot_range = party.loot_range;
+                break;
+            }
+        }
+    }
+
+    // 获取范围内的小队成员
+    auto candidates = GetPartyMembersInRange(killer, x, y, loot_range);
+    if (candidates.empty()) {
+        candidates.push_back(killer);
+    }
+
     for (const auto& item : drops) {
-        CreateLootEntity(*registry_, item, x, y);
+        entt::entity owner = SelectLootOwner(candidates, damage_contributors, loot_mode);
+        CreateLootEntity(*registry_, item, x, y, owner);
     }
 }
 
@@ -187,14 +228,73 @@ std::vector<game::entity::DropItem> MonsterDropSystem::SelectDropItems(
     return result;
 }
 
+std::vector<game::entity::DropItem> MonsterDropSystem::SelectDropItemsForBoss(
+    const game::entity::MonsterDropTable& table) {
+
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+
+    std::vector<game::entity::DropItem> result;
+    if (table.items.empty()) {
+        return result;
+    }
+
+    std::vector<float> adjusted_rates;
+    adjusted_rates.reserve(table.items.size());
+
+    for (const auto& item : table.items) {
+        float rate = item.drop_rate;
+        if (item.boss_bonus != 0.0f) {
+            rate *= (1.0f + item.boss_bonus);
+        }
+        if (item.rarity >= 3) {
+            rate += 0.2f;
+        }
+        rate = std::clamp(rate, 0.0f, 1.0f);
+        adjusted_rates.push_back(rate);
+
+        if (dis(gen) < rate) {
+            result.push_back(item);
+        }
+    }
+
+    if (result.empty()) {
+        float total_weight = 0.0f;
+        for (float rate : adjusted_rates) {
+            total_weight += rate;
+        }
+
+        size_t index = 0;
+        if (total_weight > 0.0f) {
+            std::uniform_real_distribution<float> pick_dis(0.0f, total_weight);
+            const float pick = pick_dis(gen);
+            float accumulated = 0.0f;
+            for (size_t i = 0; i < adjusted_rates.size(); ++i) {
+                accumulated += adjusted_rates[i];
+                if (pick <= accumulated) {
+                    index = i;
+                    break;
+                }
+            }
+        } else {
+            std::uniform_int_distribution<size_t> index_dis(0, table.items.size() - 1);
+            index = index_dis(gen);
+        }
+        result.push_back(table.items[index]);
+    }
+
+    return result;
+}
+
 void MonsterDropSystem::CreateLootEntity(entt::registry& registry,
                                          const game::entity::DropItem& item,
-                                         int32_t x, int32_t y) {
+                                         int32_t x, int32_t y,
+                                         entt::entity owner) {
     if (item.item_id == 0) {
         return;
     }
 
-    // 随机数量用于生成掉落堆叠
     static thread_local std::mt19937 gen(std::random_device{}());
     const int min_count = std::max(1, item.min_count);
     const int max_count = std::max(min_count, item.max_count);
@@ -211,10 +311,9 @@ void MonsterDropSystem::CreateLootEntity(entt::registry& registry,
     item_component.item_id = item.item_id;
     item_component.count = count;
 
-    // 标记为地面物品（无所属）
-    auto& owner = registry.emplace<InventoryOwnerComponent>(loot);
-    owner.owner = entt::null;
-    owner.slot_index = -1;
+    auto& inv_owner = registry.emplace<InventoryOwnerComponent>(loot);
+    inv_owner.owner = owner;  // 设置掉落归属
+    inv_owner.slot_index = -1;
 
     auto& state = registry.emplace<CharacterStateComponent>(loot);
     state.map_id = cached_loot_map_id_;
@@ -223,7 +322,7 @@ void MonsterDropSystem::CreateLootEntity(entt::registry& registry,
 
     if (event_bus_) {
         events::ItemDroppedEvent event;
-        event.character = entt::null;
+        event.character = owner;
         event.item = loot;
         event.item_id = item_component.item_id;
         event.count = item_component.count;
@@ -237,10 +336,87 @@ void MonsterDropSystem::SubscribeToDeathEvents() {
         return;
     }
 
-    event_bus_->Subscribe<events::EntityDeathEvent>(
+    death_subscription_ = event_bus_->SubscribeScoped<events::EntityDeathEvent>(
         [this](const events::EntityDeathEvent& event) {
             OnMonsterDeath(event.entity, event.killer);
         });
+}
+
+std::vector<entt::entity> MonsterDropSystem::GetPartyMembersInRange(
+    entt::entity player, int32_t x, int32_t y, int32_t range) {
+
+    std::vector<entt::entity> result;
+    if (!registry_ || !registry_->valid(player)) {
+        return result;
+    }
+
+    auto* party_member = registry_->try_get<PartyMemberComponent>(player);
+    if (!party_member || party_member->party_id == 0) {
+        result.push_back(player);
+        return result;
+    }
+
+    // 查找同小队成员
+    auto view = registry_->view<PartyMemberComponent, CharacterStateComponent>();
+    for (auto [entity, pm, state] : view.each()) {
+        if (pm.party_id != party_member->party_id) {
+            continue;
+        }
+        // 检查距离
+        int32_t dx = std::abs(state.position.x - x);
+        int32_t dy = std::abs(state.position.y - y);
+        if (dx <= range && dy <= range) {
+            result.push_back(entity);
+        }
+    }
+
+    return result;
+}
+
+entt::entity MonsterDropSystem::SelectLootOwner(
+    const std::vector<entt::entity>& candidates,
+    const DamageContributors& damage_contributors,
+    LootMode mode) {
+
+    if (candidates.empty()) {
+        return entt::null;
+    }
+
+    static thread_local std::mt19937 gen(std::random_device{}());
+    static thread_local size_t round_robin_index = 0;
+
+    switch (mode) {
+        case LootMode::FREE_FOR_ALL:
+            return entt::null;  // 无归属，任何人可拾取
+
+        case LootMode::ROUND_ROBIN: {
+            round_robin_index = (round_robin_index + 1) % candidates.size();
+            return candidates[round_robin_index];
+        }
+
+        case LootMode::LEADER_ASSIGN:
+            return candidates.front();  // 假设第一个是队长
+
+        case LootMode::DAMAGE_BASED: {
+            if (damage_contributors.empty()) {
+                return candidates.front();
+            }
+            // 找伤害最高的候选者
+            entt::entity best = entt::null;
+            int32_t max_damage = 0;
+            for (auto e : candidates) {
+                auto it = damage_contributors.find(e);
+                if (it != damage_contributors.end() && it->second > max_damage) {
+                    max_damage = it->second;
+                    best = e;
+                }
+            }
+            return best != entt::null ? best : candidates.front();
+        }
+
+        default:
+            return candidates.front();
+    }
 }
 
 }  // namespace mir2::ecs

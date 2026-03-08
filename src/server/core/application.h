@@ -3,8 +3,8 @@
  * @brief 服务器应用框架
  */
 
-#ifndef MIR2_CORE_APPLICATION_H
-#define MIR2_CORE_APPLICATION_H
+#ifndef MIR2_CORE_APPLICATION_H_
+#define MIR2_CORE_APPLICATION_H_
 
 #include <atomic>
 #include <functional>
@@ -57,6 +57,11 @@ class Application {
   void Shutdown();
 
   /**
+   * @brief 释放 io_context work guard，允许无任务时自然退出 run()
+   */
+  void ReleaseWorkGuard();
+
+  /**
    * @brief 获取IO上下文
    */
   asio::io_context& GetIoContext();
@@ -77,4 +82,4 @@ class Application {
 
 }  // namespace mir2::core
 
-#endif  // MIR2_CORE_APPLICATION_H
+#endif  // MIR2_CORE_APPLICATION_H_

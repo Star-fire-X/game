@@ -43,7 +43,7 @@ Rect slot_rect_for_index(int index, int scroll_offset) {
 }
 } // namespace
 
-SkillBook::SkillBook(client::skill::SkillManager& skill_manager)
+SkillBook::SkillBook(client::skill::ISkillManager& skill_manager)
     : skill_manager_(skill_manager) {}
 
 void SkillBook::open() {
@@ -81,7 +81,7 @@ void SkillBook::render(render::IRenderer& renderer) {
     renderer.draw_rect_outline(panel_rect, kPanelBorder);
 
     std::vector<uint32_t> skill_ids;
-    skill_ids.reserve(client::skill::SkillManager::kMaxSkills);
+    skill_ids.reserve(client::skill::kSkillManagerMaxSkills);
     for (const auto& slot : skill_manager_.get_learned_skills()) {
         if (slot.has_value()) {
             skill_ids.push_back(slot->skill_id);
@@ -116,7 +116,7 @@ uint32_t SkillBook::handle_click(int mouse_x, int mouse_y) {
     }
 
     std::vector<uint32_t> skill_ids;
-    skill_ids.reserve(client::skill::SkillManager::kMaxSkills);
+    skill_ids.reserve(client::skill::kSkillManagerMaxSkills);
     for (const auto& slot : skill_manager_.get_learned_skills()) {
         if (slot.has_value()) {
             skill_ids.push_back(slot->skill_id);

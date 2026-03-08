@@ -5,8 +5,8 @@
  * 包含已学技能、技能列表、冷却追踪、施法状态等组件。
  */
 
-#ifndef LEGEND2_SERVER_ECS_SKILL_COMPONENT_H
-#define LEGEND2_SERVER_ECS_SKILL_COMPONENT_H
+#ifndef MIR2_SERVER_ECS_SKILL_COMPONENT_H
+#define MIR2_SERVER_ECS_SKILL_COMPONENT_H
 
 #include "common/types.h"
 
@@ -184,13 +184,33 @@ struct SkillCooldownComponent {
      * @brief 清理已过期的冷却记录
      */
     void cleanup_expired(int64_t now_ms) {
+        std::size_t removed = 0;
         for (auto it = cooldowns.begin(); it != cooldowns.end();) {
             if (now_ms >= it->second) {
                 it = cooldowns.erase(it);
+                ++removed;
             } else {
                 ++it;
             }
         }
+
+        // 回收长时间会话中的哈希桶膨胀，避免清理后长期占用过大容量。
+        if (removed == 0) {
+            return;
+        }
+
+        constexpr std::size_t kMinBuckets = 16;
+        const std::size_t bucket_count = cooldowns.bucket_count();
+        if (bucket_count <= kMinBuckets) {
+            return;
+        }
+        if (cooldowns.size() * 4 >= bucket_count) {
+            return;
+        }
+
+        const std::size_t target_buckets =
+            cooldowns.size() * 2 < kMinBuckets ? kMinBuckets : cooldowns.size() * 2;
+        cooldowns.rehash(target_buckets);
     }
 };
 
@@ -253,4 +273,4 @@ struct CastingComponent {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SKILL_COMPONENT_H
+#endif  // MIR2_SERVER_ECS_SKILL_COMPONENT_H

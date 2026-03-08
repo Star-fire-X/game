@@ -1,0 +1,229 @@
+# Prometheus Alert Rules for Legend2 Logic
+groups:
+  - name: logic_alerts
+    interval: 30s
+    rules:
+      - alert: CoroutineLeakSuspected
+        expr: |
+          (max_over_time(logic_coroutine_running_count[10m]) -
+           min_over_time(logic_coroutine_running_count[10m])) > 100
+          and logic_coroutine_running_count > 500
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Coroutine count keeps rising"
+          description: "Running coroutines increased by >100 in 10m and remain above 500. Possible coroutine leak."
+
+      - alert: HandlerLatencyHighP99
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum(rate(logic_handler_latency_ms_bucket[5m])) by (le)
+          ) > 200
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Handler latency p99 above 200ms"
+          description: "P99 handler latency is above 200ms for 5m. Investigate slow handlers or backpressure."
+
+      - alert: LogicThreadAffinityViolationDetected
+        expr: increase(logic_thread_affinity_violation_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: logic
+        annotations:
+          summary: "Logic thread affinity violation detected"
+          description: "Thread affinity violations occurred in the last 5m. ECS/thread-safety assumptions may be broken."
+
+      - alert: EntityVersionMismatchHigh
+        expr: rate(logic_entity_version_mismatch_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Entity version mismatch rate is high"
+          description: "Entity version mismatches are sustained above 1/s for 5m, indicating stale context or cross-thread ordering issues."
+
+      - alert: LegacyDispatchBlockedHigh
+        expr: rate(logic_legacy_dispatch_blocked_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Legacy dispatch blocked rate is high"
+          description: "Legacy dispatch policy blocks are above 10/s for 5m. Check fallback policy and client traffic mix."
+
+      - alert: QueueFullFallbackHigh
+        expr: rate(logic_hot_event_queue_full_fallback_total[5m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+          component: logic
+        annotations:
+          summary: "Queue-full fallback rate is high"
+          description: "Hot-event queue-full fallbacks are above 20/s for 5m, indicating sustained overload."
+
+  - name: storage_alerts
+    interval: 30s
+    rules:
+      - alert: StorageStrictWriteFailures
+        expr: rate(storage_strict_write_fail_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Storage strict writes are failing"
+          description: "Strict write failures detected in the last 5m. Critical data durability guarantees may be broken."
+
+      - alert: StorageOutboxDepthGrowing
+        expr: |
+          delta(storage_outbox_depth[15m]) > 500
+          and storage_outbox_depth > 1000
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage outbox depth keeps growing"
+          description: "Outbox depth grew by more than 500 in 15m and remains above 1000. Persistence workers may be lagging."
+
+      - alert: StorageOutboxRejectedHigh
+        expr: rate(storage_outbox_rejected_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage outbox reject rate is high"
+          description: "Outbox enqueue rejects are sustained above 1/s for 5m. Check outbox capacity and backend availability."
+
+      - alert: StorageRecoveryErrors
+        expr: increase(storage_recovery_error_total[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage startup recovery has errors"
+          description: "Startup recovery errors occurred in the last 10m. Investigate backend health and data compatibility."
+
+      - alert: StorageDbPoolUsageHigh
+        expr: avg_over_time(storage_db_pool_usage_ratio[10m]) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage DB pool usage is high"
+          description: "DB connection pool usage ratio stayed above 85% for 10m. Acquire latency and request queueing risk are rising."
+
+      - alert: StorageDbPoolUsageCritical
+        expr: avg_over_time(storage_db_pool_usage_ratio[5m]) > 0.95
+        for: 5m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Storage DB pool usage is critical"
+          description: "DB connection pool usage ratio stayed above 95% for 5m. Pool exhaustion is imminent."
+
+      - alert: StorageL2CircuitBreakerOpen
+        expr: max_over_time(storage_circuit_breaker_l2_state[2m]) == 1
+        for: 2m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Storage L2 circuit breaker is OPEN"
+          description: "L2 breaker stayed OPEN for 2m. Writes/reads to L2 are being blocked or degraded."
+
+      - alert: StorageBackendCircuitBreakerOpen
+        expr: max_over_time(storage_circuit_breaker_backend_state[2m]) == 1
+        for: 2m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Storage backend circuit breaker is OPEN"
+          description: "Backend breaker stayed OPEN for 2m. DB persistence path is currently blocked."
+
+      - alert: StorageQueuePendingHigh
+        expr: max_over_time(storage_queue_pending[10m]) > 2000
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage queue backlog is high"
+          description: "Queue pending depth stayed above 2000 for 10m. Persistence lag is accumulating."
+
+      - alert: StorageDeadLetterDepthHigh
+        expr: max_over_time(storage_dead_letter_depth[10m]) > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage DLQ depth is high"
+          description: "Dead-letter queue depth stayed above 100 for 10m. Persistence failures require triage."
+
+      - alert: StorageDeadLetterDepthCritical
+        expr: max_over_time(storage_dead_letter_depth[5m]) > 1000
+        for: 5m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Storage DLQ depth is critical"
+          description: "Dead-letter queue depth stayed above 1000 for 5m. Data loss risk and sustained write failures are likely."
+
+      - alert: StorageDeadLetterDroppedDetected
+        expr: increase(storage_dead_letter_dropped_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Storage DLQ dropping entries"
+          description: "DLQ dropped entries in the last 10m. Dead-letter retention is saturated and failures are being truncated."
+
+      - alert: StorageInvalidationBroadcastPublishFailures
+        expr: increase(storage_invalidation_broadcast_publish_fail_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage invalidation broadcast publish failures detected"
+          description: "Broadcast publish failures occurred in the last 5m. Cross-process cache coherence may degrade."
+
+      - alert: StorageAccessDenyRatioHigh
+        expr: |
+          (
+            sum(rate(storage_access_deny_total[5m]))
+            / clamp_min(
+                sum(rate(storage_access_allow_total[5m])) +
+                sum(rate(storage_access_deny_total[5m])),
+                0.000001
+              )
+          ) > 0.2
+          and
+          (
+            sum(rate(storage_access_allow_total[5m])) +
+            sum(rate(storage_access_deny_total[5m]))
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Storage access deny ratio is high"
+          description: "Access deny ratio stayed above 20% for 10m under load. Check token rotation, caller identity, and ACL policy."

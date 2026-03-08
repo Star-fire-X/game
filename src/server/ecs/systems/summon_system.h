@@ -3,8 +3,8 @@
  * @brief ECS 召唤系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_SUMMON_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_SUMMON_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_SUMMON_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_SUMMON_SYSTEM_H_
 
 #include "common/types.h"
 #include "ecs/components/summon_component.h"
@@ -19,6 +19,7 @@ public:
 
     mir2::common::ErrorCode summon_creature(entt::entity summoner, uint32_t skill_id,
                                        const mir2::common::Position& pos);
+    bool convert_monster_to_summon(entt::entity owner, entt::entity monster, int skill_level);
     void dismiss_summon(entt::entity summoner, entt::entity summon);
     void dismiss_all_summons(entt::entity summoner);
     void update(int64_t current_time_ms);
@@ -32,8 +33,9 @@ private:
     entt::entity create_elf_monster(entt::entity owner, int skill_level,
                                     const mir2::common::Position& pos);
     void check_loyalty_expiration();
+    void update_summon_ai(entt::entity summon, SummonComponent& summon_comp);
 };
 
 } // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_SUMMON_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_SUMMON_SYSTEM_H_

@@ -19,30 +19,30 @@
 #include "ecs/character_entity_manager.h"
 #include "ecs/components/character_components.h"
 #include "handlers/character/character_handler.h"
-#include "handlers/client_registry.h"
+#include "logic/services/client_registry.h"
 #include "handlers/combat/combat_handler.h"
 #include "handlers/login/login_handler.h"
 #include "handlers/movement/movement_handler.h"
 #include "game/map/scene_manager.h"
-#include "world/role_store.h"
+#include "logic/services/session_role_store.h"
 
 namespace {
 
 using mir2::common::DecodeStatus;
 using mir2::common::NetworkPacket;
-using mir2::common::PacketHeader;
+using mir2::common::PacketHeaderV2;
 
 struct PacketInspection {
     bool header_ok = false;
-    PacketHeader header{};
+    PacketHeaderV2 header{};
     DecodeStatus decode_status = DecodeStatus::kTruncated;
     NetworkPacket packet{};
 };
 
 PacketInspection InspectPacket(const std::vector<uint8_t>& bytes) {
     PacketInspection inspection;
-    inspection.header_ok = PacketHeader::FromBytes(bytes.data(), bytes.size(), &inspection.header);
-    inspection.decode_status = mir2::common::DecodePacket(bytes.data(), bytes.size(), &inspection.packet);
+    inspection.header_ok = PacketHeaderV2::FromBytes(bytes.data(), bytes.size(), &inspection.header);
+    inspection.decode_status = mir2::common::DecodePacketV2(bytes.data(), bytes.size(), &inspection.packet);
     return inspection;
 }
 
@@ -52,7 +52,7 @@ void ExpectPacketMatches(uint16_t msg_id,
     ASSERT_FALSE(bytes.empty());
     const auto inspection = InspectPacket(bytes);
     EXPECT_TRUE(inspection.header_ok);
-    EXPECT_EQ(inspection.header.magic, PacketHeader::kMagic);
+    EXPECT_EQ(inspection.header.magic, PacketHeaderV2::kMagic);
     EXPECT_EQ(inspection.header.msg_id, msg_id);
     EXPECT_EQ(inspection.header.payload_size, payload.size());
     EXPECT_EQ(inspection.decode_status, DecodeStatus::kOk);
@@ -62,7 +62,7 @@ void ExpectPacketMatches(uint16_t msg_id,
 
 std::vector<uint8_t> EncodePacketBytes(uint16_t msg_id, const std::vector<uint8_t>& payload) {
     const uint8_t* data = payload.empty() ? nullptr : payload.data();
-    return mir2::common::EncodePacket(msg_id, data, payload.size());
+    return mir2::common::EncodePacketV2(msg_id, data, payload.size(), /*sequence=*/0);
 }
 
 mir2::game::map::SceneManager::MapConfig BuildMapConfig(int map_id,
@@ -244,7 +244,7 @@ TEST(ProtocolIntegrationTest, LoginInvalidPasswordEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, CreateCharacterSuccessEndToEnd) {
-    mir2::world::RoleStore role_store;
+    mir2::logic::RoleStore role_store;
     entt::registry registry;
     mir2::ecs::CharacterEntityManager entity_manager(registry);
     const uint64_t account_id = 9001;
@@ -301,13 +301,13 @@ TEST(ProtocolIntegrationTest, CreateCharacterSuccessEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, CreateCharacterDuplicateNameEndToEnd) {
-    mir2::world::RoleStore role_store;
+    mir2::logic::RoleStore role_store;
     entt::registry registry;
     mir2::ecs::CharacterEntityManager entity_manager(registry);
     const uint64_t account_id = 9002;
     const uint64_t client_id = 12;
     role_store.BindClientAccount(client_id, account_id);
-    mir2::world::RoleRecord record;
+    mir2::logic::RoleRecord record;
     ASSERT_EQ(role_store.CreateRole(account_id, "Alice", 1, 0, &record),
               mir2::common::ErrorCode::kOk);
 
@@ -356,7 +356,7 @@ TEST(ProtocolIntegrationTest, CreateCharacterDuplicateNameEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, MoveSuccessEndToEnd) {
-    legend2::handlers::ClientRegistry registry;
+    mir2::logic::ClientRegistry registry;
     entt::registry ecs_registry;
     mir2::ecs::CharacterEntityManager character_manager(ecs_registry);
     const uint64_t client_id = 21;
@@ -431,7 +431,7 @@ TEST(ProtocolIntegrationTest, MoveSuccessEndToEnd) {
 }
 
 TEST(ProtocolIntegrationTest, MoveOutOfBoundsEndToEnd) {
-    legend2::handlers::ClientRegistry registry;
+    mir2::logic::ClientRegistry registry;
     entt::registry ecs_registry;
     mir2::ecs::CharacterEntityManager character_manager(ecs_registry);
     const uint64_t client_id = 22;

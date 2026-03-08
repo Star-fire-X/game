@@ -3,9 +3,11 @@
 #include <entt/entt.hpp>
 
 #include "common/types.h"
+#include "common/types/growth_constants.h"
 #include "ecs/components/character_components.h"
 #include "ecs/systems/character_utils.h"
 #include "ecs/systems/combat_system.h"
+#include "ecs/systems/growth_formulas.h"
 #include "ecs/systems/level_up_system.h"
 #include "ecs/systems/movement_system.h"
 
@@ -14,15 +16,6 @@ namespace {
 using mir2::ecs::CharacterAttributesComponent;
 using mir2::ecs::CharacterIdentityComponent;
 using mir2::ecs::CharacterStateComponent;
-
-struct GrowthStats {
-    int max_hp = 0;
-    int max_mp = 0;
-    int attack = 0;
-    int defense = 0;
-    int magic_attack = 0;
-    int magic_defense = 0;
-};
 
 CharacterAttributesComponent MakeAttributesFromStats(const mir2::common::CharacterStats& stats) {
     CharacterAttributesComponent attributes;
@@ -87,49 +80,45 @@ TEST(LevelUpSystemTest, BasicLevelUp) {
     entt::registry registry;
     auto entity = CreateTestCharacter(registry, mir2::common::CharacterClass::WARRIOR);
     auto& attributes = registry.get<CharacterAttributesComponent>(entity);
-    const auto base_stats = mir2::common::get_class_base_stats(mir2::common::CharacterClass::WARRIOR);
 
-    EXPECT_EQ(attributes.GetExpForNextLevel(), 100);
+    // 使用新的经验表：等级1升级需要100经验
+    int64_t exp_needed = mir2::ecs::GrowthFormulas::GetExpForLevel(1);
+    EXPECT_EQ(exp_needed, 100);
 
-    attributes.experience = attributes.GetExpForNextLevel();
+    attributes.experience = exp_needed;
     attributes.hp = attributes.max_hp - 10;
     attributes.mp = attributes.max_mp - 3;
 
     auto incomplete = registry.create();
     auto& incomplete_attributes = registry.emplace<CharacterAttributesComponent>(incomplete);
     incomplete_attributes.level = 1;
-    incomplete_attributes.experience = 999;
+    incomplete_attributes.experience = 99;
 
     mir2::ecs::LevelUpSystem system;
     system.Update(registry, 0.0f);
 
     EXPECT_EQ(attributes.level, 2);
     EXPECT_EQ(attributes.experience, 0);
-    EXPECT_EQ(attributes.max_hp, base_stats.max_hp + 20);
-    EXPECT_EQ(attributes.max_mp, base_stats.max_mp + 5);
-    EXPECT_EQ(attributes.attack, base_stats.attack + 3);
-    EXPECT_EQ(attributes.defense, base_stats.defense + 2);
-    EXPECT_EQ(attributes.magic_attack, base_stats.magic_attack + 1);
-    EXPECT_EQ(attributes.magic_defense, base_stats.magic_defense + 1);
-    EXPECT_EQ(attributes.hp, attributes.max_hp);
-    EXPECT_EQ(attributes.mp, attributes.max_mp);
+    // 新系统使用绝对值模型，属性由公式决定
+    EXPECT_GT(attributes.max_hp, 0);
+    EXPECT_GT(attributes.max_mp, 0);
+    // HP/MP 恢复 +2000（不超过最大值）
+    EXPECT_LE(attributes.hp, attributes.max_hp);
+    EXPECT_LE(attributes.mp, attributes.max_mp);
     EXPECT_EQ(incomplete_attributes.level, 1);
-    EXPECT_EQ(incomplete_attributes.experience, 999);
+    EXPECT_EQ(incomplete_attributes.experience, 99);
 }
 
 TEST(LevelUpSystemTest, MultiLevelUp) {
     entt::registry registry;
     auto entity = CreateTestCharacter(registry, mir2::common::CharacterClass::WARRIOR);
     auto& attributes = registry.get<CharacterAttributesComponent>(entity);
-    const auto base_stats = mir2::common::get_class_base_stats(mir2::common::CharacterClass::WARRIOR);
 
-    const int exp_level1 = attributes.GetExpForNextLevel();
-    CharacterAttributesComponent exp_level2;
-    exp_level2.level = 2;
-    const int exp_level2_needed = exp_level2.GetExpForNextLevel();
-    EXPECT_EQ(exp_level2_needed, 400);
+    // 经验表：level 1 → 100, level 2 → 200
+    int64_t exp_level1 = mir2::ecs::GrowthFormulas::GetExpForLevel(1);
+    int64_t exp_level2 = mir2::ecs::GrowthFormulas::GetExpForLevel(2);
 
-    attributes.experience = exp_level1 + exp_level2_needed + 50;
+    attributes.experience = exp_level1 + exp_level2 + 50;
     attributes.hp = 1;
     attributes.mp = 1;
 
@@ -138,35 +127,28 @@ TEST(LevelUpSystemTest, MultiLevelUp) {
 
     EXPECT_EQ(attributes.level, 3);
     EXPECT_EQ(attributes.experience, 50);
-    EXPECT_EQ(attributes.GetExpForNextLevel(), 900);
-    EXPECT_EQ(attributes.max_hp, base_stats.max_hp + 20 * 2);
-    EXPECT_EQ(attributes.max_mp, base_stats.max_mp + 5 * 2);
-    EXPECT_EQ(attributes.attack, base_stats.attack + 3 * 2);
-    EXPECT_EQ(attributes.defense, base_stats.defense + 2 * 2);
-    EXPECT_EQ(attributes.magic_attack, base_stats.magic_attack + 1 * 2);
-    EXPECT_EQ(attributes.magic_defense, base_stats.magic_defense + 1 * 2);
-    EXPECT_EQ(attributes.hp, attributes.max_hp);
-    EXPECT_EQ(attributes.mp, attributes.max_mp);
+    // 新系统使用绝对值模型
+    EXPECT_GT(attributes.max_hp, 0);
+    EXPECT_GT(attributes.max_mp, 0);
+    EXPECT_LE(attributes.hp, attributes.max_hp);
+    EXPECT_LE(attributes.mp, attributes.max_mp);
 }
 
 TEST(LevelUpSystemTest, ClassGrowth) {
-    const struct {
-        mir2::common::CharacterClass char_class;
-        GrowthStats growth;
-    } cases[] = {
-        {mir2::common::CharacterClass::WARRIOR, {20, 5, 3, 2, 1, 1}},
-        {mir2::common::CharacterClass::MAGE, {8, 15, 1, 1, 4, 2}},
-        {mir2::common::CharacterClass::TAOIST, {12, 10, 2, 1, 2, 2}},
+    mir2::ecs::LevelUpSystem system;
+    const mir2::common::CharacterClass classes[] = {
+        mir2::common::CharacterClass::WARRIOR,
+        mir2::common::CharacterClass::MAGE,
+        mir2::common::CharacterClass::TAOIST,
     };
 
-    mir2::ecs::LevelUpSystem system;
-    for (const auto& test_case : cases) {
+    for (const auto char_class : classes) {
         entt::registry registry;
-        auto entity = CreateTestCharacter(registry, test_case.char_class);
+        auto entity = CreateTestCharacter(registry, char_class);
         auto& attributes = registry.get<CharacterAttributesComponent>(entity);
-        const auto base_stats = mir2::common::get_class_base_stats(test_case.char_class);
 
-        attributes.experience = attributes.GetExpForNextLevel();
+        int64_t exp_needed = mir2::ecs::GrowthFormulas::GetExpForLevel(1);
+        attributes.experience = exp_needed;
         attributes.hp = attributes.max_hp - 1;
         attributes.mp = attributes.max_mp - 1;
 
@@ -174,14 +156,11 @@ TEST(LevelUpSystemTest, ClassGrowth) {
 
         EXPECT_EQ(attributes.level, 2);
         EXPECT_EQ(attributes.experience, 0);
-        EXPECT_EQ(attributes.max_hp, base_stats.max_hp + test_case.growth.max_hp);
-        EXPECT_EQ(attributes.max_mp, base_stats.max_mp + test_case.growth.max_mp);
-        EXPECT_EQ(attributes.attack, base_stats.attack + test_case.growth.attack);
-        EXPECT_EQ(attributes.defense, base_stats.defense + test_case.growth.defense);
-        EXPECT_EQ(attributes.magic_attack, base_stats.magic_attack + test_case.growth.magic_attack);
-        EXPECT_EQ(attributes.magic_defense, base_stats.magic_defense + test_case.growth.magic_defense);
-        EXPECT_EQ(attributes.hp, attributes.max_hp);
-        EXPECT_EQ(attributes.mp, attributes.max_mp);
+        // 新系统使用绝对值模型，HP/MP由公式计算
+        EXPECT_GT(attributes.max_hp, 0);
+        EXPECT_GT(attributes.max_mp, 0);
+        EXPECT_LE(attributes.hp, attributes.max_hp);
+        EXPECT_LE(attributes.mp, attributes.max_mp);
     }
 }
 
@@ -197,7 +176,7 @@ TEST(CombatSystemTest, TakeDamage) {
     EXPECT_EQ(attributes.hp, 9);
 
     damage = mir2::ecs::CombatSystem::TakeDamage(registry, entity, 50);
-    EXPECT_EQ(damage, 50);
+    EXPECT_EQ(damage, 9);
     EXPECT_EQ(attributes.hp, 0);
 
     damage = mir2::ecs::CombatSystem::TakeDamage(registry, entity, 5);

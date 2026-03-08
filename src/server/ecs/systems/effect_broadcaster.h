@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_EFFECT_BROADCASTER_H
-#define LEGEND2_SERVER_ECS_EFFECT_BROADCASTER_H
+#ifndef MIR2_SERVER_ECS_EFFECT_BROADCASTER_H_
+#define MIR2_SERVER_ECS_EFFECT_BROADCASTER_H_
 
 #include "ecs/components/skill_template_component.h"
 #include "common/types.h"
@@ -43,4 +43,4 @@ private:
 
 } // namespace mir2::ecs
 
-#endif // LEGEND2_SERVER_ECS_EFFECT_BROADCASTER_H
+#endif // MIR2_SERVER_ECS_EFFECT_BROADCASTER_H_

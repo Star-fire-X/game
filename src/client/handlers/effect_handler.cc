@@ -61,6 +61,18 @@ void EffectHandler::BindHandlers(mir2::client::INetworkManager& manager) {
                                      self->HandlePlaySound(packet);
                                  }
                              });
+    manager.register_handler(mir2::common::MsgId::kBuffAdd,
+                             [weak_self](const NetworkPacket& packet) {
+                                 if (auto self = weak_self.lock()) {
+                                     self->HandleBuffAdd(packet);
+                                 }
+                             });
+    manager.register_handler(mir2::common::MsgId::kBuffRemove,
+                             [weak_self](const NetworkPacket& packet) {
+                                 if (auto self = weak_self.lock()) {
+                                     self->HandleBuffRemove(packet);
+                                 }
+                             });
 }
 
 void EffectHandler::HandleSkillEffect(const NetworkPacket& packet) {
@@ -184,6 +196,80 @@ void EffectHandler::HandlePlaySound(const NetworkPacket& packet) {
 
     if (callbacks_.on_play_sound) {
         callbacks_.on_play_sound(sound_id, sound->x(), sound->y());
+    }
+}
+
+void EffectHandler::HandleBuffAdd(const NetworkPacket& packet) {
+    std::shared_ptr<void> owner_guard;
+    if (!TryLockCallbackOwner(callbacks_, &owner_guard)) {
+        return;
+    }
+
+    if (packet.payload.empty()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Empty buff-add payload");
+        }
+        return;
+    }
+
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::BuffAdd>(nullptr)) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Invalid buff-add payload");
+        }
+        return;
+    }
+
+    const auto* buff = flatbuffers::GetRoot<mir2::proto::BuffAdd>(packet.payload.data());
+    if (!buff) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Buff-add parse failed");
+        }
+        return;
+    }
+
+    if (callbacks_.on_buff_add) {
+        callbacks_.on_buff_add(buff->entity_id(),
+                               buff->entity_type(),
+                               buff->buff_id(),
+                               buff->duration_ms(),
+                               buff->stack_count());
+    }
+}
+
+void EffectHandler::HandleBuffRemove(const NetworkPacket& packet) {
+    std::shared_ptr<void> owner_guard;
+    if (!TryLockCallbackOwner(callbacks_, &owner_guard)) {
+        return;
+    }
+
+    if (packet.payload.empty()) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Empty buff-remove payload");
+        }
+        return;
+    }
+
+    flatbuffers::Verifier verifier(packet.payload.data(), packet.payload.size());
+    if (!verifier.VerifyBuffer<mir2::proto::BuffRemove>(nullptr)) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Invalid buff-remove payload");
+        }
+        return;
+    }
+
+    const auto* buff = flatbuffers::GetRoot<mir2::proto::BuffRemove>(packet.payload.data());
+    if (!buff) {
+        if (callbacks_.on_parse_error) {
+            callbacks_.on_parse_error("Buff-remove parse failed");
+        }
+        return;
+    }
+
+    if (callbacks_.on_buff_remove) {
+        callbacks_.on_buff_remove(buff->entity_id(),
+                                  buff->entity_type(),
+                                  buff->buff_id());
     }
 }
 

@@ -1,5 +1,5 @@
-#ifndef LEGEND2_SERVER_ECS_PASSIVE_SKILL_SYSTEM_H
-#define LEGEND2_SERVER_ECS_PASSIVE_SKILL_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_PASSIVE_SKILL_SYSTEM_H_
+#define MIR2_SERVER_ECS_PASSIVE_SKILL_SYSTEM_H_
 
 #include "ecs/components/skill_component.h"
 #include "ecs/components/character_components.h"

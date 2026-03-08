@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <vector>
 
 using namespace mir2::game::map;
@@ -162,4 +163,169 @@ TEST_F(MapInstanceTest, EmptyMap) {
 
   auto entities = map_->GetEntitiesInView(50, 50);
   EXPECT_EQ(entities.size(), 0);
+}
+
+TEST_F(MapInstanceTest, AOIEventsAreDeferredUntilDispatch) {
+  entt::entity watcher = entt::entity{1};
+  entt::entity target = entt::entity{2};
+
+  std::vector<AOIEventType> event_types;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    (void)watcher_entity;
+    (void)target_entity;
+    (void)x;
+    (void)y;
+    event_types.push_back(event_type);
+  });
+
+  ASSERT_TRUE(map_->AddEntity(watcher, 10, 10));
+  ASSERT_TRUE(map_->AddEntity(target, 11, 10));
+
+  EXPECT_TRUE(event_types.empty());
+  EXPECT_GT(map_->PendingAOIEventCount(), 0u);
+
+  const size_t dispatched = map_->DispatchPendingAOIEvents();
+  EXPECT_EQ(dispatched, event_types.size());
+  EXPECT_EQ(dispatched, 2u);
+  EXPECT_EQ(map_->PendingAOIEventCount(), 0u);
+}
+
+TEST_F(MapInstanceTest, AOIQueueOverflowDoesNotDropDeltas) {
+  constexpr int32_t kBurstEntities = 100;
+
+  size_t delivered_events = 0;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    (void)event_type;
+    (void)watcher_entity;
+    (void)target_entity;
+    (void)x;
+    (void)y;
+    ++delivered_events;
+  });
+
+  const entt::entity watcher = entt::entity{1};
+  ASSERT_TRUE(map_->AddEntity(watcher, 10, 10));
+
+  for (int32_t i = 0; i < kBurstEntities; ++i) {
+    const entt::entity target = static_cast<entt::entity>(100 + i);
+    const int32_t x = 10 + (i % 10);
+    const int32_t y = 10 + (i / 10);
+    ASSERT_TRUE(map_->AddEntity(target, x, y));
+  }
+
+  const size_t expected_events =
+      static_cast<size_t>(kBurstEntities) *
+      static_cast<size_t>(kBurstEntities + 1);
+  EXPECT_GT(map_->PendingAOIEventCount(), 8192u);
+
+  const size_t dispatched_events = map_->DispatchPendingAOIEvents();
+  EXPECT_EQ(dispatched_events, expected_events);
+  EXPECT_EQ(delivered_events, expected_events);
+  EXPECT_EQ(map_->PendingAOIEventCount(), 0u);
+}
+
+TEST_F(MapInstanceTest, AOICappedDispatchMakesRingProgressWhenOverflowIsHuge) {
+  constexpr int32_t kWatcherCount = 64;
+  constexpr size_t kRingCapacity = 8192;
+  constexpr size_t kDispatchCap = 4096;
+  constexpr int32_t kMoveIterations = 128;
+
+  struct CapturedAOIEvent {
+    AOIEventType event_type;
+    entt::entity target;
+  };
+
+  std::vector<CapturedAOIEvent> first_batch_events;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    (void)watcher_entity;
+    (void)x;
+    (void)y;
+    first_batch_events.push_back({event_type, target_entity});
+  });
+
+  const entt::entity ring_only_target = entt::entity{1};
+  const entt::entity burst_target = entt::entity{2};
+  ASSERT_TRUE(map_->AddEntity(ring_only_target, 10, 10));
+  ASSERT_TRUE(map_->AddEntity(burst_target, 10, 10));
+  for (int32_t i = 0; i < kWatcherCount; ++i) {
+    const entt::entity watcher = static_cast<entt::entity>(100 + i);
+    ASSERT_TRUE(map_->AddEntity(watcher, 12 + (i % 8), 12 + (i / 8)));
+  }
+
+  // Reset queue to keep only synthetic move/leave burst below.
+  map_->DispatchPendingAOIEvents();
+  first_batch_events.clear();
+
+  // These leave events are enqueued before overflow-producing move events and
+  // must remain visible to capped dispatch.
+  ASSERT_TRUE(map_->RemoveEntity(ring_only_target));
+
+  for (int32_t i = 0; i < kMoveIterations; ++i) {
+    const int32_t x = (i % 2 == 0) ? 10 : 11;
+    ASSERT_TRUE(map_->UpdateEntityPosition(burst_target, x, 10));
+  }
+
+  ASSERT_GT(map_->PendingAOIEventCount(), kRingCapacity);
+
+  const size_t dispatched = map_->DispatchPendingAOIEvents(kDispatchCap);
+  EXPECT_EQ(dispatched, kDispatchCap);
+  EXPECT_EQ(first_batch_events.size(), dispatched);
+  EXPECT_TRUE(std::any_of(first_batch_events.begin(),
+                          first_batch_events.end(),
+                          [&](const CapturedAOIEvent& event) {
+                            return event.event_type == AOIEventType::kLeave &&
+                                   event.target == ring_only_target;
+                          }));
+}
+
+TEST_F(MapInstanceTest, AOILeaveEventUsesLeaverLatestCoordinates) {
+  entt::entity watcher = entt::entity{1};
+  entt::entity leaver = entt::entity{2};
+
+  struct CapturedEvent {
+    AOIEventType type;
+    entt::entity watcher;
+    entt::entity target;
+    int32_t x;
+    int32_t y;
+  };
+
+  std::vector<CapturedEvent> events;
+  map_->SetAOICallback([&](AOIEventType event_type,
+                           entt::entity watcher_entity,
+                           entt::entity target_entity,
+                           int32_t x,
+                           int32_t y) {
+    events.push_back({event_type, watcher_entity, target_entity, x, y});
+  });
+
+  ASSERT_TRUE(map_->AddEntity(watcher, 10, 10));
+  ASSERT_TRUE(map_->AddEntity(leaver, 11, 10));
+  map_->DispatchPendingAOIEvents();
+
+  events.clear();
+  ASSERT_TRUE(map_->UpdateEntityPosition(leaver, 90, 90));
+  map_->DispatchPendingAOIEvents();
+
+  auto leave_it = std::find_if(
+      events.begin(), events.end(), [&](const CapturedEvent& event) {
+        return event.type == AOIEventType::kLeave &&
+               event.watcher == watcher &&
+               event.target == leaver;
+      });
+  ASSERT_TRUE(leave_it != events.end());
+  EXPECT_EQ(leave_it->x, 90);
+  EXPECT_EQ(leave_it->y, 90);
 }

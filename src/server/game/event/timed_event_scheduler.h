@@ -3,8 +3,8 @@
  * @brief 定时事件调度器定义
  */
 
-#ifndef LEGEND2_SERVER_GAME_EVENT_TIMED_EVENT_SCHEDULER_H
-#define LEGEND2_SERVER_GAME_EVENT_TIMED_EVENT_SCHEDULER_H
+#ifndef MIR2_SERVER_GAME_EVENT_TIMED_EVENT_SCHEDULER_H_
+#define MIR2_SERVER_GAME_EVENT_TIMED_EVENT_SCHEDULER_H_
 
 #include <cstdint>
 #include <mutex>
@@ -94,4 +94,4 @@ class TimedEventScheduler : public mir2::core::Singleton<TimedEventScheduler> {
 
 }  // namespace legend2::game::event
 
-#endif  // LEGEND2_SERVER_GAME_EVENT_TIMED_EVENT_SCHEDULER_H
+#endif  // MIR2_SERVER_GAME_EVENT_TIMED_EVENT_SCHEDULER_H_

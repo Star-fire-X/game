@@ -1,0 +1,37 @@
+// achievement.fbs
+include "common.fbs";
+namespace mir2.proto;
+
+table AchievementProgress {
+  achievement_id: uint;
+  progress: uint;
+  target: uint;
+  completed: bool;
+  claimed: bool;
+  completed_time: ulong;
+  reward_gold: uint;
+}
+
+table AchievementListReq {
+}
+
+table AchievementListRsp {
+  success: bool;
+  error_code: int;
+  achievements: [AchievementProgress];
+}
+
+table AchievementClaimReq {
+  achievement_id: uint;
+}
+
+table AchievementClaimRsp {
+  success: bool;
+  error_code: int;
+  achievement_id: uint;
+  reward_gold: uint;
+}
+
+table AchievementUpdate {
+  achievement: AchievementProgress;
+}

@@ -5,7 +5,8 @@
 
 #include "skill_executor.h"
 
-#include <chrono>
+#include "common/time_utils.h"
+
 #include <utility>
 
 namespace mir2::client::skill {
@@ -39,7 +40,7 @@ SkillUseResult SkillExecutor::try_use_skill(uint32_t skill_id, int current_mp, u
         return SkillUseResult::NotLearned;
     }
 
-    const int64_t now = now_ms();
+    const int64_t now = mir2::common::now_ms();
     if (!manager_.is_ready(skill_id, now)) {
         return SkillUseResult::OnCooldown;
     }
@@ -57,11 +58,6 @@ SkillUseResult SkillExecutor::try_use_skill(uint32_t skill_id, int current_mp, u
     }
 
     return SkillUseResult::Success;
-}
-
-int64_t SkillExecutor::now_ms() {
-    using clock = std::chrono::steady_clock;
-    return std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count();
 }
 
 bool SkillExecutor::is_target_valid(const ClientSkillTemplate& skill, uint64_t target_id) const {

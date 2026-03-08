@@ -3,14 +3,15 @@
  * @brief ECS 战斗逻辑系统
  */
 
-#ifndef LEGEND2_SERVER_ECS_SYSTEMS_COMBAT_SYSTEM_H
-#define LEGEND2_SERVER_ECS_SYSTEMS_COMBAT_SYSTEM_H
+#ifndef MIR2_SERVER_ECS_SYSTEMS_COMBAT_SYSTEM_H_
+#define MIR2_SERVER_ECS_SYSTEMS_COMBAT_SYSTEM_H_
 
-#include "server/combat/combat_core.h"
+#include "server/ecs/systems/combat_core.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/combat_component.h"
 #include "ecs/world.h"
 
+#include <cstdint>
 #include <utility>
 
 namespace mir2::ecs {
@@ -28,7 +29,9 @@ class CombatSystem : public System {
 
     /// 角色受伤，返回实际伤害值
     static int TakeDamage(entt::registry& registry, entt::entity entity, int damage,
-                          EventBus* event_bus = nullptr);
+                          EventBus* event_bus = nullptr,
+                          entt::entity killer = entt::null,
+                          uint32_t skill_id = 0);
     /// 计算并应用伤害，返回伤害计算结果
     static legend2::DamageResult TakeDamageWithCalc(entt::registry& registry,
                                                     entt::entity attacker,
@@ -43,7 +46,9 @@ class CombatSystem : public System {
     static bool ConsumeMP(entt::registry& registry, entt::entity entity, int amount);
     /// 角色死亡
     static void Die(entt::registry& registry, entt::entity entity,
-                    EventBus* event_bus = nullptr);
+                    EventBus* event_bus = nullptr,
+                    entt::entity killer = entt::null,
+                    uint32_t skill_id = 0);
     /// 角色复活
     static void Respawn(entt::registry& registry, entt::entity entity,
                         const mir2::common::Position& pos, float hp_percent = 1.0f,
@@ -74,4 +79,4 @@ class CombatSystem : public System {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_SYSTEMS_COMBAT_SYSTEM_H
+#endif  // MIR2_SERVER_ECS_SYSTEMS_COMBAT_SYSTEM_H_

@@ -3,8 +3,8 @@
  * @brief 全局 ECS Registry 管理器
  */
 
-#ifndef LEGEND2_SERVER_ECS_REGISTRY_MANAGER_H
-#define LEGEND2_SERVER_ECS_REGISTRY_MANAGER_H
+#ifndef MIR2_SERVER_ECS_REGISTRY_MANAGER_H_
+#define MIR2_SERVER_ECS_REGISTRY_MANAGER_H_
 
 #include "ecs/character_entity_manager.h"
 #include "ecs/world.h"
@@ -12,9 +12,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <unordered_map>
+#include <vector>
 
 namespace mir2::ecs {
+
+struct WorldEntityCountSnapshot {
+  std::size_t total = 0;
+  std::vector<std::pair<uint32_t, std::size_t>> per_world;
+};
 
 /**
  * @brief 全局 ECS World 管理器
@@ -36,6 +43,9 @@ class RegistryManager {
 
   /// 更新所有 World（每帧调用）
   void UpdateAll(float delta_time);
+
+  /// 统计所有 World 的实体数量快照（用于观测）
+  WorldEntityCountSnapshot CollectEntityCounts() const;
 
   /// 遍历所有 World（用于跨 World 操作）
   template<typename Func>
@@ -73,4 +83,4 @@ class RegistryManager {
 
 }  // namespace mir2::ecs
 
-#endif  // LEGEND2_SERVER_ECS_REGISTRY_MANAGER_H
+#endif  // MIR2_SERVER_ECS_REGISTRY_MANAGER_H_

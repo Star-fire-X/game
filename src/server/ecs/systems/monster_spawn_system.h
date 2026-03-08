@@ -3,8 +3,8 @@
  * @brief 怪物刷新系统
  */
 
-#ifndef MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H
-#define MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H
+#ifndef MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H_
+#define MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H_
 
 #include <entt/entt.hpp>
 #include <unordered_map>
@@ -12,10 +12,9 @@
 #include <cstdint>
 
 #include "game/entity/monster_spawn_config.h"
+#include "ecs/event_bus.h"
 
 namespace mir2::ecs {
-
-class EventBus;
 
 /**
  * @brief 复活计时器
@@ -36,13 +35,15 @@ public:
     ~MonsterSpawnSystem();
 
     void Update(entt::registry& registry, float dt);
-    void LoadSpawnConfig(const std::string& config_path);
+    void ReplaceAllSpawnPoints(
+        std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> spawn_points);
     void TriggerDynamicSpawn(const game::entity::DynamicSpawnEvent& event);
     void OnMonsterDeath(uint32_t spawn_point_id);
 
 private:
     entt::registry* registry_ = nullptr;
     EventBus* event_bus_ = nullptr;
+    EventBus::Subscription death_subscription_;
     std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> spawn_points_;
     std::unordered_map<uint64_t, RespawnTimer> respawn_timers_;
     float elapsed_time_ = 0.0f;
@@ -57,4 +58,4 @@ private:
 
 }  // namespace mir2::ecs
 
-#endif  // MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H
+#endif  // MIR2_ECS_SYSTEMS_MONSTER_SPAWN_SYSTEM_H_

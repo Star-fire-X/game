@@ -3,8 +3,8 @@
  * @brief 反作弊系统
  */
 
-#ifndef MIR2_SECURITY_ANTI_CHEAT_H
-#define MIR2_SECURITY_ANTI_CHEAT_H
+#ifndef MIR2_SECURITY_ANTI_CHEAT_H_
+#define MIR2_SECURITY_ANTI_CHEAT_H_
 
 #include <array>
 #include <cstddef>
@@ -80,4 +80,4 @@ class AntiCheat {
 
 }  // namespace mir2::security
 
-#endif  // MIR2_SECURITY_ANTI_CHEAT_H
+#endif  // MIR2_SECURITY_ANTI_CHEAT_H_

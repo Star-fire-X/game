@@ -41,12 +41,12 @@ TEST_F(LoginFlowManagerTest, StartLoginChangesStateAndCredentials) {
 }
 
 TEST_F(LoginFlowManagerTest, StartLoginIgnoredWhenNotIdle) {
-    flow_->start_login("first", "pass");
-    flow_->start_login("second", "other");
+    flow_->start_login("first", "passwd");
+    flow_->start_login("second", "other12");
 
     EXPECT_EQ(flow_->get_state(), LoginFlowState::CONNECTING);
     EXPECT_EQ(flow_->get_pending_username(), "first");
-    EXPECT_EQ(flow_->get_pending_password(), "pass");
+    EXPECT_EQ(flow_->get_pending_password(), "passwd");
 }
 
 TEST_F(LoginFlowManagerTest, StateChangeCallbackFiresOnTransition) {
@@ -58,7 +58,7 @@ TEST_F(LoginFlowManagerTest, StateChangeCallbackFiresOnTransition) {
         observed_new = new_state;
     });
 
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
 
     ASSERT_TRUE(observed_old.has_value());
     ASSERT_TRUE(observed_new.has_value());
@@ -71,10 +71,10 @@ TEST_F(LoginFlowManagerTest, ConnectSuccessTriggersAuthAndSendLogin) {
     flow_->set_on_ready_to_send_login([&](const std::string& user, const std::string& pass) {
         login_sent = true;
         EXPECT_EQ(user, "user");
-        EXPECT_EQ(pass, "pass");
+        EXPECT_EQ(pass, "passwd");
     });
 
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
     flow_->on_connect_success();
 
     EXPECT_EQ(flow_->get_state(), LoginFlowState::AUTHENTICATING);
@@ -82,7 +82,7 @@ TEST_F(LoginFlowManagerTest, ConnectSuccessTriggersAuthAndSendLogin) {
 }
 
 TEST_F(LoginFlowManagerTest, ConnectFailureSetsError) {
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
     flow_->on_connect_failed("connection failed");
 
     EXPECT_EQ(flow_->get_state(), LoginFlowState::FAILED);
@@ -92,7 +92,7 @@ TEST_F(LoginFlowManagerTest, ConnectFailureSetsError) {
 }
 
 TEST_F(LoginFlowManagerTest, AuthFailureSetsError) {
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
     flow_->on_connect_success();
     flow_->on_auth_failed("auth failed");
 
@@ -103,7 +103,7 @@ TEST_F(LoginFlowManagerTest, AuthFailureSetsError) {
 }
 
 TEST_F(LoginFlowManagerTest, AuthSuccessMovesToLoadingAndSuccess) {
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
     flow_->on_connect_success();
 
     flow_->on_auth_success();
@@ -115,7 +115,7 @@ TEST_F(LoginFlowManagerTest, AuthSuccessMovesToLoadingAndSuccess) {
 }
 
 TEST_F(LoginFlowManagerTest, ConnectTimeoutTransitionsToTimeout) {
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
 
     flow_->update(1.1f);
 
@@ -125,7 +125,7 @@ TEST_F(LoginFlowManagerTest, ConnectTimeoutTransitionsToTimeout) {
 }
 
 TEST_F(LoginFlowManagerTest, AuthTimeoutTransitionsToTimeout) {
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
     flow_->on_connect_success();
 
     flow_->update(2.1f);
@@ -136,7 +136,7 @@ TEST_F(LoginFlowManagerTest, AuthTimeoutTransitionsToTimeout) {
 }
 
 TEST_F(LoginFlowManagerTest, ProgressWeightsSumToOne) {
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
     flow_->on_connect_success();
     flow_->on_auth_success();
 
@@ -147,7 +147,7 @@ TEST_F(LoginFlowManagerTest, ProgressWeightsSumToOne) {
 }
 
 TEST_F(LoginFlowManagerTest, CancelResetsStateAndCredentials) {
-    flow_->start_login("user", "pass");
+    flow_->start_login("user", "passwd");
     flow_->cancel();
 
     EXPECT_EQ(flow_->get_state(), LoginFlowState::IDLE);

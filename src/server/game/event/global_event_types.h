@@ -3,8 +3,8 @@
  * @brief 全局事件类型与配置定义
  */
 
-#ifndef LEGEND2_SERVER_GAME_EVENT_GLOBAL_EVENT_TYPES_H
-#define LEGEND2_SERVER_GAME_EVENT_GLOBAL_EVENT_TYPES_H
+#ifndef MIR2_SERVER_GAME_EVENT_GLOBAL_EVENT_TYPES_H_
+#define MIR2_SERVER_GAME_EVENT_GLOBAL_EVENT_TYPES_H_
 
 #include <cstdint>
 #include <string>
@@ -50,4 +50,4 @@ struct GlobalEventEndedEvent {
 
 }  // namespace legend2::game::event
 
-#endif  // LEGEND2_SERVER_GAME_EVENT_GLOBAL_EVENT_TYPES_H
+#endif  // MIR2_SERVER_GAME_EVENT_GLOBAL_EVENT_TYPES_H_

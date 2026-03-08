@@ -1,8 +1,11 @@
 #include "ui/states/connecting_state.h"
 
+#include "ui/states/login_state_helpers.h"
+#include "ui/ui_renderer.h"
+
 namespace mir2::ui::screens {
 
-ConnectingState::ConnectingState(LoginStateContext& context)
+ConnectingState::ConnectingState(IConnectingStateContext& context)
     : context_(context) {}
 
 void ConnectingState::on_enter() {}
@@ -17,25 +20,24 @@ void ConnectingState::render(UIRenderer& renderer) {
     (void)renderer;
     render_background();
 
-    const std::string msg = context_.status_text.empty() ? "Connecting..." : context_.status_text;
-    int x = (context_.screen_width - context_.ui_renderer.get_text_width(msg)) / 2;
-    int y = context_.screen_height / 2 - context_.ui_renderer.get_text_height() / 2;
-    context_.ui_renderer.draw_text(msg, x, y, {255, 255, 255, 255});
+    auto& ui_renderer = context_.get_ui_renderer();
+    const std::string& status = context_.get_status_text();
+    const std::string msg = status.empty() ? "Connecting..." : status;
+    int x = (context_.get_screen_width() - ui_renderer.get_text_width(msg)) / 2;
+    int y = context_.get_screen_height() / 2 - ui_renderer.get_text_height() / 2;
+    ui_renderer.draw_text(msg, x, y, {255, 255, 255, 255});
 }
 
 bool ConnectingState::handle_event(const SDL_Event& event) {
-    (void)event;
+    if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+        context_.transition_to(LoginScreenState::LOGIN);
+        return true;
+    }
     return false;
 }
 
 void ConnectingState::render_background() {
-    context_.renderer.clear(Color::black());
-
-    if (context_.background_texture && context_.background_texture->valid()) {
-        Rect bg_src = {0, 0, context_.background_texture->width(), context_.background_texture->height()};
-        Rect bg_dst = {0, 0, context_.screen_width, context_.screen_height};
-        context_.renderer.draw_texture(*context_.background_texture, bg_src, bg_dst);
-    }
+    render_common_background(context_);
 }
 
 } // namespace mir2::ui::screens

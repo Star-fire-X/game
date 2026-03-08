@@ -2,13 +2,13 @@
 #define LEGEND2_ERROR_STATE_H
 
 #include "ui/states/login_state_interface.h"
-#include "ui/login_screen.h"
+#include "ui/states/login_state_context.h"
 
 namespace mir2::ui::screens {
 
 class ErrorState : public ILoginState {
 public:
-    explicit ErrorState(LoginStateContext& context);
+    explicit ErrorState(IErrorStateContext& context);
 
     void on_enter() override;
     void on_exit() override;
@@ -18,7 +18,7 @@ public:
     LoginScreenState get_state_type() const override { return LoginScreenState::ERROR; }
 
 private:
-    LoginStateContext& context_;
+    IErrorStateContext& context_;
 
     void render_background();
 };

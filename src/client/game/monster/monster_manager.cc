@@ -9,18 +9,13 @@
 
 #include "render/camera.h"
 
+#include "common/time_utils.h"
+
 #include <algorithm>
-#include <chrono>
 
 namespace mir2::game::monster {
 
 namespace {
-uint64_t NowMs() {
-    using clock = std::chrono::steady_clock;
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count());
-}
-
 int clamp_int(int value, int min_value, int max_value) {
     return std::max(min_value, std::min(value, max_value));
 }
@@ -147,7 +142,8 @@ bool MonsterManager::update_position(uint64_t id, const mir2::common::Position& 
     ClientMonster& monster = it->second;
     monster.position = position;
     monster.direction = direction;
-    monster.interpolator.receive_state(position, static_cast<uint32_t>(NowMs()));
+    monster.interpolator.receive_state(position,
+                                       static_cast<uint32_t>(mir2::common::now_ms()));
 
     entity_manager_.update_entity_position(id, position, direction);
     notify(MonsterEventType::Moved, monster);
@@ -231,7 +227,7 @@ bool MonsterManager::handle_death(uint64_t id, uint64_t killer_id) {
     monster.anim_state.loop = false;
     monster.anim_state.finished = false;
     monster.anim_state.last_frame_tick = 0;
-    monster.death_time = NowMs();
+    monster.death_time = static_cast<uint64_t>(mir2::common::now_ms());
 
     entity_manager_.update_entity_stats(id, 0, monster.max_hp, 0, 0, monster.level);
     notify(MonsterEventType::Death, monster);
@@ -266,7 +262,7 @@ bool MonsterManager::set_attacking(uint64_t id, bool attacking) {
 }
 
 void MonsterManager::update(float delta_ms) {
-    const uint64_t now_ms = NowMs();
+    const uint64_t now_ms = static_cast<uint64_t>(mir2::common::now_ms());
     std::vector<uint64_t> expired;
 
     for (auto& entry : monsters_) {

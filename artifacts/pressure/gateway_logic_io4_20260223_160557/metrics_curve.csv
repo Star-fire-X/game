@@ -1,0 +1,6 @@
+phase,unix_ts,elapsed_sec,connections,session_unregister_total,session_unregister_delta,disconnect_queue_size,udp_send_errors_total,udp_send_errors_delta
+business,1771862759.441,0.001,1,0,0,0,0,0
+business,1771862760.442,1.001,0,4,4,0,0,0
+business,1771862761.442,2.002,0,6,2,0,0,0
+business,1771862762.443,3.002,0,7,1,0,0,0
+business,1771862763.443,4.003,0,8,1,0,0,0

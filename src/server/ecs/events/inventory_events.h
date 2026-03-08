@@ -3,8 +3,8 @@
  * @brief 物品/装备/技能变更事件定义
  */
 
-#ifndef MIR2_ECS_EVENTS_INVENTORY_EVENTS_H
-#define MIR2_ECS_EVENTS_INVENTORY_EVENTS_H
+#ifndef MIR2_ECS_EVENTS_INVENTORY_EVENTS_H_
+#define MIR2_ECS_EVENTS_INVENTORY_EVENTS_H_
 
 #include <entt/entt.hpp>
 
@@ -33,6 +33,14 @@ struct ItemUsedEvent {
     int used_count;
     int remaining_count;
     int slot_index;
+};
+
+/**
+ * @brief 彩票抽奖事件
+ */
+struct LotteryDrawEvent {
+    entt::entity character;
+    uint32_t item_id;
 };
 
 /**
@@ -103,4 +111,4 @@ struct SkillUpgradedEvent {
 
 }  // namespace mir2::ecs::events
 
-#endif  // MIR2_ECS_EVENTS_INVENTORY_EVENTS_H
+#endif  // MIR2_ECS_EVENTS_INVENTORY_EVENTS_H_

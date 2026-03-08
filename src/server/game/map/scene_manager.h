@@ -135,6 +135,15 @@ class SceneManager {
   /**
    * @brief 从地图移除实体
    *
+   * @param map_id 地图ID
+   * @param entity 实体
+   * @return true 如果移除成功
+   */
+  bool RemoveEntityFromMap(int32_t map_id, entt::entity entity);
+
+  /**
+   * @brief 从唯一归属地图移除实体
+   *
    * @param entity 实体
    * @return true 如果移除成功
    */
@@ -143,12 +152,32 @@ class SceneManager {
   /**
    * @brief 更新实体位置
    *
+   * @param map_id 地图ID
+   * @param entity 实体
+   * @param new_x 新X坐标
+   * @param new_y 新Y坐标
+   * @return true 如果更新成功
+   */
+  bool UpdateEntityPosition(int32_t map_id,
+                            entt::entity entity,
+                            int32_t new_x,
+                            int32_t new_y);
+
+  /**
+   * @brief 更新唯一归属地图中的实体位置
+   *
    * @param entity 实体
    * @param new_x 新X坐标
    * @param new_y 新Y坐标
    * @return true 如果更新成功
    */
   bool UpdateEntityPosition(entt::entity entity, int32_t new_x, int32_t new_y);
+
+  bool MoveEntityToMap(int32_t from_map_id,
+                       int32_t target_map_id,
+                       entt::entity entity,
+                       int32_t target_x,
+                       int32_t target_y);
 
   /**
    * @brief 传送实体到目标地图
@@ -216,7 +245,7 @@ class SceneManager {
   /**
    * @brief 移除实体的反向索引
    */
-  void UnindexEntity(entt::entity entity);
+  void UnindexEntity(entt::entity entity, int32_t map_id);
 
   /**
    * @brief 应用地图修正
@@ -245,7 +274,7 @@ class SceneManager {
 
   std::unordered_map<int32_t, std::shared_ptr<MapInstance>> maps_;
   std::unordered_map<int32_t, MapConfig> map_configs_;
-  std::unordered_map<entt::entity, int32_t> entity_to_map_;
+  std::unordered_multimap<entt::entity, int32_t> entity_to_map_;
   std::unordered_set<int32_t> loading_map_ids_;
   MapLoader map_loader_;
   std::condition_variable_any map_load_cv_;

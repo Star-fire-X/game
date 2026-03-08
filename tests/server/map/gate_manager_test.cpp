@@ -181,3 +181,17 @@ TEST(GateManagerTest, ReplaceAllGatesRejectsDuplicateSourceCoordinates) {
   EXPECT_EQ(result->gate_id, 31u);
   EXPECT_EQ(result->target_map, "6");
 }
+
+TEST(GateManagerTest, ReplaceAllGatesRejectsNumericEquivalentSourceMaps) {
+  GateManager manager;
+
+  manager.ReplaceAllGates({
+      GateInfo{41, "4", 10, 20, "6", 30, 40, false, 0},
+      GateInfo{42, "004", 10, 20, "7", 50, 60, false, 0},
+  });
+
+  auto result = manager.CheckGateTrigger(4, 10, 20);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->gate_id, 41u);
+  EXPECT_EQ(result->target_map, "6");
+}

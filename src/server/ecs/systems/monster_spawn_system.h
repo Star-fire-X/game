@@ -11,6 +11,7 @@
 #include <string>
 #include <cstdint>
 
+#include "game/ports/i_world_map_port.h"
 #include "game/entity/monster_spawn_config.h"
 #include "ecs/event_bus.h"
 
@@ -37,12 +38,15 @@ public:
     void Update(entt::registry& registry, float dt);
     void ReplaceAllSpawnPoints(
         std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> spawn_points);
+    void BindWorldMapPort(game::ports::IWorldMapPort* world_map_port, int32_t map_id);
     void TriggerDynamicSpawn(const game::entity::DynamicSpawnEvent& event);
     void OnMonsterDeath(uint32_t spawn_point_id);
 
 private:
     entt::registry* registry_ = nullptr;
     EventBus* event_bus_ = nullptr;
+    game::ports::IWorldMapPort* world_map_port_ = nullptr;
+    int32_t world_map_id_ = 0;
     EventBus::Subscription death_subscription_;
     std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> spawn_points_;
     std::unordered_map<uint64_t, RespawnTimer> respawn_timers_;

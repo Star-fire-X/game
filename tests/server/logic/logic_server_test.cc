@@ -52,6 +52,7 @@
 #include "data/item_template.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/monster_component.h"
+#include "ecs/components/npc_component.h"
 #include "ecs/events/npc_events.h"
 #include "ecs/registry_manager.h"
 #include "ecs/skill_registry.h"
@@ -1995,6 +1996,78 @@ TEST_F(LogicServerTest, InitializeRuntimeNpcsOnDifferentMapDoNotAppearInStateSyn
   EXPECT_EQ(payload->entities()->size(), 0u);
 }
 
+TEST_F(LogicServerTest, InitializeRuntimeNpcsStayIndexedOnMultipleMapsWhenEntityIdsCollide) {
+  const uint32_t other_map_id = default_map_id_ + 1;
+  EnsureAdditionalMapFixture(other_map_id);
+  const auto runtime_dir = ExportRuntimeConfig(false);
+  ASSERT_TRUE(runtime_dir.has_value());
+  ASSERT_TRUE(AddRuntimeArtifact(
+      *runtime_dir,
+      "maps",
+      RuntimeArtifactSpec{"maps.json", BuildRuntimeMapsContent({default_map_id_, other_map_id})}));
+  ASSERT_TRUE(AddRuntimeArtifact(
+      *runtime_dir,
+      "shops",
+      RuntimeArtifactSpec{"shops.json", BuildRuntimeShopsContent(false)}));
+  ASSERT_TRUE(AddRuntimeArtifact(
+      *runtime_dir,
+      "npcs",
+      RuntimeArtifactSpec{
+          "npcs.json",
+          BuildRuntimeNpcsContent({
+              nlohmann::json{
+                  {"npc_id", 201},
+                  {"template_id", 2001},
+                  {"name", "Map One Trader"},
+                  {"type", "MERCHANT"},
+                  {"map_id", default_map_id_},
+                  {"x", 10},
+                  {"y", 15},
+                  {"direction", 0},
+                  {"enabled", true},
+                  {"store_id", 77},
+              },
+              nlohmann::json{
+                  {"npc_id", 202},
+                  {"template_id", 2001},
+                  {"name", "Map Two Trader"},
+                  {"type", "MERCHANT"},
+                  {"map_id", other_map_id},
+                  {"x", 20},
+                  {"y", 25},
+                  {"direction", 0},
+                  {"enabled", true},
+                  {"store_id", 77},
+              },
+          }),
+      }));
+
+  ASSERT_TRUE(InitializeServer());
+
+  auto* world_a = ecs::RegistryManager::Instance().GetWorld(default_map_id_);
+  auto* world_b = ecs::RegistryManager::Instance().GetWorld(other_map_id);
+  ASSERT_NE(world_a, nullptr);
+  ASSERT_NE(world_b, nullptr);
+
+  const auto view_a = world_a->Registry().view<ecs::NpcIdentityComponent>();
+  const auto view_b = world_b->Registry().view<ecs::NpcIdentityComponent>();
+  ASSERT_EQ(std::distance(view_a.begin(), view_a.end()), 1);
+  ASSERT_EQ(std::distance(view_b.begin(), view_b.end()), 1);
+
+  const auto entity_a = *view_a.begin();
+  const auto entity_b = *view_b.begin();
+  ASSERT_EQ(entt::to_integral(entity_a), entt::to_integral(entity_b));
+
+  auto& scene_manager =
+      mir2::logic::test_support::LogicServerTestAccess::SceneManager(*server_);
+  auto* map_a = scene_manager.GetMap(static_cast<int32_t>(default_map_id_));
+  auto* map_b = scene_manager.GetMap(static_cast<int32_t>(other_map_id));
+  ASSERT_NE(map_a, nullptr);
+  ASSERT_NE(map_b, nullptr);
+  EXPECT_TRUE(map_a->HasEntity(entity_a));
+  EXPECT_TRUE(map_b->HasEntity(entity_b));
+}
+
 TEST_F(LogicServerTest,
        InitializeLoadsRuntimeMonsterSpawnsWhenArtifactPresentAndTicksWorld) {
   const auto runtime_dir = ExportRuntimeConfig(false);
@@ -2034,6 +2107,164 @@ TEST_F(LogicServerTest,
     ++monster_count;
   }
   EXPECT_GT(monster_count, 0u);
+}
+
+TEST_F(LogicServerTest, InitializeRuntimeMonsterSpawnsAreFilteredPerWorld) {
+  const uint32_t other_map_id = default_map_id_ + 1;
+  EnsureAdditionalMapFixture(other_map_id);
+  const auto runtime_dir = ExportRuntimeConfig(false);
+  ASSERT_TRUE(runtime_dir.has_value());
+  ASSERT_TRUE(AddRuntimeArtifact(
+      *runtime_dir,
+      "maps",
+      RuntimeArtifactSpec{"maps.json", BuildRuntimeMapsContent({default_map_id_, other_map_id})}));
+  ASSERT_TRUE(AddRuntimeArtifact(
+      *runtime_dir,
+      "monster_spawns",
+      RuntimeArtifactSpec{
+          "monster_spawns.json",
+          BuildRuntimeMonsterSpawnsContent({
+              nlohmann::json{
+                  {"spawn_id", 10},
+                  {"map_id", default_map_id_},
+                  {"center_x", 1},
+                  {"center_y", 1},
+                  {"spawn_radius", 0},
+                  {"monster_template_id", 9001},
+                  {"patrol_radius", 5},
+                  {"respawn_interval", 0.0},
+                  {"max_count", 1},
+                  {"aggro_range", 10},
+                  {"attack_range", 3},
+              },
+              nlohmann::json{
+                  {"spawn_id", 20},
+                  {"map_id", other_map_id},
+                  {"center_x", 2},
+                  {"center_y", 2},
+                  {"spawn_radius", 0},
+                  {"monster_template_id", 9002},
+                  {"patrol_radius", 5},
+                  {"respawn_interval", 0.0},
+                  {"max_count", 1},
+                  {"aggro_range", 10},
+                  {"attack_range", 3},
+              },
+          }),
+      }));
+
+  ASSERT_TRUE(InitializeServer());
+  StartServerAsync();
+  ShutdownServer();
+
+  auto* world_a = ecs::RegistryManager::Instance().GetWorld(default_map_id_);
+  auto* world_b = ecs::RegistryManager::Instance().GetWorld(other_map_id);
+  ASSERT_NE(world_a, nullptr);
+  ASSERT_NE(world_b, nullptr);
+
+  auto view_a = world_a->Registry().view<ecs::MonsterIdentityComponent, ecs::CharacterStateComponent>();
+  auto view_b = world_b->Registry().view<ecs::MonsterIdentityComponent, ecs::CharacterStateComponent>();
+  ASSERT_EQ(std::distance(view_a.begin(), view_a.end()), 1);
+  ASSERT_EQ(std::distance(view_b.begin(), view_b.end()), 1);
+
+  const auto entity_a = *view_a.begin();
+  const auto entity_b = *view_b.begin();
+  EXPECT_EQ(view_a.get<ecs::MonsterIdentityComponent>(entity_a).monster_template_id, 9001u);
+  EXPECT_EQ(view_b.get<ecs::MonsterIdentityComponent>(entity_b).monster_template_id, 9002u);
+  EXPECT_EQ(view_a.get<ecs::CharacterStateComponent>(entity_a).map_id, default_map_id_);
+  EXPECT_EQ(view_b.get<ecs::CharacterStateComponent>(entity_b).map_id, other_map_id);
+}
+
+TEST_F(LogicServerTest, InitializeRuntimeSpawnedMonstersAppearInImmediateStateSync) {
+  EnableResponseCapture();
+  const auto runtime_dir = ExportRuntimeConfig(false);
+  ASSERT_TRUE(runtime_dir.has_value());
+  ASSERT_TRUE(AddRuntimeArtifact(
+      *runtime_dir,
+      "monster_spawns",
+      RuntimeArtifactSpec{
+          "monster_spawns.json",
+          BuildRuntimeMonsterSpawnsContent({
+              nlohmann::json{
+                  {"spawn_id", 10},
+                  {"map_id", default_map_id_},
+                  {"center_x", 100},
+                  {"center_y", 100},
+                  {"spawn_radius", 0},
+                  {"monster_template_id", 9001},
+                  {"patrol_radius", 5},
+                  {"respawn_interval", 0.0},
+                  {"max_count", 1},
+                  {"aggro_range", 10},
+                  {"attack_range", 3},
+              },
+          }),
+      }));
+
+  ASSERT_TRUE(InitializeServer());
+  StartServerAsync();
+
+  auto* world = ecs::RegistryManager::Instance().GetWorld(default_map_id_);
+  ASSERT_NE(world, nullptr);
+  auto& scene_manager =
+      mir2::logic::test_support::LogicServerTestAccess::SceneManager(*server_);
+  auto monster_view = world->Registry().view<ecs::MonsterIdentityComponent>();
+  ASSERT_GE(std::distance(monster_view.begin(), monster_view.end()), 1);
+  const auto monster_entity = *monster_view.begin();
+  auto* scene_map = scene_manager.GetMap(static_cast<int32_t>(default_map_id_));
+  ASSERT_NE(scene_map, nullptr);
+  EXPECT_TRUE(scene_map->HasEntity(monster_entity));
+
+  const auto player = world->Registry().create();
+  auto& identity = world->Registry().emplace<ecs::CharacterIdentityComponent>(player);
+  identity.id = 3010;
+  identity.name = "player_3010";
+  auto& state = world->Registry().emplace<ecs::CharacterStateComponent>(player);
+  state.map_id = default_map_id_;
+  state.position = {100, 100};
+  auto& attrs = world->Registry().emplace<ecs::CharacterAttributesComponent>(player);
+  attrs.level = 10;
+  attrs.hp = 100;
+  attrs.max_hp = 100;
+  attrs.mp = 50;
+  attrs.max_mp = 50;
+  EXPECT_FALSE(mir2::logic::test_support::LogicServerTestAccess::RoleStoreRef(*server_)
+                   .BindClientRole(/*client_id=*/9310, /*player_id=*/3010)
+                   .has_value());
+  ASSERT_TRUE(scene_manager.AddEntityToMap(static_cast<int32_t>(default_map_id_), player, 100, 100));
+
+  const auto& world_systems =
+      mir2::logic::test_support::LogicServerTestAccess::WorldSystems(*server_);
+  auto bundle_it = world_systems.find(default_map_id_);
+  ASSERT_NE(bundle_it, world_systems.end());
+  ASSERT_NE(bundle_it->second, nullptr);
+  ASSERT_NE(bundle_it->second->world_sync_broadcast_service, nullptr);
+
+  ClearCapturedResponses();
+  ASSERT_TRUE(bundle_it->second->world_sync_broadcast_service->RequestImmediateStateSyncForRole(
+      3010));
+  ShutdownServer();
+
+  const auto it = std::find_if(
+      captured_responses_.begin(),
+      captured_responses_.end(),
+      [](const CapturedResponse& response) {
+        return response.msg_id ==
+               static_cast<uint16_t>(mir2::common::MsgId::kStateSync);
+      });
+  ASSERT_NE(it, captured_responses_.end());
+  flatbuffers::Verifier verifier(it->payload.data(), it->payload.size());
+  ASSERT_TRUE(verifier.VerifyBuffer<mir2::proto::StateSync>(nullptr));
+  const auto* payload = flatbuffers::GetRoot<mir2::proto::StateSync>(it->payload.data());
+  ASSERT_NE(payload, nullptr);
+  ASSERT_NE(payload->entities(), nullptr);
+  const auto entity_it = std::find_if(
+      payload->entities()->begin(),
+      payload->entities()->end(),
+      [](const mir2::proto::EntitySnapshot* entity) {
+        return entity->entity_type() == mir2::proto::EntityType::MONSTER;
+      });
+  EXPECT_NE(entity_it, payload->entities()->end());
 }
 
 TEST_F(LogicServerTest, InitializeFailsWhenMonsterSpawnsArtifactFileIsMissing) {

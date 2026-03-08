@@ -4,6 +4,7 @@
  */
 
 #include "ecs/systems/monster_spawn_system.h"
+#include "ecs/components/character_components.h"
 #include "ecs/components/monster_component.h"
 #include "ecs/components/transform_component.h"
 #include "ecs/event_bus.h"
@@ -44,13 +45,20 @@ void MonsterSpawnSystem::ReplaceAllSpawnPoints(
     }
 }
 
+void MonsterSpawnSystem::BindWorldMapPort(game::ports::IWorldMapPort* world_map_port,
+                                          int32_t map_id) {
+    world_map_port_ = world_map_port;
+    world_map_id_ = map_id;
+}
+
 void MonsterSpawnSystem::TriggerDynamicSpawn(
     const game::entity::DynamicSpawnEvent& event) {
     // TODO: 处理动态刷新事件
 }
 
-void MonsterSpawnSystem::CheckAndSpawn(entt::registry& registry, float dt) {
+void MonsterSpawnSystem::CheckAndSpawn(entt::registry& registry, float /*dt*/) {
     for (auto& [id, spawn] : spawn_points_) {
+        (void)id;
         if (spawn.max_count <= 0) {
             continue;
         }
@@ -75,7 +83,10 @@ void MonsterSpawnSystem::SpawnMonsterAtPoint(entt::registry& registry,
     int32_t y = spawn.center_y + dis(gen);
     
     // 创建怪物实体
-    auto entity = registry.create();
+    const entt::entity entity =
+        spawn.spawn_id != 0
+            ? registry.create(static_cast<entt::entity>(spawn.spawn_id))
+            : registry.create();
 
     // 记录怪物模板与刷新点信息
     auto& identity = registry.emplace<MonsterIdentityComponent>(entity);
@@ -86,6 +97,10 @@ void MonsterSpawnSystem::SpawnMonsterAtPoint(entt::registry& registry,
     auto& transform = registry.emplace<TransformComponent>(entity);
     transform.position = {x, y};
     transform.map_id = spawn.map_id;
+
+    auto& state = registry.get_or_emplace<CharacterStateComponent>(entity);
+    state.map_id = spawn.map_id;
+    state.position = {x, y};
     
     // 添加AI组件
     auto& ai = registry.emplace<MonsterAIComponent>(entity);
@@ -95,7 +110,14 @@ void MonsterSpawnSystem::SpawnMonsterAtPoint(entt::registry& registry,
     auto& aggro = registry.emplace<MonsterAggroComponent>(entity);
     aggro.aggro_range = spawn.aggro_range;
     aggro.attack_range = spawn.attack_range;
-    
+
+    if (world_map_port_ != nullptr) {
+        if (!world_map_port_->AddEntityToMap(world_map_id_, entity, x, y)) {
+            registry.destroy(entity);
+            return;
+        }
+    }
+
     spawn.current_count++;
     spawn.last_spawn_time = elapsed_time_;
 }

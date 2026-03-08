@@ -59,7 +59,8 @@ void TeleportSystem::Update(entt::registry& registry, float /*delta_time*/) {
     if (state->map_id == static_cast<uint32_t>(cmd.target_map_id)) {
       SYSLOG_DEBUG("TeleportSystem: Same map teleport, use movement instead");
       // 同地图传送，直接更新位置。仅在地图端口更新成功时同步组件状态。
-      if (!world_map_port_.UpdateEntityPosition(cmd.entity,
+      if (!world_map_port_.UpdateEntityPosition(old_map_id,
+                                                cmd.entity,
                                                 cmd.target_x,
                                                 cmd.target_y)) {
         SYSLOG_WARN("TeleportSystem: Same map teleport failed on map {} to ({}, {})",
@@ -82,12 +83,14 @@ void TeleportSystem::Update(entt::registry& registry, float /*delta_time*/) {
       continue;
     }
 
-    // 通过地图端口原子迁移：仅当目标地图添加成功时才会从旧地图移除。
-    if (!world_map_port_.AddEntityToMap(cmd.target_map_id,
-                                        cmd.entity,
-                                        cmd.target_x,
-                                        cmd.target_y)) {
-      SYSLOG_ERROR("TeleportSystem: Failed to add entity to map {}", cmd.target_map_id);
+    if (!world_map_port_.MoveEntityToMap(old_map_id,
+                                         cmd.target_map_id,
+                                         cmd.entity,
+                                         cmd.target_x,
+                                         cmd.target_y)) {
+      SYSLOG_ERROR("TeleportSystem: Failed to move entity from map {} to {}",
+                   old_map_id,
+                   cmd.target_map_id);
       continue;
     }
 

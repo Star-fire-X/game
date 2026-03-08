@@ -2,10 +2,6 @@
 
 #include <entt/entt.hpp>
 
-#include <atomic>
-#include <chrono>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <string>
 
@@ -14,6 +10,7 @@
 #include "ecs/components/item_component.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/npc_events.h"
+#include "ecs/registry_manager.h"
 #include "ecs/systems/inventory_system.h"
 #include "logic/services/merchant_service.h"
 
@@ -25,34 +22,7 @@ class MerchantServiceTest : public ::testing::Test {
   MerchantServiceTest() : event_bus_(registry_), service_(registry_, event_bus_) {}
 
   void SetUp() override {
-    static std::atomic<uint64_t> sequence{0};
-    const uint64_t unique = sequence.fetch_add(1, std::memory_order_relaxed);
-    const auto timestamp = static_cast<uint64_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    test_dir_ = std::filesystem::temp_directory_path() /
-                ("mir2_merchant_service_test_" + std::to_string(timestamp) + "_" +
-                 std::to_string(unique));
-    std::error_code ec;
-    ASSERT_TRUE(std::filesystem::create_directories(test_dir_, ec))
-        << "failed to create test dir: " << ec.message();
-  }
-
-  void TearDown() override {
-    if (!test_dir_.empty()) {
-      std::error_code ec;
-      std::filesystem::remove_all(test_dir_, ec);
-    }
-  }
-
-  std::filesystem::path WriteShopConfig(const std::string& content,
-                                        const std::string& filename = "shops.yaml") {
-    const auto path = test_dir_ / filename;
-    std::ofstream out(path, std::ios::out | std::ios::trunc);
-    EXPECT_TRUE(out.is_open()) << "failed to open: " << path;
-    out << content;
-    out.flush();
-    EXPECT_TRUE(out.good()) << "failed to write: " << path;
-    return path;
+    ecs::RegistryManager::Instance().GetCharacterManager().BindToCurrentThread();
   }
 
   entt::entity CreatePlayer(int gold, uint64_t role_id = 0) {
@@ -83,31 +53,30 @@ class MerchantServiceTest : public ::testing::Test {
     return item;
   }
 
-  void FillInventory(entt::entity owner) {
-    for (int slot = 0; slot < common::constants::MAX_INVENTORY_SIZE; ++slot) {
-      CreateInventoryItem(owner, 1001u, 1, slot);
-    }
-  }
-
   entt::registry registry_;
   ecs::EventBus event_bus_;
   MerchantService service_;
-  std::filesystem::path test_dir_;
 };
 
-TEST_F(MerchantServiceTest, LoadShopsParsesShopSequence) {
-  const auto config_path = WriteShopConfig(
-      "shops:\n"
-      "  - store_id: 1001\n"
-      "    name: basic\n"
-      "    buyRate: 1.5\n"
-      "    sellRate: 0.4\n"
-      "    items:\n"
-      "      - item_id: 2001\n"
-      "        price: 10\n"
-      "        stock: 5\n");
+ShopConfig MakeShopConfig(uint32_t store_id,
+                          std::string name,
+                          float buy_rate,
+                          float sell_rate,
+                          std::vector<ShopItem> items) {
+  ShopConfig shop;
+  shop.store_id = store_id;
+  shop.name = std::move(name);
+  shop.buy_rate = buy_rate;
+  shop.sell_rate = sell_rate;
+  shop.items = std::move(items);
+  return shop;
+}
 
-  service_.LoadShops(config_path.string());
+TEST_F(MerchantServiceTest, ReplaceAllShopsStoresProvidedConfigs) {
+  service_.ReplaceAllShops({{
+      1001,
+      MakeShopConfig(1001, "basic", 1.5f, 0.4f, {{2001u, 10, 5}}),
+  }});
 
   const ShopConfig* first = service_.GetShop(1001);
   ASSERT_NE(first, nullptr);
@@ -120,41 +89,11 @@ TEST_F(MerchantServiceTest, LoadShopsParsesShopSequence) {
   EXPECT_EQ(first->items[0].stock, 5);
 }
 
-TEST_F(MerchantServiceTest, LoadShopsParsesStoresAliasAndNormalizesRates) {
-  const auto config_path = WriteShopConfig(
-      "stores:\n"
-      "  - store_id: 4001\n"
-      "    name: alias_store\n"
-      "    buy_rate: -2\n"
-      "    sell_rate_pct: 0\n"
-      "    items:\n"
-      "      - item_id: 5001\n"
-      "        price: 20\n"
-      "        stock: 0\n");
-
-  service_.LoadShops(config_path.string());
-
-  const ShopConfig* parsed = service_.GetShop(4001);
-  ASSERT_NE(parsed, nullptr);
-  EXPECT_FLOAT_EQ(parsed->buy_rate, 1.0f);
-  EXPECT_FLOAT_EQ(parsed->sell_rate, 0.5f);
-  ASSERT_EQ(parsed->items.size(), 1u);
-  EXPECT_EQ(parsed->items[0].item_id, 5001u);
-  EXPECT_EQ(parsed->items[0].stock, -1);
-  EXPECT_EQ(parsed->name, "alias_store");
-}
-
 TEST_F(MerchantServiceTest, BuyItemSucceedsAndDeductsGoldAndStock) {
-  const auto config_path = WriteShopConfig(
-      "shops:\n"
-      "  - store_id: 1\n"
-      "    buy_rate: 1.5\n"
-      "    sell_rate: 0.5\n"
-      "    items:\n"
-      "      - item_id: 9001\n"
-      "        price: 30\n"
-      "        stock: 5\n");
-  service_.LoadShops(config_path.string());
+  service_.ReplaceAllShops({{
+      1,
+      MakeShopConfig(1, "buy", 1.5f, 0.5f, {{9001u, 30, 5}}),
+  }});
 
   const entt::entity player = CreatePlayer(100, 0);
   ASSERT_TRUE(service_.BuyItem(player, 1, 9001, 2));
@@ -170,21 +109,10 @@ TEST_F(MerchantServiceTest, BuyItemSucceedsAndDeductsGoldAndStock) {
 }
 
 TEST_F(MerchantServiceTest, BuyItemRejectsInvalidInputAndPricingFailures) {
-  const auto config_path = WriteShopConfig(
-      "shops:\n"
-      "  - store_id: 2\n"
-      "    buy_rate: 1.0\n"
-      "    items:\n"
-      "      - item_id: 9101\n"
-      "        price: 100\n"
-      "        stock: 1\n"
-      "  - store_id: 3\n"
-      "    buy_rate: 2.0\n"
-      "    items:\n"
-      "      - item_id: 9201\n"
-      "        price: 2147483647\n"
-      "        stock: 1\n");
-  service_.LoadShops(config_path.string());
+  service_.ReplaceAllShops({
+      {2, MakeShopConfig(2, "ok", 1.0f, 0.5f, {{9101u, 100, 1}})},
+      {3, MakeShopConfig(3, "overflow", 2.0f, 0.5f, {{9201u, 2147483647, 1}})},
+  });
 
   const entt::entity player = CreatePlayer(50, 0);
 
@@ -196,15 +124,10 @@ TEST_F(MerchantServiceTest, BuyItemRejectsInvalidInputAndPricingFailures) {
 }
 
 TEST_F(MerchantServiceTest, SellItemWithOpenShopRejectsStockOverflow) {
-  const auto config_path = WriteShopConfig(
-      "shops:\n"
-      "  - store_id: 11\n"
-      "    sell_rate: 1.0\n"
-      "    items:\n"
-      "      - item_id: 9301\n"
-      "        price: 50\n"
-      "        stock: 2147483647\n");
-  service_.LoadShops(config_path.string());
+  service_.ReplaceAllShops({{
+      11,
+      MakeShopConfig(11, "sell", 1.0f, 1.0f, {{9301u, 50, 2147483647}}),
+  }});
 
   const entt::entity player = CreatePlayer(0, 777);
   const entt::entity item = CreateInventoryItem(player, 9301, 1, 0);
@@ -221,21 +144,10 @@ TEST_F(MerchantServiceTest, SellItemWithOpenShopRejectsStockOverflow) {
 }
 
 TEST_F(MerchantServiceTest, SellItemFallsBackToBestShopAndCreditsGold) {
-  const auto config_path = WriteShopConfig(
-      "shops:\n"
-      "  - store_id: 21\n"
-      "    sell_rate: 0.3\n"
-      "    items:\n"
-      "      - item_id: 9401\n"
-      "        price: 10\n"
-      "        stock: 10\n"
-      "  - store_id: 22\n"
-      "    sell_rate: 0.5\n"
-      "    items:\n"
-      "      - item_id: 9401\n"
-      "        price: 20\n"
-      "        stock: 1\n");
-  service_.LoadShops(config_path.string());
+  service_.ReplaceAllShops({
+      {21, MakeShopConfig(21, "weak", 1.0f, 0.3f, {{9401u, 10, 10}})},
+      {22, MakeShopConfig(22, "best", 1.0f, 0.5f, {{9401u, 20, 1}})},
+  });
 
   const entt::entity player = CreatePlayer(5, 0);
   const entt::entity item = CreateInventoryItem(player, 9401, 2, 0);
@@ -253,15 +165,10 @@ TEST_F(MerchantServiceTest, SellItemFallsBackToBestShopAndCreditsGold) {
 }
 
 TEST_F(MerchantServiceTest, SellItemFailsWhenInventoryUseRejectedOrGoldWouldOverflow) {
-  const auto config_path = WriteShopConfig(
-      "shops:\n"
-      "  - store_id: 31\n"
-      "    sell_rate: 1.0\n"
-      "    items:\n"
-      "      - item_id: 9501\n"
-      "        price: 100\n"
-      "        stock: 5\n");
-  service_.LoadShops(config_path.string());
+  service_.ReplaceAllShops({{
+      31,
+      MakeShopConfig(31, "overflow", 1.0f, 1.0f, {{9501u, 100, 5}}),
+  }});
 
   const entt::entity player = CreatePlayer(std::numeric_limits<int>::max() - 50, 0);
   const entt::entity item = CreateInventoryItem(player, 9501, 1, 0);
@@ -281,16 +188,69 @@ TEST_F(MerchantServiceTest, SellItemFailsWhenInventoryUseRejectedOrGoldWouldOver
   EXPECT_TRUE(registry_.valid(item));
 }
 
-TEST_F(MerchantServiceTest, LoadShopsHandlesMissingAndMalformedFileGracefully) {
-  service_.LoadShops("");
-  EXPECT_EQ(service_.GetShop(1), nullptr);
+TEST_F(MerchantServiceTest, ReplaceAllShopsReplacesExistingShopsWithoutResidualData) {
+  service_.ReplaceAllShops({{
+      11,
+      MakeShopConfig(11, "old", 1.0f, 0.5f, {{9301u, 50, 10}}),
+  }});
 
-  service_.LoadShops((test_dir_ / "missing_file.yaml").string());
-  EXPECT_EQ(service_.GetShop(1), nullptr);
+  ASSERT_NE(service_.GetShop(11), nullptr);
+  EXPECT_EQ(service_.GetShop(22), nullptr);
 
-  const auto bad = WriteShopConfig("shops: [", "broken.yaml");
-  service_.LoadShops(bad.string());
-  EXPECT_EQ(service_.GetShop(1), nullptr);
+  service_.ReplaceAllShops({{
+      22,
+      MakeShopConfig(22, "new", 1.5f, 0.25f, {{9401u, 80, -1}}),
+  }});
+
+  EXPECT_EQ(service_.GetShop(11), nullptr);
+  const auto* replacement = service_.GetShop(22);
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_EQ(replacement->name, "new");
+  EXPECT_FLOAT_EQ(replacement->buy_rate, 1.5f);
+  ASSERT_EQ(replacement->items.size(), 1u);
+  EXPECT_EQ(replacement->items[0].item_id, 9401u);
+}
+
+TEST_F(MerchantServiceTest, ReplaceAllShopsAcceptsEmptyTableAndClearsExistingShops) {
+  service_.ReplaceAllShops({{
+      11,
+      MakeShopConfig(11, "old", 1.0f, 0.5f, {{9301u, 50, 10}}),
+  }});
+
+  ASSERT_NE(service_.GetShop(11), nullptr);
+
+  service_.ReplaceAllShops({});
+
+  EXPECT_EQ(service_.GetShop(11), nullptr);
+}
+
+TEST_F(MerchantServiceTest, ReplaceAllShopsDoesNotRetainRemovedOpenShopData) {
+  const entt::entity player = CreatePlayer(0, 777);
+  const entt::entity item = CreateInventoryItem(player, 9301, 2, 0);
+
+  service_.ReplaceAllShops({{
+      11,
+      MakeShopConfig(11, "old", 1.0f, 1.0f, {{9301u, 50, 10}}),
+  }});
+
+  ecs::events::NpcOpenMerchantEvent open_event;
+  open_event.player = player;
+  open_event.npc_id = 1;
+  open_event.store_id = 11;
+  event_bus_.Publish(open_event);
+
+  service_.ReplaceAllShops({{
+      22,
+      MakeShopConfig(22, "new", 1.0f, 0.5f, {{9301u, 20, 1}}),
+  }});
+
+  ASSERT_TRUE(service_.SellItem(player, item, 2));
+  EXPECT_EQ(service_.GetShop(11), nullptr);
+  const auto* replacement = service_.GetShop(22);
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_EQ(registry_.get<ecs::CharacterAttributesComponent>(player).gold, 20);
+  ASSERT_EQ(replacement->items.size(), 1u);
+  EXPECT_EQ(replacement->items[0].stock, 3);
 }
 
 }  // namespace

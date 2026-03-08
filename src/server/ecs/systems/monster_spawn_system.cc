@@ -10,25 +10,9 @@
 #include "ecs/events/combat_events.h"
 #include "ecs/events/monster_events.h"
 
-#include <filesystem>
-#include <iostream>
 #include <random>
 
-#include <yaml-cpp/yaml.h>
-
 namespace mir2::ecs {
-
-namespace {
-
-template <typename T>
-T ReadOrDefault(const YAML::Node& node, const char* key, const T& default_value) {
-    if (node && node[key]) {
-        return node[key].as<T>();
-    }
-    return default_value;
-}
-
-}  // namespace
 
 MonsterSpawnSystem::MonsterSpawnSystem() = default;
 
@@ -48,70 +32,15 @@ void MonsterSpawnSystem::Update(entt::registry& registry, float dt) {
     ProcessRespawnTimers(registry, dt);
 }
 
-void MonsterSpawnSystem::LoadSpawnConfig(const std::string& config_path) {
-    // 解析YAML刷新点配置
+void MonsterSpawnSystem::ReplaceAllSpawnPoints(
+    std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> spawn_points) {
     spawn_points_.clear();
+    respawn_timers_.clear();
 
-    try {
-        if (config_path.empty() || !std::filesystem::exists(config_path)) {
-            return;
-        }
-
-        YAML::Node root = YAML::LoadFile(config_path);
-        YAML::Node spawn_nodes = root["spawn_points"];
-        if (!spawn_nodes) {
-            spawn_nodes = root["spawns"];
-        }
-        if (!spawn_nodes) {
-            spawn_nodes = root;
-        }
-        if (!spawn_nodes || !spawn_nodes.IsSequence()) {
-            return;
-        }
-
-        for (const auto& node : spawn_nodes) {
-            if (!node || !node.IsMap()) {
-                continue;
-            }
-
-            game::entity::MonsterSpawnPoint spawn;
-            spawn.spawn_id = ReadOrDefault(node, "spawn_id", spawn.spawn_id);
-            if (spawn.spawn_id == 0 && node["id"]) {
-                spawn.spawn_id = node["id"].as<uint32_t>();
-            }
-            if (spawn.spawn_id == 0) {
-                continue;
-            }
-
-            spawn.map_id = ReadOrDefault(node, "map_id", spawn.map_id);
-            const YAML::Node center = node["center"] ? node["center"] : node["position"];
-            if (center) {
-                spawn.center_x = ReadOrDefault(center, "x", spawn.center_x);
-                spawn.center_y = ReadOrDefault(center, "y", spawn.center_y);
-            } else {
-                spawn.center_x = ReadOrDefault(node, "center_x", spawn.center_x);
-                spawn.center_y = ReadOrDefault(node, "center_y", spawn.center_y);
-            }
-
-            spawn.spawn_radius = ReadOrDefault(node, "spawn_radius", spawn.spawn_radius);
-            spawn.monster_template_id =
-                ReadOrDefault(node, "monster_template_id", spawn.monster_template_id);
-            if (spawn.monster_template_id == 0 && node["monster_id"]) {
-                spawn.monster_template_id = node["monster_id"].as<uint32_t>();
-            }
-            spawn.patrol_radius = ReadOrDefault(node, "patrol_radius", spawn.patrol_radius);
-            spawn.respawn_interval = ReadOrDefault(node, "respawn_interval", spawn.respawn_interval);
-            spawn.max_count = ReadOrDefault(node, "max_count", spawn.max_count);
-            spawn.aggro_range = ReadOrDefault(node, "aggro_range", spawn.aggro_range);
-            spawn.attack_range = ReadOrDefault(node, "attack_range", spawn.attack_range);
-            // 重置当前数量以避免配置热重载污染
-            spawn.current_count = 0;
-            spawn.last_spawn_time = elapsed_time_ - spawn.respawn_interval;
-
-            spawn_points_[spawn.spawn_id] = spawn;
-        }
-    } catch (const std::exception& ex) {
-        std::cerr << "Spawn config load failed: " << ex.what() << std::endl;
+    for (auto& [spawn_id, spawn] : spawn_points) {
+        spawn.current_count = 0;
+        spawn.last_spawn_time = elapsed_time_ - spawn.respawn_interval;
+        spawn_points_.emplace(spawn_id, std::move(spawn));
     }
 }
 

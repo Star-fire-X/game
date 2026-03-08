@@ -17,11 +17,16 @@
 
 namespace mir2::ecs {
 
+namespace test_support {
+class MonsterDropSystemTestAccess;
+}  // namespace test_support
+
 /**
  * @brief 怪物掉落系统
  */
 class MonsterDropSystem {
 public:
+    friend class test_support::MonsterDropSystemTestAccess;
     /// 伤害贡献记录
     using DamageContributors = std::unordered_map<entt::entity, int32_t>;
 
@@ -33,6 +38,8 @@ public:
     void OnMonsterDeath(entt::entity monster, entt::entity killer,
                         const DamageContributors& damage_contributors);
     void LoadDropTables(const std::string& config_path);
+    void ReplaceAllDropTables(
+        const std::unordered_map<uint32_t, game::entity::MonsterDropTable>& tables);
     void SubscribeToDeathEvents();
 
 private:
@@ -60,6 +67,18 @@ private:
                                   const DamageContributors& damage_contributors,
                                   LootMode mode);
 };
+
+namespace test_support {
+
+class MonsterDropSystemTestAccess {
+ public:
+    static const std::unordered_map<uint32_t, game::entity::MonsterDropTable>& DropTables(
+        const MonsterDropSystem& system) {
+        return system.drop_tables_;
+    }
+};
+
+}  // namespace test_support
 
 }  // namespace mir2::ecs
 

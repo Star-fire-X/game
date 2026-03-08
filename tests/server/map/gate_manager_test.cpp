@@ -5,52 +5,12 @@
 
 #include <gtest/gtest.h>
 
-#include <atomic>
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-
 #include "game/map/gate_manager.h"
 
 namespace {
 
 using mir2::game::map::GateInfo;
 using mir2::game::map::GateManager;
-
-std::filesystem::path CreateTempGateConfigFile() {
-  static std::atomic<uint64_t> sequence{0};
-  const uint64_t now_ticks = static_cast<uint64_t>(
-      std::chrono::steady_clock::now().time_since_epoch().count());
-  const uint64_t seq = sequence.fetch_add(1, std::memory_order_relaxed);
-  const std::string suffix =
-      std::to_string(now_ticks) + "_" + std::to_string(seq);
-  const auto temp_dir =
-      std::filesystem::temp_directory_path() / ("mir2_gate_manager_test_" + suffix);
-  std::error_code ec;
-  std::filesystem::create_directories(temp_dir, ec);
-  if (ec) {
-    return {};
-  }
-
-  const auto gate_config_path = temp_dir / "gates.yaml";
-  std::ofstream out(gate_config_path, std::ios::out | std::ios::trunc);
-  if (!out.is_open()) {
-    return {};
-  }
-  out << "gates:\n"
-      << "  - id: 101\n"
-      << "    source_map: \"1\"\n"
-      << "    source_x: 10\n"
-      << "    source_y: 20\n"
-      << "    target_map: \"2\"\n"
-      << "    target_x: 30\n"
-      << "    target_y: 40\n";
-  out.flush();
-  if (!out.good()) {
-    return {};
-  }
-  return gate_config_path;
-}
 
 }  // namespace
 
@@ -187,18 +147,37 @@ TEST(GateManagerTest, NumericFallbackSupportsLeadingZeroMapIds) {
   EXPECT_EQ(normalized_string->gate_id, 22u);
 }
 
-TEST(GateManagerTest, LoadFromAbsolutePathAllowsCustomConfigRoot) {
-  const auto gate_config_path = CreateTempGateConfigFile();
-  ASSERT_FALSE(gate_config_path.empty());
-  ASSERT_TRUE(std::filesystem::exists(gate_config_path));
-
+TEST(GateManagerTest, ReplaceAllGatesClearsLegacyStateAndRebuildsIndexes) {
   GateManager manager;
-  manager.LoadFromConfig(gate_config_path.string());
+  manager.AddGate(GateInfo{1, "1", 10, 20, "2", 30, 40, false, 0});
 
-  auto result = manager.CheckGateTrigger("1", 10, 20);
+  manager.ReplaceAllGates({
+      GateInfo{21, "3", 100, 200, "7", 300, 400, false, 0},
+      GateInfo{22, "004", 11, 22, "8", 33, 44, false, 0},
+  });
+
+  EXPECT_FALSE(manager.CheckGateTrigger("1", 10, 20).has_value());
+
+  auto first = manager.CheckGateTrigger("3", 100, 200);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->gate_id, 21u);
+  EXPECT_EQ(first->target_map, "7");
+
+  auto second = manager.CheckGateTrigger(4, 11, 22);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->gate_id, 22u);
+}
+
+TEST(GateManagerTest, ReplaceAllGatesRejectsDuplicateSourceCoordinates) {
+  GateManager manager;
+
+  manager.ReplaceAllGates({
+      GateInfo{31, "5", 10, 20, "6", 30, 40, false, 0},
+      GateInfo{32, "5", 10, 20, "7", 50, 60, false, 0},
+  });
+
+  auto result = manager.CheckGateTrigger("5", 10, 20);
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ(result->gate_id, 101u);
-
-  std::error_code ec;
-  std::filesystem::remove_all(gate_config_path.parent_path(), ec);
+  EXPECT_EQ(result->gate_id, 31u);
+  EXPECT_EQ(result->target_map, "6");
 }

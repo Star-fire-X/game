@@ -6,11 +6,6 @@
 #include <gtest/gtest.h>
 #include <entt/entt.hpp>
 
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <string>
-
 #include "ecs/components/monster_component.h"
 #include "ecs/components/transform_component.h"
 #include "game/entity/monster_spawn_config.h"
@@ -26,32 +21,13 @@ class MonsterSpawnSystemTest : public ::testing::Test {
 protected:
     void SetUp() override {
         registry_.clear();
-        auto base = std::filesystem::temp_directory_path();
-        auto unique = std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count());
-        temp_dir_ = base / ("mir2_spawn_test_" + unique);
-        std::filesystem::create_directories(temp_dir_);
-        file_counter_ = 0;
     }
 
     void TearDown() override {
         registry_.clear();
-        std::error_code ec;
-        if (!temp_dir_.empty()) {
-            std::filesystem::remove_all(temp_dir_, ec);
-        }
-    }
-
-    std::filesystem::path WriteConfig(const std::string& contents) {
-        auto path = temp_dir_ / ("spawn_" + std::to_string(file_counter_++) + ".yaml");
-        std::ofstream out(path);
-        out << contents;
-        return path;
     }
 
     entt::registry registry_;
-    std::filesystem::path temp_dir_;
-    int file_counter_ = 0;
 };
 
 template <typename Transform>
@@ -80,40 +56,6 @@ TEST_F(MonsterSpawnSystemTest, SpawnPointConfig) {
     
     EXPECT_EQ(spawn.spawn_id, 1);
     EXPECT_EQ(spawn.max_count, 5);
-}
-
-TEST_F(MonsterSpawnSystemTest, SpawnSystem_LoadConfig) {
-    MonsterSpawnSystem system;
-    const auto path = WriteConfig(R"(spawn_points:
-  - spawn_id: 1
-    map_id: 7
-    center: { x: 10, y: 20 }
-    spawn_radius: 3
-    monster_template_id: 99
-    patrol_radius: 6
-    respawn_interval: 12
-    max_count: 2
-    aggro_range: 9
-    attack_range: 4
-  - spawn_id: 0
-    map_id: 1
-)");
-
-    system.LoadSpawnConfig(path.string());
-
-    ASSERT_EQ(system.spawn_points_.size(), 1u);
-    const auto& spawn = system.spawn_points_.at(1);
-    EXPECT_EQ(spawn.map_id, 7u);
-    EXPECT_EQ(spawn.center_x, 10);
-    EXPECT_EQ(spawn.center_y, 20);
-    EXPECT_EQ(spawn.spawn_radius, 3);
-    EXPECT_EQ(spawn.monster_template_id, 99u);
-    EXPECT_EQ(spawn.patrol_radius, 6);
-    EXPECT_FLOAT_EQ(spawn.respawn_interval, 12.0f);
-    EXPECT_EQ(spawn.max_count, 2);
-    EXPECT_EQ(spawn.current_count, 0);
-    EXPECT_EQ(spawn.aggro_range, 9);
-    EXPECT_EQ(spawn.attack_range, 4);
 }
 
 TEST_F(MonsterSpawnSystemTest, SpawnSystem_SpawnAtPoint) {
@@ -208,6 +150,75 @@ TEST_F(MonsterSpawnSystemTest, SpawnSystem_RespawnTimer) {
     EXPECT_EQ(transform.map_id, spawn.map_id);
     EXPECT_EQ(GetTransformX(transform), spawn.center_x);
     EXPECT_EQ(GetTransformY(transform), spawn.center_y);
+}
+
+TEST_F(MonsterSpawnSystemTest, ReplaceAllSpawnPointsReplacesExistingConfigAndClearsTimers) {
+    MonsterSpawnSystem system;
+    game::entity::MonsterSpawnPoint old_spawn;
+    old_spawn.spawn_id = 1;
+    old_spawn.map_id = 1;
+    old_spawn.monster_template_id = 100;
+    old_spawn.current_count = 2;
+    old_spawn.last_spawn_time = 99.0f;
+    system.spawn_points_[old_spawn.spawn_id] = old_spawn;
+    system.ScheduleRespawn(1001, old_spawn.spawn_id, 3.0f);
+
+    game::entity::MonsterSpawnPoint new_spawn;
+    new_spawn.spawn_id = 2;
+    new_spawn.map_id = 2;
+    new_spawn.center_x = 10;
+    new_spawn.center_y = 20;
+    new_spawn.monster_template_id = 200;
+    new_spawn.max_count = 3;
+    new_spawn.current_count = 7;
+    new_spawn.last_spawn_time = 88.0f;
+
+    system.ReplaceAllSpawnPoints({{new_spawn.spawn_id, new_spawn}});
+
+    ASSERT_EQ(system.spawn_points_.size(), 1u);
+    EXPECT_FALSE(system.spawn_points_.contains(1u));
+    ASSERT_TRUE(system.spawn_points_.contains(2u));
+    EXPECT_TRUE(system.respawn_timers_.empty());
+    EXPECT_EQ(system.spawn_points_.at(2u).current_count, 0);
+}
+
+TEST_F(MonsterSpawnSystemTest, ReplaceAllSpawnPointsAcceptsEmptyConfiguration) {
+    MonsterSpawnSystem system;
+    game::entity::MonsterSpawnPoint spawn;
+    spawn.spawn_id = 1;
+    spawn.map_id = 1;
+    spawn.monster_template_id = 100;
+    system.spawn_points_[spawn.spawn_id] = spawn;
+    system.ScheduleRespawn(1001, spawn.spawn_id, 2.0f);
+
+    system.ReplaceAllSpawnPoints({});
+
+    EXPECT_TRUE(system.spawn_points_.empty());
+    EXPECT_TRUE(system.respawn_timers_.empty());
+}
+
+TEST_F(MonsterSpawnSystemTest, ReplaceAllSpawnPointsKeepsUpdatePathWorking) {
+    MonsterSpawnSystem system;
+    game::entity::MonsterSpawnPoint spawn;
+    spawn.spawn_id = 42;
+    spawn.map_id = 3;
+    spawn.center_x = 7;
+    spawn.center_y = 9;
+    spawn.spawn_radius = 0;
+    spawn.monster_template_id = 123;
+    spawn.respawn_interval = 0.0f;
+    spawn.max_count = 1;
+    spawn.aggro_range = 10;
+    spawn.attack_range = 3;
+
+    system.ReplaceAllSpawnPoints({{spawn.spawn_id, spawn}});
+    system.Update(registry_, 0.1f);
+
+    ASSERT_TRUE(system.spawn_points_.contains(spawn.spawn_id));
+    EXPECT_EQ(system.spawn_points_.at(spawn.spawn_id).current_count, 1);
+
+    auto view = registry_.view<MonsterIdentityComponent, TransformComponent>();
+    EXPECT_EQ(view.size_hint(), 1u);
 }
 
 }  // namespace

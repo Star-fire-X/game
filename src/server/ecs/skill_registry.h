@@ -15,6 +15,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace mir2::config {
+struct ConfigData;
+}
+
 namespace mir2::ecs {
 
 /**
@@ -24,6 +28,16 @@ namespace mir2::ecs {
  */
 class SkillRegistry {
 public:
+    struct ReplaceResult {
+        bool success = false;
+        size_t loaded_skill_count = 0;
+        bool artifact_present = false;
+        std::string artifact_file;
+        std::string artifact_hash;
+        std::string generated_at;
+        std::string error_message;
+    };
+
     /// 获取全局单例
     static SkillRegistry& instance();
 
@@ -36,9 +50,8 @@ public:
     /// 获取指定职业可用技能模板
     std::vector<const SkillTemplate*> get_skills_for_class(mir2::common::CharacterClass cls) const;
 
-    /// 从 YAML 文件加载技能模板
-    /// @return 成功返回 true，失败返回 false，错误信息写入 error_out（可选）
-    bool load_from_yaml(const std::string& path, std::string* error_out = nullptr);
+    /// 用 runtime config 快照全量替换 registry 内容
+    ReplaceResult ReplaceAllFromConfigData(const mir2::config::ConfigData& config_data);
 
     /// 清空所有技能模板
     void clear();

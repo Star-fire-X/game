@@ -13,6 +13,7 @@
 #include <entt/entt.hpp>
 
 #include "ecs/event_bus.h"
+#include "game/map/aoi_manager.h"
 #include "logic/response_sender.h"
 
 namespace mir2::game::map {
@@ -48,6 +49,12 @@ class WorldSyncBroadcastService {
 
   // Sends a one-shot StateSync immediately for a specific player role id.
   bool RequestImmediateStateSyncForRole(uint64_t role_id);
+
+  void HandleAoiEvent(entt::entity watcher,
+                      entt::entity target,
+                      mir2::game::map::AOIEventType event_type,
+                      int32_t x,
+                      int32_t y);
 
  private:
   struct PendingRespawn {

@@ -19,6 +19,12 @@
 
 namespace mir2::ecs {
 
+struct NpcIdentityComponent {
+    uint64_t npc_id = 0;
+    uint32_t template_id = 0;
+    uint32_t map_id = 0;
+};
+
 /**
  * @brief NPC state component
  */

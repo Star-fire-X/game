@@ -21,14 +21,17 @@
 #include "common/internal_message_helper.h"
 #include "common/protocol/message_codec.h"
 #include "config/config_manager.h"
-#include "config/map_config_loader.h"
+#include "config/runtime_config.h"
 #include "core/utils.h"
+#include "data/item_template.h"
 #include "storage_engine/backends/account_storage_backend.h"
 #include "storage_engine/backends/storage_engine_backend.h"
 #include "ecs/components/entity_version_component.h"
 #include "ecs/character_snapshot_codec.h"
+#include "ecs/components/npc_component.h"
 #include "ecs/id_types.h"
 #include "ecs/registry_manager.h"
+#include "ecs/skill_registry.h"
 #include "ecs/systems/combat_system.h"
 #include "ecs/systems/effect_system.h"
 #include "ecs/systems/inventory_system.h"
@@ -38,6 +41,7 @@
 #include "ecs/systems/luck_system.h"
 #include "ecs/systems/monster_ai_system.h"
 #include "ecs/systems/monster_drop_system.h"
+#include "ecs/systems/monster_spawn_system.h"
 #include "ecs/systems/skill_system.h"
 #include "ecs/systems/teleport_system.h"
 #include "ecs/systems/trade_system.h"
@@ -68,6 +72,8 @@
 #include "logic/thread_affinity.h"
 #include "logic/services/ecs_combat_service.h"
 #include "logic/services/ecs_inventory_service.h"
+#include "logic/services/merchant_service.h"
+#include "logic/services/npc_shop_response_service.h"
 #include "logic/services/player_presence_service.h"
 #include "logic/services/ranking_service.h"
 #include "logic/services/session_role_store.h"
@@ -83,6 +89,8 @@
 #include "game/map/aoi_manager.h"
 #include "game/map/map_context_service.h"
 #include "game/map/map_instance.h"
+#include "game/npc/npc_manager.h"
+#include "game/npc/npc_types.h"
 #include "game/map/scene_manager_adapter.h"
 #include "guild_generated.h"
 #include "chat_generated.h"
@@ -98,7 +106,6 @@ WorldSystemBundle& WorldSystemBundle::operator=(WorldSystemBundle&&) noexcept = 
 
 namespace {
 constexpr uint16_t kMetricsPort = 9091;
-constexpr const char* kMonsterDropTablePath = "config/tables/monsters.yaml";
 constexpr size_t kBackpressureStateMaxEntries = 8192;
 constexpr size_t kBackpressurePruneBatchSize = 256;
 constexpr size_t kBackpressureStateHardCapEntries = 16384;
@@ -462,6 +469,7 @@ std::vector<uint8_t> BuildMailboxExceptionKickPayload() {
                           "Mailbox handler failure",
                           "mailbox exception");
 }
+
 }  // namespace
 
 LogicServer::LogicServer() = default;
@@ -514,43 +522,54 @@ bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
         std::make_unique<game::map::MapContextService>(*scene_manager_);
   }
 
-  std::filesystem::path map_table_dir = std::filesystem::path("config") / "tables";
-  std::filesystem::path gate_config_path = std::filesystem::path("config") / "gates.yaml";
-  const std::filesystem::path config_dir =
-      std::filesystem::path(config_path_).parent_path();
-  if (!config_dir.empty()) {
-    map_table_dir = config_dir / "tables";
-    gate_config_path = config_dir / "gates.yaml";
+  std::shared_ptr<const config::ConfigData> snapshot;
+  if (runtime_config_store_) {
+    snapshot = runtime_config_store_->GetSnapshot();
+  }
+  if (!snapshot) {
+    SYSLOG_ERROR("LogicServer map runtime bootstrap failed: runtime snapshot missing");
+    return false;
   }
 
-  const auto map_configs =
-      config::MapConfigLoader::LoadAllMapConfigs(map_table_dir.string());
   std::unordered_set<uint32_t> prepared_maps;
-  prepared_maps.reserve(map_configs.size() + 1);
+  std::vector<uint32_t> map_ids;
+  map_ids.reserve(snapshot->maps.size());
+  for (const auto& [map_id, runtime_map] : snapshot->maps) {
+    (void)runtime_map;
+    if (map_id > 0) {
+      map_ids.push_back(static_cast<uint32_t>(map_id));
+    }
+  }
+  std::sort(map_ids.begin(), map_ids.end());
+  prepared_maps.reserve(map_ids.size() + 1);
 
-  for (const auto& map_config : map_configs) {
-    if (map_config.map_id < 0) {
+  for (uint32_t map_id : map_ids) {
+    const auto map_it = snapshot->maps.find(static_cast<int32_t>(map_id));
+    if (map_it == snapshot->maps.end()) {
       continue;
     }
-
-    const uint32_t map_id = static_cast<uint32_t>(map_config.map_id);
     if (!prepared_maps.insert(map_id).second) {
       continue;
     }
 
     game::map::SceneManager::MapConfig scene_config;
-    scene_config.map_id = map_config.map_id;
-    scene_config.fixes = map_config.fixes;
+    scene_config.map_id = static_cast<int32_t>(map_id);
+    scene_config.fixes = map_it->second.fixes;
     if (!scene_manager_->GetOrCreateMap(scene_config)) {
-      SYSLOG_WARN("LogicServer map runtime bootstrap skipped map {}: scene init failed",
-                  map_id);
+      SYSLOG_WARN(
+          "LogicServer map runtime bootstrap skipped snapshot map {}: scene init failed",
+          map_id);
       continue;
+    }
+    if (auto* map = scene_manager_->GetMap(static_cast<int32_t>(map_id))) {
+      map->SetAttributes(map_it->second.attributes);
     }
 
     ecs::World* world = registry_manager_->CreateWorld(map_id);
     if (!world) {
-      SYSLOG_WARN("LogicServer map runtime bootstrap skipped map {}: world init failed",
-                  map_id);
+      SYSLOG_WARN(
+          "LogicServer map runtime bootstrap skipped snapshot map {}: world init failed",
+          map_id);
       continue;
     }
 
@@ -579,7 +598,19 @@ bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
     return false;
   }
 
-  gate_manager_.LoadFromConfig(gate_config_path.lexically_normal().string());
+  prepared_maps.insert(default_map_id);
+  for (const auto& [spawn_id, spawn] : snapshot->monster_spawn_points) {
+    (void)spawn_id;
+    if (!prepared_maps.contains(spawn.map_id)) {
+      SYSLOG_ERROR(
+          "LogicServer map runtime bootstrap failed: unknown monster spawn map_id={} spawn_id={}",
+          spawn.map_id,
+          spawn.spawn_id);
+      return false;
+    }
+  }
+
+  gate_manager_.ReplaceAllGates(snapshot->gates);
 
   size_t world_count = 0;
   registry_manager_->ForEachWorld([&world_count](uint32_t /*map_id*/, ecs::World& /*world*/) {
@@ -590,6 +621,118 @@ bool LogicServer::BootstrapMapRuntime(uint32_t default_map_id) {
               default_map_id,
               scene_manager_->MapCount(),
               world_count);
+  return true;
+}
+
+bool LogicServer::BootstrapNpcRuntime(uint32_t default_map_id) {
+  (void)default_map_id;
+  std::shared_ptr<const config::ConfigData> snapshot;
+  if (runtime_config_store_) {
+    snapshot = runtime_config_store_->GetSnapshot();
+  }
+  if (!snapshot) {
+    SYSLOG_ERROR("LogicServer npc runtime bootstrap failed: runtime snapshot missing");
+    return false;
+  }
+
+  std::vector<game::npc::NpcConfig> configs;
+  for (const auto& [npc_id, npc] : snapshot->npcs) {
+    (void)npc_id;
+    configs.push_back(npc);
+  }
+
+  std::unordered_set<uint32_t> valid_map_ids;
+  registry_manager_->ForEachWorld([&valid_map_ids](uint32_t map_id, ecs::World&) {
+    valid_map_ids.insert(map_id);
+  });
+
+  std::vector<std::pair<uint32_t, entt::entity>> existing_npcs;
+  registry_manager_->ForEachWorld([&existing_npcs](uint32_t map_id, ecs::World& world) {
+    auto view = world.Registry().view<ecs::NpcIdentityComponent>();
+    for (auto entity : view) {
+      existing_npcs.emplace_back(map_id, entity);
+    }
+  });
+  for (const auto& [map_id, entity] : existing_npcs) {
+    (void)map_id;
+    if (scene_manager_) {
+      (void)scene_manager_->RemoveEntityFromMap(entity);
+    }
+  }
+  registry_manager_->ForEachWorld([](uint32_t /*map_id*/, ecs::World& world) {
+    auto view = world.Registry().view<ecs::NpcIdentityComponent>();
+    std::vector<entt::entity> to_destroy;
+    for (auto entity : view) {
+      to_destroy.push_back(entity);
+    }
+    for (auto entity : to_destroy) {
+      world.Registry().destroy(entity);
+    }
+  });
+
+  game::npc::NpcManager::Instance().Clear();
+  for (const auto& npc : configs) {
+    if (!valid_map_ids.contains(npc.map_id)) {
+      SYSLOG_ERROR(
+          "LogicServer npc runtime bootstrap failed: unknown npc map_id={} npc_id={}",
+          npc.map_id,
+          npc.id);
+      return false;
+    }
+    const bool store_exists = snapshot->shops.contains(npc.store_id);
+    if (!store_exists) {
+      SYSLOG_ERROR(
+          "LogicServer npc runtime bootstrap failed: unknown npc store_id={} npc_id={}",
+          npc.store_id,
+          npc.id);
+      return false;
+    }
+    if (!npc.enabled) {
+      continue;
+    }
+    if (!game::npc::NpcManager::Instance().CreateNpc(npc)) {
+      SYSLOG_ERROR("LogicServer npc runtime bootstrap failed: duplicate npc_id={}",
+                   npc.id);
+      return false;
+    }
+
+    auto* world = registry_manager_->GetWorld(npc.map_id);
+    if (world == nullptr) {
+      SYSLOG_ERROR("LogicServer npc runtime bootstrap failed: missing world for npc_id={}",
+                   npc.id);
+      return false;
+    }
+
+    auto entity = world->Registry().create();
+    auto& identity = world->Registry().emplace<ecs::NpcIdentityComponent>(entity);
+    identity.npc_id = npc.id;
+    identity.template_id = npc.template_id;
+    identity.map_id = npc.map_id;
+
+    auto& state = world->Registry().emplace<ecs::CharacterStateComponent>(entity);
+    state.map_id = npc.map_id;
+    state.position = {npc.x, npc.y};
+    state.direction = static_cast<mir2::common::Direction>(npc.direction);
+
+    auto& attrs = world->Registry().emplace<ecs::CharacterAttributesComponent>(entity);
+    attrs.level = 1;
+    attrs.hp = 1;
+    attrs.max_hp = 1;
+    attrs.mp = 0;
+    attrs.max_mp = 0;
+
+    world->Registry().emplace<ecs::NpcStateComponent>(entity);
+
+    if (!scene_manager_ ||
+        !scene_manager_->AddEntityToMap(
+            static_cast<int32_t>(npc.map_id), entity, npc.x, npc.y)) {
+      world->Registry().destroy(entity);
+      SYSLOG_ERROR("LogicServer npc runtime bootstrap failed: scene add failed npc_id={}",
+                   npc.id);
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -619,6 +762,10 @@ bool LogicServer::Initialize(const std::string& config_path) {
     return false;
   }
   CrashHandler::Initialize();
+
+  if (!LoadGameplayRuntimeConfig()) {
+    return false;
+  }
 
   auto server_config = config::ConfigManager::Instance().GetServerConfig();
   if (server_config.io_threads != 1) {
@@ -800,6 +947,10 @@ bool LogicServer::Initialize(const std::string& config_path) {
   const uint32_t default_map_id = ResolveDefaultMapId();
   if (!BootstrapMapRuntime(default_map_id)) {
     SYSLOG_ERROR("LogicServer map runtime bootstrap failed");
+    return false;
+  }
+  if (!BootstrapNpcRuntime(default_map_id)) {
+    SYSLOG_ERROR("LogicServer npc runtime bootstrap failed");
     return false;
   }
 
@@ -1025,6 +1176,65 @@ bool LogicServer::Initialize(const std::string& config_path) {
               selected_transport == "uds" ? "" : ":" + std::to_string(server_config.port));
 
   SYSLOG_INFO("LogicServer initialized");
+  return true;
+}
+
+bool LogicServer::LoadGameplayRuntimeConfig() {
+  data::ItemTemplateManager::Instance().Clear();
+
+  const std::filesystem::path config_dir =
+      std::filesystem::path(config_path_).parent_path();
+  const std::filesystem::path runtime_dir = config_dir / "runtime";
+  const std::filesystem::path manifest_path = runtime_dir / "manifest.json";
+
+  if (!std::filesystem::exists(manifest_path)) {
+    SYSLOG_ERROR("LogicServer gameplay runtime config missing path={}",
+                 runtime_dir.string());
+    return false;
+  }
+
+  if (!runtime_config_store_) {
+    runtime_config_store_ = std::make_unique<config::ConfigStore>();
+  }
+
+  std::string error;
+  if (!runtime_config_store_->ReloadFromRuntimeDir(runtime_dir, &error)) {
+    SYSLOG_ERROR("LogicServer gameplay runtime config load failed path={} error={}",
+                 runtime_dir.string(),
+                 error);
+    return false;
+  }
+
+  const auto snapshot = runtime_config_store_->GetSnapshot();
+  if (!snapshot) {
+    SYSLOG_ERROR("LogicServer gameplay runtime config load failed: empty snapshot");
+    return false;
+  }
+
+  if (!data::ItemTemplateManager::Instance().LoadFromConfigData(*snapshot)) {
+    SYSLOG_ERROR("LogicServer gameplay runtime config load failed: items apply failed");
+    return false;
+  }
+
+  const auto skill_result = ecs::SkillRegistry::instance().ReplaceAllFromConfigData(
+      *snapshot);
+  if (!skill_result.success) {
+    SYSLOG_ERROR("LogicServer gameplay runtime config load failed: skills apply failed "
+                 "generated_at={} error={}",
+                 skill_result.generated_at,
+                 skill_result.error_message);
+    return false;
+  }
+
+  SYSLOG_INFO("LogicServer loaded gameplay runtime config generated_at={} items={} "
+              "skills_loaded={} artifact_present={} skill_artifact_file={} "
+              "skill_artifact_hash={}",
+              snapshot->manifest.generated_at,
+              snapshot->items.size(),
+              skill_result.loaded_skill_count,
+              skill_result.artifact_present,
+              skill_result.artifact_file,
+              skill_result.artifact_hash);
   return true;
 }
 
@@ -1369,6 +1579,9 @@ void LogicServer::RegisterHandlers() {
     response_sender_ = std::make_unique<ResponseSender>(
         *network_,
         [this](uint64_t client_id, uint16_t msg_id, const std::vector<uint8_t>& payload) {
+          if (response_send_hook_) {
+            response_send_hook_(client_id, msg_id, payload);
+          }
           const auto routed_payload = common::BuildRoutedMessage(client_id, msg_id, payload);
           if (auto gateway = GetGatewaySession()) {
             gateway->Send(
@@ -3596,14 +3809,76 @@ WorldSystemBundle& LogicServer::EnsureWorldSystems(uint32_t map_id,
   if (!bundle->monster_drop_system) {
     bundle->monster_drop_system =
         std::make_unique<ecs::MonsterDropSystem>(world.Registry(), world.GetEventBus());
-    bundle->monster_drop_system->LoadDropTables(kMonsterDropTablePath);
+    std::shared_ptr<const config::ConfigData> snapshot;
+    if (runtime_config_store_) {
+      snapshot = runtime_config_store_->GetSnapshot();
+    }
+    if (!snapshot) {
+      SYSLOG_ERROR("LogicServer world system init failed: runtime snapshot missing");
+    } else {
+      bundle->monster_drop_system->ReplaceAllDropTables(snapshot->drop_tables);
+    }
     bundle->monster_drop_system->SubscribeToDeathEvents();
+  }
+
+  if (!bundle->monster_spawn_system) {
+    bundle->monster_spawn_system =
+        std::make_unique<ecs::MonsterSpawnSystem>(world.Registry(), world.GetEventBus());
+    std::shared_ptr<const config::ConfigData> snapshot;
+    if (runtime_config_store_) {
+      snapshot = runtime_config_store_->GetSnapshot();
+    }
+    if (!snapshot) {
+      SYSLOG_ERROR("LogicServer world system init failed: runtime snapshot missing");
+    } else {
+      bundle->monster_spawn_system->ReplaceAllSpawnPoints(
+          snapshot->monster_spawn_points);
+    }
+  }
+
+  if (!bundle->merchant_service) {
+    bundle->merchant_service =
+        std::make_unique<MerchantService>(world.Registry(), world.GetEventBus());
+    std::shared_ptr<const config::ConfigData> snapshot;
+    if (runtime_config_store_) {
+      snapshot = runtime_config_store_->GetSnapshot();
+    }
+    if (!snapshot) {
+      SYSLOG_ERROR("LogicServer world system init failed: runtime snapshot missing");
+    } else {
+      bundle->merchant_service->ReplaceAllShops(snapshot->shops);
+    }
+  }
+
+  if (!bundle->npc_shop_response_service && response_sender_ && role_store_ &&
+      bundle->merchant_service) {
+    bundle->npc_shop_response_service =
+        std::make_unique<NpcShopResponseService>(
+            *response_sender_,
+            world.GetEventBus(),
+            *role_store_,
+            *bundle->merchant_service);
   }
 
   if (!bundle->world_sync_broadcast_service && response_sender_ && role_store_) {
     bundle->world_sync_broadcast_service =
         std::make_unique<WorldSyncBroadcastService>(
             *response_sender_, world.GetEventBus(), *role_store_, scene_manager_.get());
+    if (scene_manager_) {
+      if (auto* map = scene_manager_->GetMap(static_cast<int32_t>(map_id))) {
+        map->SetAOICallback(
+            [service = bundle->world_sync_broadcast_service.get()](
+                game::map::AOIEventType event_type,
+                entt::entity watcher,
+                entt::entity target,
+                int32_t x,
+                int32_t y) {
+              if (service != nullptr) {
+                service->HandleAoiEvent(watcher, target, event_type, x, y);
+              }
+            });
+      }
+    }
   }
 
   return *bundle;
@@ -3618,6 +3893,9 @@ void LogicServer::TickWorldSystems(ecs::World& world,
   }
   if (bundle.skill_system) {
     bundle.skill_system->update(now_ms);
+  }
+  if (bundle.monster_spawn_system) {
+    bundle.monster_spawn_system->Update(world.Registry(), delta_time);
   }
   if (bundle.monster_ai_system) {
     bundle.monster_ai_system->Update(world.Registry(), delta_time);

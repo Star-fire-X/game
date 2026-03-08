@@ -28,8 +28,8 @@ struct ShopConfig {
 class MerchantService {
 public:
     explicit MerchantService(entt::registry& registry, ecs::EventBus& event_bus);
-    
-    void LoadShops(const std::string& config_path);
+
+    void ReplaceAllShops(std::unordered_map<uint32_t, ShopConfig> shops);
     bool BuyItem(entt::entity player, uint32_t store_id, uint32_t item_id, int count);
     bool SellItem(entt::entity player, entt::entity item, int count);
     const ShopConfig* GetShop(uint32_t store_id) const;

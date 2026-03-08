@@ -33,6 +33,11 @@ class GateManager {
   void AddGate(const GateInfo& gate);
 
   /**
+   * @brief 替换全部传送门配置并重建索引
+   */
+  void ReplaceAllGates(const std::vector<GateInfo>& gates);
+
+  /**
    * @brief 检查坐标是否触发传送门
    */
   std::optional<GateInfo> CheckGateTrigger(const std::string& map_id,
@@ -46,12 +51,7 @@ class GateManager {
                                            int32_t x,
                                            int32_t y) const;
 
-  /**
-   * @brief 从配置文件加载传送门
-   */
- void LoadFromConfig(const std::string& config_path);
-
- private:
+private:
   struct CoordKey {
     std::string map_id;
     int32_t x = 0;

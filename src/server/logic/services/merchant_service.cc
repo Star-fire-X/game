@@ -7,11 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
-#include <initializer_list>
 #include <limits>
-
-#include <yaml-cpp/yaml.h>
 
 #include "ecs/components/character_components.h"
 #include "ecs/components/item_component.h"
@@ -27,48 +23,10 @@ namespace mir2::logic {
 
 namespace {
 
-constexpr float kDefaultBuyRate = 1.0f;
-constexpr float kDefaultSellRate = 0.5f;
 constexpr const char* kMetricSaveCriticalCallsTotal =
     "logic.ecs.save_critical.merchant.calls_total";
 constexpr const char* kMetricSaveCriticalFailTotal =
     "logic.ecs.save_critical.merchant.fail_total";
-
-template <typename T>
-bool TryReadScalar(const YAML::Node& node, const char* key, T* out) {
-    if (!out) {
-        return false;
-    }
-    const YAML::Node value = node[key];
-    if (!value) {
-        return false;
-    }
-    try {
-        *out = value.as<T>();
-        return true;
-    } catch (const std::exception&) {
-        return false;
-    }
-}
-
-template <typename T>
-bool TryReadFromKeys(const YAML::Node& node,
-                     const std::initializer_list<const char*>& keys,
-                     T* out) {
-    for (const auto* key : keys) {
-        if (TryReadScalar(node, key, out)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-float NormalizeRate(float value, float fallback) {
-    if (!std::isfinite(value) || value <= 0.0f) {
-        return fallback;
-    }
-    return value;
-}
 
 int64_t ComputeUnitPrice(int base_price, float rate) {
     if (base_price < 0) {
@@ -153,120 +111,9 @@ MerchantService::MerchantService(entt::registry& registry, ecs::EventBus& event_
         });
 }
 
-void MerchantService::LoadShops(const std::string& config_path) {
-    shops_.clear();
-
-    try {
-        if (config_path.empty() || !std::filesystem::exists(config_path)) {
-            return;
-        }
-
-        YAML::Node root = YAML::LoadFile(config_path);
-        YAML::Node shops_node = root["shops"];
-        if (!shops_node) {
-            shops_node = root["stores"];
-        }
-        if (!shops_node) {
-            shops_node = root["merchants"];
-        }
-        if (!shops_node) {
-            shops_node = root;
-        }
-        if (!shops_node) {
-            return;
-        }
-
-        auto parse_shop_node = [this](const YAML::Node& shop_node,
-                                      uint32_t default_store_id) {
-            if (!shop_node || !shop_node.IsMap()) {
-                return;
-            }
-
-            ShopConfig shop;
-            shop.buy_rate = kDefaultBuyRate;
-            shop.sell_rate = kDefaultSellRate;
-
-            uint32_t store_id = 0;
-            if (!TryReadFromKeys(shop_node, {"store_id", "shop_id", "id"}, &store_id)) {
-                store_id = default_store_id;
-            }
-            if (store_id == 0) {
-                return;
-            }
-            shop.store_id = store_id;
-
-            TryReadScalar(shop_node, "name", &shop.name);
-
-            float buy_rate = shop.buy_rate;
-            if (TryReadFromKeys(shop_node, {"buy_rate", "buyRate", "buy_rate_pct"}, &buy_rate)) {
-                shop.buy_rate = NormalizeRate(buy_rate, kDefaultBuyRate);
-            }
-            float sell_rate = shop.sell_rate;
-            if (TryReadFromKeys(shop_node, {"sell_rate", "sellRate", "sell_rate_pct"}, &sell_rate)) {
-                shop.sell_rate = NormalizeRate(sell_rate, kDefaultSellRate);
-            }
-
-            YAML::Node items_node = shop_node["items"];
-            if (!items_node) {
-                items_node = shop_node["goods"];
-            }
-            if (!items_node) {
-                items_node = shop_node["products"];
-            }
-
-            if (items_node && items_node.IsSequence()) {
-                for (const auto& item_node : items_node) {
-                    if (!item_node || !item_node.IsMap()) {
-                        continue;
-                    }
-
-                    ShopItem item;
-                    if (!TryReadFromKeys(item_node, {"item_id", "id", "item"}, &item.item_id)) {
-                        continue;
-                    }
-
-                    int price = 0;
-                    if (!TryReadFromKeys(item_node, {"price", "buy_price", "cost"}, &price)) {
-                        continue;
-                    }
-                    item.price = price;
-
-                    int stock = item.stock;
-                    if (TryReadFromKeys(item_node, {"stock", "count", "qty"}, &stock)) {
-                        item.stock = stock <= 0 ? -1 : stock;
-                    }
-
-                    if (item.item_id == 0 || item.price < 0) {
-                        continue;
-                    }
-
-                    shop.items.push_back(item);
-                }
-            }
-
-            shops_[shop.store_id] = std::move(shop);
-        };
-
-        if (shops_node.IsSequence()) {
-            for (const auto& shop_node : shops_node) {
-                parse_shop_node(shop_node, 0);
-            }
-        } else if (shops_node.IsMap()) {
-            for (const auto& entry : shops_node) {
-                uint32_t store_id = 0;
-                try {
-                    if (entry.first && entry.first.IsScalar()) {
-                        store_id = entry.first.as<uint32_t>();
-                    }
-                } catch (const std::exception&) {
-                    store_id = 0;
-                }
-                parse_shop_node(entry.second, store_id);
-            }
-        }
-    } catch (const std::exception& ex) {
-        SYSLOG_ERROR("MerchantService::LoadShops failed: {}", ex.what());
-    }
+void MerchantService::ReplaceAllShops(std::unordered_map<uint32_t, ShopConfig> shops) {
+    shops_ = std::move(shops);
+    open_shop_by_player_id_.clear();
 }
 
 bool MerchantService::BuyItem(entt::entity player,

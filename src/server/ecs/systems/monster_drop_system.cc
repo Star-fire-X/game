@@ -136,6 +136,12 @@ void MonsterDropSystem::LoadDropTables(const std::string& config_path) {
     }
 }
 
+void MonsterDropSystem::ReplaceAllDropTables(
+    const std::unordered_map<uint32_t, game::entity::MonsterDropTable>& tables) {
+    drop_tables_.clear();
+    drop_tables_ = tables;
+}
+
 void MonsterDropSystem::OnMonsterDeath(entt::entity monster, entt::entity killer) {
     DamageContributors empty_contributors;
     OnMonsterDeath(monster, killer, empty_contributors);

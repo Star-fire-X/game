@@ -8,6 +8,8 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include "config/runtime_config.h"
+
 namespace mir2::data {
 
 ItemTemplateManager& ItemTemplateManager::Instance() {
@@ -61,6 +63,13 @@ bool ItemTemplateManager::LoadFromJson(const std::string& path) {
     } catch (...) {
         return false;
     }
+}
+
+bool ItemTemplateManager::LoadFromConfigData(
+    const mir2::config::ConfigData& config_data) {
+    templates_.clear();
+    templates_.insert(config_data.items.begin(), config_data.items.end());
+    return true;
 }
 
 const ItemTemplate* ItemTemplateManager::GetTemplate(uint32_t item_id) const {

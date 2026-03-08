@@ -134,5 +134,43 @@ TEST_F(MonsterDropSystemTest, DropSystem_SelectItems) {
     EXPECT_LT(half_hits, kIterations * 3 / 4);
 }
 
+TEST_F(MonsterDropSystemTest, ReplaceAllDropTablesReplacesExistingTablesWithoutResidualData) {
+    MonsterDropSystem system;
+    game::entity::MonsterDropTable old_table;
+    old_table.monster_template_id = 1;
+    old_table.items = {{10, 1.0f, 1, 1, 1, 0.0f}};
+    system.drop_tables_[1] = old_table;
+
+    game::entity::MonsterDropTable new_table;
+    new_table.monster_template_id = 7;
+    new_table.items = {
+        {20, 1.0f, 1, 1, 1, 0.0f},
+        {30, 0.0f, 1, 1, 1, 0.0f},
+    };
+
+    system.ReplaceAllDropTables({{7, new_table}});
+
+    EXPECT_TRUE(system.drop_tables_.find(1) == system.drop_tables_.end());
+    auto it = system.drop_tables_.find(7);
+    ASSERT_NE(it, system.drop_tables_.end());
+    ASSERT_EQ(it->second.items.size(), 2u);
+
+    const auto drops = system.SelectDropItems(it->second);
+    EXPECT_TRUE(HasDropItem(drops, 20));
+    EXPECT_FALSE(HasDropItem(drops, 30));
+}
+
+TEST_F(MonsterDropSystemTest, ReplaceAllDropTablesAcceptsEmptyTableSet) {
+    MonsterDropSystem system;
+    game::entity::MonsterDropTable table;
+    table.monster_template_id = 1;
+    table.items = {{10, 1.0f, 1, 1, 1, 0.0f}};
+    system.drop_tables_[1] = table;
+
+    system.ReplaceAllDropTables({});
+
+    EXPECT_TRUE(system.drop_tables_.empty());
+}
+
 }  // namespace
 }  // namespace mir2::ecs

@@ -18,6 +18,9 @@
 #include "common/enums.h"
 #include "common/protocol/npc_message_codec.h"
 #include "ecs/components/character_components.h"
+#include "ecs/event_bus.h"
+#include "ecs/events/npc_events.h"
+#include "ecs/world.h"
 #include "game/map/scene_manager.h"
 #include "game/npc/npc_manager.h"
 #include "game/npc/npc_types.h"
@@ -80,7 +83,7 @@ class NpcCommandHandlerTest : public ::testing::Test {
     executor_ = std::make_unique<CoroutineExecutor>(io_context_, 1);
     response_sender_ = std::make_unique<ThrowOnceResponseSender>();
     handler_ = std::make_unique<mir2::logic::NpcCommandHandler>(
-        *executor_, *response_sender_, registry_, scene_manager_);
+        *executor_, *response_sender_, world_.Registry(), scene_manager_);
   }
 
   void TearDown() override {
@@ -93,11 +96,12 @@ class NpcCommandHandlerTest : public ::testing::Test {
   }
 
   entt::entity CreatePlayer(uint64_t player_id, uint32_t map_id, int32_t x, int32_t y) {
-    const entt::entity player = registry_.create();
-    auto& identity = registry_.emplace<ecs::CharacterIdentityComponent>(player);
+    auto& registry = world_.Registry();
+    const entt::entity player = registry.create();
+    auto& identity = registry.emplace<ecs::CharacterIdentityComponent>(player);
     identity.id = player_id;
     identity.name = "Player" + std::to_string(player_id);
-    auto& state = registry_.emplace<ecs::CharacterStateComponent>(player);
+    auto& state = registry.emplace<ecs::CharacterStateComponent>(player);
     state.map_id = map_id;
     state.position = {x, y};
     return player;
@@ -125,12 +129,13 @@ class NpcCommandHandlerTest : public ::testing::Test {
     HandlerContext context;
     context.client_id = client_id;
     context.entity = player;
-    context.registry = &registry_;
+    context.registry = &world_.Registry();
+    context.world = &world_;
     return context;
   }
 
   asio::io_context io_context_;
-  entt::registry registry_;
+  ecs::World world_;
   game::map::SceneManager scene_manager_;
   std::unique_ptr<CoroutineExecutor> executor_;
   std::unique_ptr<ThrowOnceResponseSender> response_sender_;
@@ -218,6 +223,84 @@ TEST_F(NpcCommandHandlerTest, InteractAcceptsReachableNpc) {
   EXPECT_EQ(rsp.value("npc_id", 0ull), npc_id);
   EXPECT_EQ(rsp.value("result", 1u), 0u);
   EXPECT_EQ(rsp.value("npc_name", std::string()), "QuestNpc");
+}
+
+TEST_F(NpcCommandHandlerTest, MerchantInteractPublishesOpenMerchantEvent) {
+  const entt::entity player = CreatePlayer(10008, 1, 100, 100);
+
+  game::npc::NpcConfig config;
+  config.id = 5008;
+  config.name = "MerchantNpc";
+  config.type = game::npc::NpcType::kMerchant;
+  config.map_id = 1;
+  config.x = 101;
+  config.y = 100;
+  config.enabled = true;
+  config.store_id = 77;
+  auto npc = game::npc::NpcManager::Instance().CreateNpc(config);
+  ASSERT_NE(npc, nullptr);
+
+  int open_merchant_count = 0;
+  ecs::events::NpcOpenMerchantEvent merchant_event{};
+  world_.GetEventBus().Subscribe<ecs::events::NpcOpenMerchantEvent>(
+      [&](ecs::events::NpcOpenMerchantEvent& event) {
+        merchant_event = event;
+        ++open_merchant_count;
+      });
+
+  auto context = BuildContext(7008, player);
+  const auto payload = BuildNpcInteractReq(npc->GetId(), 10008);
+  executor_->Spawn(handler_->HandleMessage(
+      context,
+      static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractReq),
+      payload.data(),
+      payload.size()));
+  RunIoContext();
+
+  const auto responses = response_sender_->GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 1u);
+  const auto rsp = ParseJsonPayload(responses[0].payload);
+  EXPECT_EQ(rsp.value("result", 1u), 0u);
+  EXPECT_EQ(open_merchant_count, 1);
+  EXPECT_EQ(merchant_event.player, player);
+  EXPECT_EQ(merchant_event.npc_id, npc->GetId());
+  EXPECT_EQ(merchant_event.store_id, 77u);
+}
+
+TEST_F(NpcCommandHandlerTest, InteractRejectsDisabledMerchantNpcAndDoesNotPublishOpenMerchantEvent) {
+  const entt::entity player = CreatePlayer(10009, 1, 100, 100);
+
+  game::npc::NpcConfig config;
+  config.id = 5009;
+  config.name = "DisabledMerchantNpc";
+  config.type = game::npc::NpcType::kMerchant;
+  config.map_id = 1;
+  config.x = 101;
+  config.y = 100;
+  config.enabled = false;
+  config.store_id = 77;
+  auto npc = game::npc::NpcManager::Instance().CreateNpc(config);
+  ASSERT_NE(npc, nullptr);
+
+  int open_merchant_count = 0;
+  world_.GetEventBus().Subscribe<ecs::events::NpcOpenMerchantEvent>(
+      [&](ecs::events::NpcOpenMerchantEvent&) { ++open_merchant_count; });
+
+  auto context = BuildContext(7009, player);
+  const auto payload = BuildNpcInteractReq(npc->GetId(), 10009);
+  executor_->Spawn(handler_->HandleMessage(
+      context,
+      static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractReq),
+      payload.data(),
+      payload.size()));
+  RunIoContext();
+
+  const auto responses = response_sender_->GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 1u);
+  const auto rsp = ParseJsonPayload(responses[0].payload);
+  EXPECT_EQ(rsp.value("npc_id", 0ull), npc->GetId());
+  EXPECT_EQ(rsp.value("result", 0u), 1u);
+  EXPECT_EQ(open_merchant_count, 0);
 }
 
 TEST_F(NpcCommandHandlerTest, MenuSelectRejectsOutOfRangeNpc) {

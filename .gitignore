@@ -171,6 +171,8 @@ docker-compose.override.yml
 
 # Codeagent and AI assistant session files
 *.jsonl
+.worktrees/
+config/runtime/
 
 # Backup files
 *.bak

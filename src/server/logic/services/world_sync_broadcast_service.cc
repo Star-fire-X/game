@@ -73,6 +73,15 @@ uint64_t ResolveNetworkEntityId(const entt::registry& registry,
       }
     }
   }
+  if (entity_type == mir2::proto::EntityType::NPC) {
+    if (const auto* identity =
+            registry.try_get<mir2::ecs::NpcIdentityComponent>(entity)) {
+      if (identity->npc_id != 0) {
+        return identity->npc_id;
+      }
+    }
+    return 0;
+  }
   return static_cast<uint64_t>(entt::to_integral(entity));
 }
 
@@ -172,6 +181,16 @@ std::vector<uint8_t> BuildEntityEnterPayload(uint64_t entity_id,
       hp,
       max_hp,
       level);
+  builder.Finish(message);
+
+  const uint8_t* data = builder.GetBufferPointer();
+  return std::vector<uint8_t>(data, data + builder.GetSize());
+}
+
+std::vector<uint8_t> BuildEntityLeavePayload(uint64_t entity_id,
+                                             mir2::proto::EntityType entity_type) {
+  flatbuffers::FlatBufferBuilder builder;
+  const auto message = mir2::proto::CreateEntityLeave(builder, entity_id, entity_type);
   builder.Finish(message);
 
   const uint8_t* data = builder.GetBufferPointer();
@@ -510,6 +529,11 @@ void WorldSyncBroadcastService::BroadcastStateSyncForEntity(entt::entity self_en
     if (entity_type == mir2::proto::EntityType::NONE) {
       continue;
     }
+    const uint64_t network_entity_id =
+        ResolveNetworkEntityId(registry, entity, entity_type);
+    if (network_entity_id == 0) {
+      continue;
+    }
     const auto* entity_attrs =
         registry.try_get<mir2::ecs::CharacterAttributesComponent>(entity);
     const int hp = entity_attrs ? entity_attrs->hp : 0;
@@ -518,7 +542,7 @@ void WorldSyncBroadcastService::BroadcastStateSyncForEntity(entt::entity self_en
     const int max_mp = entity_attrs ? entity_attrs->max_mp : 0;
     snapshots.push_back(mir2::proto::CreateEntitySnapshot(
         builder,
-        ResolveNetworkEntityId(registry, entity, entity_type),
+        network_entity_id,
         entity_type,
         entity_state->position.x,
         entity_state->position.y,
@@ -557,6 +581,72 @@ bool WorldSyncBroadcastService::RequestImmediateStateSyncForRole(uint64_t role_i
     return true;
   }
   return false;
+}
+
+void WorldSyncBroadcastService::HandleAoiEvent(
+    entt::entity watcher,
+    entt::entity target,
+    mir2::game::map::AOIEventType event_type,
+    int32_t x,
+    int32_t y) {
+  auto& registry = event_bus_.Registry();
+  if (watcher == entt::null || target == entt::null ||
+      !registry.valid(watcher) || !registry.valid(target)) {
+    return;
+  }
+
+  const auto* watcher_identity =
+      registry.try_get<mir2::ecs::CharacterIdentityComponent>(watcher);
+  if (!watcher_identity || watcher_identity->id == 0) {
+    return;
+  }
+
+  const auto client_id_opt = role_store_.GetClientIdByRoleId(watcher_identity->id);
+  if (!client_id_opt.has_value()) {
+    return;
+  }
+
+  const auto entity_type = ResolveEntityType(registry, target);
+  if (entity_type != mir2::proto::EntityType::NPC) {
+    return;
+  }
+
+  const auto* npc_identity =
+      registry.try_get<mir2::ecs::NpcIdentityComponent>(target);
+  const auto* state =
+      registry.try_get<mir2::ecs::CharacterStateComponent>(target);
+  if (!npc_identity || !state || npc_identity->npc_id == 0) {
+    return;
+  }
+
+  if (event_type == mir2::game::map::AOIEventType::kEnter) {
+    const auto* attrs =
+        registry.try_get<mir2::ecs::CharacterAttributesComponent>(target);
+    const auto payload = BuildEntityEnterPayload(
+        npc_identity->npc_id,
+        entity_type,
+        x,
+        y,
+        static_cast<uint8_t>(state->direction),
+        npc_identity->template_id,
+        "",
+        attrs ? attrs->hp : 0,
+        attrs ? attrs->max_hp : 0,
+        static_cast<uint16_t>(std::max(attrs ? attrs->level : 1, 1)));
+    response_sender_.Send(
+        *client_id_opt,
+        static_cast<uint16_t>(mir2::common::MsgId::kEntityEnter),
+        payload);
+    return;
+  }
+
+  if (event_type == mir2::game::map::AOIEventType::kLeave) {
+    const auto payload = BuildEntityLeavePayload(npc_identity->npc_id, entity_type);
+    response_sender_.Send(
+        *client_id_opt,
+        static_cast<uint16_t>(mir2::common::MsgId::kEntityLeave),
+        payload);
+  }
 }
 
 void WorldSyncBroadcastService::ProcessPendingRespawns(int64_t now_ms) {

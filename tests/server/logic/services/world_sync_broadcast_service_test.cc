@@ -10,12 +10,14 @@
 #include "common/time_utils.h"
 #include "ecs/components/character_components.h"
 #include "ecs/components/effect_component.h"
+#include "ecs/components/npc_component.h"
 #include "ecs/event_bus.h"
 #include "ecs/events/combat_events.h"
 #include "ecs/events/map_events.h"
 #include "ecs/events/skill_events.h"
 #include "combat_generated.h"
 #include "game_generated.h"
+#include "game/map/scene_manager.h"
 #include "logic/mock_response_sender.h"
 #include "logic/services/session_role_store.h"
 #include "logic/services/world_sync_broadcast_service.h"
@@ -25,6 +27,15 @@ namespace {
 
 class WorldSyncBroadcastServiceTest : public ::testing::Test {
  protected:
+  game::map::SceneManager::MapConfig BuildMapConfig(int32_t map_id) {
+    game::map::SceneManager::MapConfig config;
+    config.map_id = map_id;
+    config.width = 256;
+    config.height = 256;
+    config.load_walkability = false;
+    return config;
+  }
+
   entt::entity AddPlayerEntity(uint64_t role_id) {
     const auto entity = registry_.create();
     auto& identity = registry_.emplace<mir2::ecs::CharacterIdentityComponent>(entity);
@@ -43,10 +54,39 @@ class WorldSyncBroadcastServiceTest : public ::testing::Test {
     return entity;
   }
 
+  entt::entity AddNpcEntity(uint64_t npc_id,
+                            uint32_t map_id,
+                            int32_t x,
+                            int32_t y,
+                            uint32_t template_id = 2001) {
+    const auto entity = registry_.create();
+    auto& identity = registry_.emplace<mir2::ecs::NpcIdentityComponent>(entity);
+    identity.npc_id = npc_id;
+    identity.template_id = template_id;
+    identity.map_id = map_id;
+    auto& state = registry_.emplace<mir2::ecs::CharacterStateComponent>(entity);
+    state.map_id = map_id;
+    state.position = {x, y};
+    auto& attrs = registry_.emplace<mir2::ecs::CharacterAttributesComponent>(entity);
+    attrs.level = 1;
+    attrs.hp = 1;
+    attrs.max_hp = 1;
+    attrs.mp = 0;
+    attrs.max_mp = 0;
+    registry_.emplace<mir2::ecs::NpcStateComponent>(entity);
+    return entity;
+  }
+
+  void AddEntityToMap(entt::entity entity, int32_t map_id, int32_t x, int32_t y) {
+    ASSERT_NE(scene_manager_.GetOrCreateMap(BuildMapConfig(map_id)), nullptr);
+    ASSERT_TRUE(scene_manager_.AddEntityToMap(map_id, entity, x, y));
+  }
+
   entt::registry registry_;
   mir2::ecs::EventBus event_bus_{registry_};
   MockResponseSender response_sender_;
   RoleStore role_store_;
+  game::map::SceneManager scene_manager_;
 };
 
 TEST_F(WorldSyncBroadcastServiceTest, CrossMapEventSendsChangeMap) {
@@ -253,6 +293,96 @@ TEST_F(WorldSyncBroadcastServiceTest, RequestImmediateStateSyncForRoleSendsImmed
       });
   ASSERT_NE(it, responses.end());
   EXPECT_EQ(it->client_id, 9210u);
+}
+
+TEST_F(WorldSyncBroadcastServiceTest, StateSyncUsesNpcBusinessIdForNpcEntities) {
+  WorldSyncBroadcastService service(response_sender_, event_bus_, role_store_, &scene_manager_);
+  const auto player = AddPlayerEntity(/*role_id=*/3001);
+  const auto npc = AddNpcEntity(/*npc_id=*/7001, /*map_id=*/1, /*x=*/101, /*y=*/100);
+  role_store_.BindClientRole(/*client_id=*/9301, /*player_id=*/3001);
+  AddEntityToMap(player, /*map_id=*/1, /*x=*/100, /*y=*/100);
+  AddEntityToMap(npc, /*map_id=*/1, /*x=*/101, /*y=*/100);
+
+  ASSERT_TRUE(service.RequestImmediateStateSyncForRole(/*role_id=*/3001));
+
+  const auto responses = response_sender_.GetCapturedResponses();
+  const auto it = std::find_if(
+      responses.begin(), responses.end(), [](const CapturedResponse& response) {
+        return response.msg_id ==
+               static_cast<uint16_t>(mir2::common::MsgId::kStateSync);
+      });
+  ASSERT_NE(it, responses.end());
+
+  flatbuffers::Verifier verifier(it->payload.data(), it->payload.size());
+  ASSERT_TRUE(verifier.VerifyBuffer<mir2::proto::StateSync>(nullptr));
+  const auto* payload = flatbuffers::GetRoot<mir2::proto::StateSync>(it->payload.data());
+  ASSERT_NE(payload, nullptr);
+  ASSERT_NE(payload->entities(), nullptr);
+  ASSERT_EQ(payload->entities()->size(), 1u);
+  EXPECT_EQ(payload->entities()->Get(0)->entity_type(), mir2::proto::EntityType::NPC);
+  EXPECT_EQ(payload->entities()->Get(0)->entity_id(), 7001u);
+}
+
+TEST_F(WorldSyncBroadcastServiceTest, AoiEnterSendsEntityEnterForNpc) {
+  WorldSyncBroadcastService service(response_sender_, event_bus_, role_store_, &scene_manager_);
+  const auto player = AddPlayerEntity(/*role_id=*/3002);
+  const auto npc = AddNpcEntity(/*npc_id=*/7002, /*map_id=*/1, /*x=*/140, /*y=*/100);
+  role_store_.BindClientRole(/*client_id=*/9302, /*player_id=*/3002);
+  AddEntityToMap(player, /*map_id=*/1, /*x=*/100, /*y=*/100);
+  AddEntityToMap(npc, /*map_id=*/1, /*x=*/140, /*y=*/100);
+  response_sender_.Clear();
+
+  service.HandleAoiEvent(player, npc, mir2::game::map::AOIEventType::kEnter, 120, 100);
+
+  const auto responses = response_sender_.GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 1u);
+  EXPECT_EQ(responses[0].client_id, 9302u);
+  EXPECT_EQ(responses[0].msg_id,
+            static_cast<uint16_t>(mir2::common::MsgId::kEntityEnter));
+}
+
+TEST_F(WorldSyncBroadcastServiceTest, AoiLeaveSendsEntityLeaveForNpc) {
+  WorldSyncBroadcastService service(response_sender_, event_bus_, role_store_, &scene_manager_);
+  const auto player = AddPlayerEntity(/*role_id=*/3003);
+  const auto npc = AddNpcEntity(/*npc_id=*/7003, /*map_id=*/1, /*x=*/110, /*y=*/100);
+  role_store_.BindClientRole(/*client_id=*/9303, /*player_id=*/3003);
+  AddEntityToMap(player, /*map_id=*/1, /*x=*/100, /*y=*/100);
+  AddEntityToMap(npc, /*map_id=*/1, /*x=*/110, /*y=*/100);
+  response_sender_.Clear();
+
+  service.HandleAoiEvent(player, npc, mir2::game::map::AOIEventType::kLeave, 140, 100);
+
+  const auto responses = response_sender_.GetCapturedResponses();
+  ASSERT_EQ(responses.size(), 1u);
+  EXPECT_EQ(responses[0].client_id, 9303u);
+  EXPECT_EQ(responses[0].msg_id,
+            static_cast<uint16_t>(mir2::common::MsgId::kEntityLeave));
+}
+
+TEST_F(WorldSyncBroadcastServiceTest, DifferentMapNpcDoesNotAppearInStateSync) {
+  WorldSyncBroadcastService service(response_sender_, event_bus_, role_store_, &scene_manager_);
+  const auto player = AddPlayerEntity(/*role_id=*/3004);
+  const auto npc = AddNpcEntity(/*npc_id=*/7004, /*map_id=*/2, /*x=*/100, /*y=*/100);
+  role_store_.BindClientRole(/*client_id=*/9304, /*player_id=*/3004);
+  AddEntityToMap(player, /*map_id=*/1, /*x=*/100, /*y=*/100);
+  AddEntityToMap(npc, /*map_id=*/2, /*x=*/100, /*y=*/100);
+
+  ASSERT_TRUE(service.RequestImmediateStateSyncForRole(/*role_id=*/3004));
+
+  const auto responses = response_sender_.GetCapturedResponses();
+  const auto it = std::find_if(
+      responses.begin(), responses.end(), [](const CapturedResponse& response) {
+        return response.msg_id ==
+               static_cast<uint16_t>(mir2::common::MsgId::kStateSync);
+      });
+  ASSERT_NE(it, responses.end());
+
+  flatbuffers::Verifier verifier(it->payload.data(), it->payload.size());
+  ASSERT_TRUE(verifier.VerifyBuffer<mir2::proto::StateSync>(nullptr));
+  const auto* payload = flatbuffers::GetRoot<mir2::proto::StateSync>(it->payload.data());
+  ASSERT_NE(payload, nullptr);
+  ASSERT_NE(payload->entities(), nullptr);
+  EXPECT_EQ(payload->entities()->size(), 0u);
 }
 
 }  // namespace

@@ -35,7 +35,8 @@ public:
     ~MonsterSpawnSystem();
 
     void Update(entt::registry& registry, float dt);
-    void LoadSpawnConfig(const std::string& config_path);
+    void ReplaceAllSpawnPoints(
+        std::unordered_map<uint32_t, game::entity::MonsterSpawnPoint> spawn_points);
     void TriggerDynamicSpawn(const game::entity::DynamicSpawnEvent& event);
     void OnMonsterDeath(uint32_t spawn_point_id);
 

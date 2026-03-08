@@ -78,8 +78,7 @@ set(MIR2_SERVER_SOURCES
     core/timer.cc
     core/utils.cc
     config/config_manager.cc
-    config/map_config_loader.cc
-    config/skill_config_loader.cc
+    config/runtime_config.cc
     data/item_template.cc
     log/logger.cc
     security/anti_cheat.cc
@@ -103,6 +102,7 @@ set(MIR2_SERVER_SOURCES
     game/guild/guild_manager.cc
     game/guild/guild_manager_adapter.cc
     game/item/item_effect_processor.cc
+    logic/services/npc_shop_response_service.cc
     storage_engine/backends/common/account_storage_codec.cc
     ecs/persistence/character_codec.cc
     ecs/world.cc

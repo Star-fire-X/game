@@ -72,6 +72,7 @@ set(LEGEND2_TEST_SOURCES
     server/logic/handlers/effect_broadcast_service_test.cc
     server/logic/services/client_registry_test.cc  # P0 High-Critical: Client tracking
     server/logic/services/merchant_service_test.cc
+    server/logic/services/npc_shop_response_service_test.cc
     server/logic/services/player_presence_service_test.cc
     server/logic/services/ecs_inventory_service_test.cc
     server/logic/services/world_sync_broadcast_service_test.cc
@@ -153,8 +154,8 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/trade_system_test.cc
     server/ecs/storage_system_test.cc
     server/character_entity_manager_test.cc
-    server/config/map_config_loader_test.cpp
     server/config/config_manager_storage_engine_test.cc
+    server/config/runtime_config_test.cc
     server/data/item_template_test.cc
     server/event/timed_event_scheduler_test.cpp
     server/event/global_event_manager_test.cpp
@@ -175,6 +176,7 @@ set(LEGEND2_TEST_SOURCES
     server/ecs/movement_system_test.cpp
     server/ecs/combat_system_test.cpp
     server/ecs/effect_system_test.cc
+    server/ecs/skill_registry_runtime_test.cc
     server/ecs/skill_system_test.cc
     server/ecs/level_up_system_test.cpp
     server/ecs/growth_formulas_test.cpp
@@ -417,6 +419,55 @@ target_include_directories(storage_engine_focus_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/tests/server
 )
 
+add_executable(runtime_config_focus_tests
+    server/config/runtime_config_test.cc
+    server/data/item_template_test.cc
+    server/ecs/skill_registry_runtime_test.cc
+)
+
+target_link_libraries(runtime_config_focus_tests PRIVATE
+    mir2_server_lib
+    GTest::gtest_main
+)
+
+target_include_directories(runtime_config_focus_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server
+    ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/server
+)
+
+add_executable(logic_server_focus_tests
+    server/logic/logic_server_test.cc
+)
+
+target_link_libraries(logic_server_focus_tests PRIVATE
+    mir2_server_lib
+    mir2_storage_engine
+    GTest::gtest_main
+    GTest::gmock
+)
+
+if(LEGEND2_BUILD_DB AND TARGET mir2_db_optional)
+    target_link_libraries(logic_server_focus_tests PRIVATE mir2_db_optional)
+endif()
+
+if(LEGEND2_BUILD_DB AND TARGET libpqxx::pqxx)
+    target_link_libraries(logic_server_focus_tests PRIVATE libpqxx::pqxx)
+endif()
+
+if(TARGET SDL2::SDL2)
+    target_link_libraries(logic_server_focus_tests PRIVATE SDL2::SDL2)
+endif()
+
+target_include_directories(logic_server_focus_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server
+    ${CMAKE_SOURCE_DIR}/src/client
+    ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/server
+)
+
 add_executable(character_handler_test
     server/logic/character_handler_test.cc
     server/logic/mock_response_sender.cc
@@ -490,6 +541,8 @@ set_target_properties(client_item_handler_test PROPERTIES
 include(GoogleTest)
 gtest_discover_tests(legend2_tests)
 gtest_discover_tests(storage_engine_focus_tests)
+gtest_discover_tests(runtime_config_focus_tests)
+gtest_discover_tests(logic_server_focus_tests)
 gtest_discover_tests(routing_table_tests)
 gtest_discover_tests(client_skill_tests)
 gtest_discover_tests(client_item_handler_test)

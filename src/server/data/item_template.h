@@ -11,6 +11,10 @@
 #include <unordered_map>
 #include <optional>
 
+namespace mir2::config {
+struct ConfigData;
+}
+
 namespace mir2::data {
 
 /**
@@ -60,6 +64,9 @@ class ItemTemplateManager {
 
     /// Load templates from JSON file
     bool LoadFromJson(const std::string& path);
+
+    /// Load templates from runtime config snapshot
+    bool LoadFromConfigData(const mir2::config::ConfigData& config_data);
 
     /// Get template by ID (returns nullptr if not found)
     [[nodiscard]] const ItemTemplate* GetTemplate(uint32_t item_id) const;

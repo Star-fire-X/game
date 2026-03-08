@@ -10,7 +10,10 @@
 #include "common/enums.h"
 #include "common/protocol/npc_message_codec.h"
 #include "ecs/components/character_components.h"
+#include "ecs/world.h"
+#include "game/npc/npc_interaction_handler.h"
 #include "game/npc/npc_manager.h"
+#include "game/npc/npc_script_engine.h"
 #include "log/logger.h"
 #include "logic/response_sender.h"
 
@@ -321,6 +324,15 @@ Task<void> NpcCommandHandler::HandleNpcInteract(HandlerContext ctx,
         ctx.client_id,
         static_cast<uint16_t>(mir2::common::MsgId::kNpcInteractRsp),
         std::move(rsp));
+
+    if (ctx.world != nullptr) {
+      if (auto npc = game::npc::NpcManager::Instance().GetNpc(npc_id)) {
+        game::npc::NpcScriptEngine script_engine;
+        game::npc::NpcInteractionHandler interaction_handler(
+            ctx.world->GetEventBus(), script_engine);
+        (void)interaction_handler.HandleInteraction(ctx.entity, *npc, "TALK");
+      }
+    }
 
     SYSLOG_DEBUG("NpcCommandHandler interact client_id={} npc_id={}",
                  ctx.client_id, npc_id);

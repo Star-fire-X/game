@@ -45,12 +45,17 @@ class EffectSystem;
 class SkillSystem;
 class MonsterAISystem;
 class MonsterDropSystem;
+class MonsterSpawnSystem;
 class TeleportSystem;
 }  // namespace mir2::ecs
 
 namespace mir2::storage_engine {
 class StorageEngine;
 }  // namespace mir2::storage_engine
+
+namespace mir2::config {
+class ConfigStore;
+}  // namespace mir2::config
 
 namespace mir2::db {
 class PgConnectionPool;
@@ -68,6 +73,10 @@ class IWorldMapPort;
 }  // namespace mir2::game::ports
 
 namespace mir2::logic {
+
+namespace test_support {
+class LogicServerTestAccess;
+}  // namespace test_support
 
 namespace events {
 class HotEventPipeline;
@@ -93,6 +102,8 @@ class PlayerPresenceService;
 class EcsCombatService;
 class EcsInventoryService;
 class WorldSyncBroadcastService;
+class MerchantService;
+class NpcShopResponseService;
 class ItemHandler;
 class GuildHandler;
 class TradeHandler;
@@ -121,6 +132,9 @@ struct WorldSystemBundle {
   std::unique_ptr<ecs::SkillSystem> skill_system;
   std::unique_ptr<ecs::MonsterAISystem> monster_ai_system;
   std::unique_ptr<ecs::MonsterDropSystem> monster_drop_system;
+  std::unique_ptr<ecs::MonsterSpawnSystem> monster_spawn_system;
+  std::unique_ptr<MerchantService> merchant_service;
+  std::unique_ptr<NpcShopResponseService> npc_shop_response_service;
   std::unique_ptr<WorldSyncBroadcastService> world_sync_broadcast_service;
   ecs::TeleportSystem* teleport_system = nullptr;
 };
@@ -143,18 +157,21 @@ class LogicServer {
   void Shutdown();
 
  private:
+  friend class test_support::LogicServerTestAccess;
   void StartTick();
   void ScheduleNextTick();
   void OnTick(const asio::error_code& ec);
   void MaybeScanHungCoroutines(std::chrono::steady_clock::time_point now);
   void DumpActiveCoroutines(const char* reason) const;
   bool ReloadStorageRuntimeConfig();
+  bool LoadGameplayRuntimeConfig();
   void RegisterSignalHandlers();
   void OnSignal(const asio::error_code& ec, int signal);
   void RequestStop();
   void Tick(float delta_time);
   uint32_t ResolveDefaultMapId() const;
   bool BootstrapMapRuntime(uint32_t default_map_id);
+  bool BootstrapNpcRuntime(uint32_t default_map_id);
   bool BindWorldMapContext(uint32_t map_id, ecs::World& world, bool require_map);
   WorldSystemBundle& EnsureWorldSystems(uint32_t map_id, ecs::World& world);
   void TickWorldSystems(ecs::World& world,
@@ -252,6 +269,7 @@ class LogicServer {
   std::unique_ptr<AuctionHandler> auction_handler_;
   std::unique_ptr<NpcCommandHandler> npc_command_handler_;
   std::unique_ptr<RankingService> ranking_service_;
+  std::function<void(uint64_t, uint16_t, const std::vector<uint8_t>&)> response_send_hook_;
   std::unique_ptr<game::map::AOIManager> chat_aoi_manager_;
   std::shared_ptr<db::PgConnectionPool> db_pool_;
   ecs::GuildSystem* guild_system_ = nullptr;
@@ -264,6 +282,7 @@ class LogicServer {
   std::unique_ptr<game::ports::IWorldMapPort> world_map_port_;
   std::unique_ptr<game::map::MapContextService> map_context_service_;
   std::unordered_map<uint32_t, std::unique_ptr<WorldSystemBundle>> world_systems_;
+  std::unique_ptr<config::ConfigStore> runtime_config_store_;
   std::string config_path_;
   std::unique_ptr<asio::steady_timer> tick_timer_;
   std::unique_ptr<asio::signal_set> signal_set_;
@@ -374,6 +393,36 @@ class LogicServer {
   mutable std::mutex gateway_mutex_;
   std::shared_ptr<network::TcpSession> gateway_session_;
 };
+
+namespace test_support {
+
+class LogicServerTestAccess {
+ public:
+  static game::map::GateManager& GateManager(LogicServer& server) {
+    return server.gate_manager_;
+  }
+
+  static const std::unordered_map<uint32_t, std::unique_ptr<WorldSystemBundle>>&
+  WorldSystems(const LogicServer& server) {
+    return server.world_systems_;
+  }
+
+  static RoleStore& RoleStoreRef(LogicServer& server) {
+    return *server.role_store_;
+  }
+
+  static game::map::SceneManager& SceneManager(LogicServer& server) {
+    return *server.scene_manager_;
+  }
+
+  static void SetResponseSendHook(
+      LogicServer& server,
+      std::function<void(uint64_t, uint16_t, const std::vector<uint8_t>&)> hook) {
+    server.response_send_hook_ = std::move(hook);
+  }
+};
+
+}  // namespace test_support
 
 }  // namespace mir2::logic
 
